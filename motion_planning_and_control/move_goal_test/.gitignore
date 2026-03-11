@@ -1,0 +1,11 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# VSCode
+.vscode/
+
+# Temporary files
+*.swp
+*.tmp

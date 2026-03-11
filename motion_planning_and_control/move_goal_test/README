@@ -1,0 +1,151 @@
+# move_goal_test
+
+Send a test `FollowJointTrajectory` goal to a UR3e controller action server from ROS 2.
+
+## Prerequisites
+
+- ROS 2 Humble
+- Universal Robots ROS 2 Driver installed and working
+- URSim UR3e available
+- Workspace contains this package under `src/`
+
+## 1. Build this package
+
+From your workspace root:
+
+```bash
+cd ~/ws_moveit2
+colcon build --packages-select move_goal_test
+source install/setup.bash
+```
+
+## 2. Start URSim (UR3e)
+
+In a new terminal:
+
+```bash
+ros2 run ur_client_library start_ursim.sh -m ur3e
+```
+
+Notes:
+
+- Keep this terminal running.
+- URSim is the robot target for the ROS driver.
+- In this setup, robot IP is `192.168.56.101`.
+
+## 3. Start UR ROS 2 driver + RViz
+
+In another terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ws_moveit2/install/setup.bash
+# With Sim
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
+# With UR3e
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.0.191 launch_rviz:=true
+```
+
+This provides:
+
+- ROS 2 control stack for UR3e
+- Action server:
+  `/scaled_joint_trajectory_controller/follow_joint_trajectory`
+
+Keep this terminal running.
+
+## 4. Run `move_goal_test`
+
+In a third terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ws_moveit2/install/setup.bash
+ros2 run move_goal_test move_goal_test_node
+```
+
+The node waits for the action server, sends a multi-point joint trajectory, then exits after the result.
+
+It now computes segment timing from joint distance and configured speed limits, and it prepends the
+current robot joint state as the first point to avoid abrupt jumps.
+It also densifies each segment into small joint steps and publishes a trajectory preview marker for RViz.
+
+## Optional: override action name
+
+If you want a different controller action:
+
+```bash
+ros2 run move_goal_test move_goal_test_node --ros-args -p action_name:=/scaled_joint_trajectory_controller/follow_joint_trajectory
+```
+
+## Optional: tune motion timing safety
+
+Default parameters are conservative. You can tune them:
+
+```bash
+ros2 run move_goal_test move_goal_test_node --ros-args \
+  -p max_joint_speed_rad_s:=0.5 \
+  -p speed_scaling:=0.7 \
+  -p max_joint_step_rad:=0.03 \
+  -p min_segment_duration_s:=0.2 \
+  -p initial_point_delay_s:=0.3
+```
+
+Notes:
+
+- `max_joint_speed_rad_s` is a joint-space limit (`rad/s`), not Cartesian `m/s`.
+- Effective planning speed is `max_joint_speed_rad_s * speed_scaling`.
+- Smaller `max_joint_step_rad` adds more intermediate points and smoother motion.
+- Larger `min_segment_duration_s` and `initial_point_delay_s` increase safety margin.
+
+## RViz trajectory preview
+
+The node publishes a `LINE_STRIP` marker on:
+
+- `/move_goal_test/trajectory_marker` (default)
+
+It is a **joint-space preview curve** where:
+
+- `x = time_from_start (s)`
+- `y = shoulder_pan_joint (rad)`
+- `z = shoulder_lift_joint (rad)`
+
+To view it in RViz:
+
+1. Add a `Marker` display.
+2. Set topic to `/move_goal_test/trajectory_marker`.
+3. Set fixed frame to match `trajectory_marker_frame` (default `base_link`).
+
+You can override marker settings:
+
+```bash
+ros2 run move_goal_test move_goal_test_node --ros-args \
+  -p trajectory_marker_topic:=/move_goal_test/trajectory_marker \
+  -p trajectory_marker_frame:=base_link
+```
+
+## Quick checks if it does not move
+
+Check that the action server exists:
+
+```bash
+ros2 action list | grep follow_joint_trajectory
+```
+
+Check controller state:
+
+```bash
+ros2 control list_controllers
+```
+
+You should see `scaled_joint_trajectory_controller` in an `active` state.
+
+
+if teh controllers are not active 
+
+bash
+```
+ros2 control switch_controllers \
+  --start scaled_joint_trajectory_controller \
+  --stop joint_trajectory_controller
+```
