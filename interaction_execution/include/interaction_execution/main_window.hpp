@@ -7,6 +7,7 @@
 
 class CameraView;
 class RvizSimView;
+class WordleView;
 
 namespace Ui
 {
@@ -28,4 +29,5 @@ private:
   rclcpp::Node::SharedPtr node_;
   CameraView * camera_view_{nullptr};
   RvizSimView * rviz_view_{nullptr};
+  WordleView * wordle_view_{nullptr};
 };

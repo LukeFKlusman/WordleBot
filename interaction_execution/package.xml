@@ -10,13 +10,19 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>ament_index_cpp</depend>
+  <depend>cv_bridge</depend>
   <depend>rclcpp</depend>
   <depend>rviz_common</depend>
   <depend>rviz_rendering</depend>
   <depend>rviz_default_plugins</depend>
+  <depend>sensor_msgs</depend>
   <depend>opencv</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ur_description</exec_depend>
+  <exec_depend>xacro</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

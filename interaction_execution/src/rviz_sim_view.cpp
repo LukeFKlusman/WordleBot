@@ -21,7 +21,7 @@ RvizSimView::RvizSimView(rclcpp::Node::SharedPtr node, QWidget* parent)
 
   exec_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
   exec_->add_node(node_);
-  rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>("interaction_execution_rviz");
+  rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>("my_demo_gui_rviz");
 
   setupRviz();
   if (render_widget_ != nullptr) {
@@ -92,6 +92,30 @@ void RvizSimView::setupRviz()
   }
 
   viz_manager_->load(viz_config);
+
+  if (auto * root = viz_manager_->getRootDisplayGroup()) {
+    for (int i = 0; i < root->numDisplays(); ++i) {
+      auto * display = root->getDisplayAt(i);
+      if (display == nullptr || display->getClassId() != "rviz_default_plugins/RobotModel") {
+        continue;
+      }
+
+      if (auto * description_source = display->subProp("Description Source")) {
+        description_source->setValue("Topic");
+      }
+      if (auto * description_topic = display->subProp("Description Topic")) {
+        if (auto * topic_value = description_topic->subProp("Value")) {
+          topic_value->setValue("/robot_description");
+        }
+        if (auto * durability = description_topic->subProp("Durability Policy")) {
+          durability->setValue("Transient Local");
+        }
+        if (auto * reliability = description_topic->subProp("Reliability Policy")) {
+          reliability->setValue("Reliable");
+        }
+      }
+    }
+  }
 }
 
 void RvizSimView::addDisplays()
@@ -102,7 +126,22 @@ void RvizSimView::addDisplays()
 
   auto * robot =
     viz_manager_->createDisplay("rviz_default_plugins/RobotModel", "Robot Model", true);
-  robot->subProp("Robot Description")->setValue("/robot_description");
+  if (auto * description_source = robot->subProp("Description Source")) {
+    description_source->setValue("Topic");
+  }
+  if (auto * description_topic = robot->subProp("Description Topic")) {
+    if (auto * topic_value = description_topic->subProp("Value")) {
+      topic_value->setValue("/robot_description");
+    }
+    if (auto * durability = description_topic->subProp("Durability Policy")) {
+      durability->setValue("Transient Local");
+    }
+    if (auto * reliability = description_topic->subProp("Reliability Policy")) {
+      reliability->setValue("Reliable");
+    }
+  } else if (auto * robot_description = robot->subProp("Robot Description")) {
+    robot_description->setValue("/robot_description");
+  }
   viz_manager_->createDisplay("rviz_default_plugins/Grid", "Grid", true);
   viz_manager_->setFixedFrame("base_link");
 }

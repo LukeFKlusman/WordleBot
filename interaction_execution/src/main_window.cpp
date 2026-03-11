@@ -2,6 +2,7 @@
 
 #include "interaction_execution/camera_view.hpp"
 #include "interaction_execution/rviz_sim_view.hpp"
+#include "interaction_execution/wordle_view.hpp"
 #include "ui_rs2_concept.h"
 
 #include <QVBoxLayout>
@@ -25,6 +26,11 @@ void MainWindow::setupTabs()
 
   auto * camera_layout = new QVBoxLayout(ui_->tab_2);
   camera_layout->setContentsMargins(0, 0, 0, 0);
-  camera_view_ = new CameraView(ui_->tab_2);
+  camera_view_ = new CameraView(node_, ui_->tab_2);
   camera_layout->addWidget(camera_view_);
+
+  auto * wordle_layout = new QVBoxLayout(ui_->wordle);
+  wordle_layout->setContentsMargins(0, 0, 0, 0);
+  wordle_view_ = new WordleView(ui_->wordle);
+  wordle_layout->addWidget(wordle_view_);
 }

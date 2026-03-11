@@ -15,8 +15,9 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
-from PySide6.QtWidgets import (QApplication, QGridLayout, QMainWindow, QPushButton,
-    QSizePolicy, QTabWidget, QWidget)
+from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout, QMainWindow,
+    QPushButton, QSizePolicy, QTabWidget, QVBoxLayout,
+    QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
@@ -38,9 +39,13 @@ class Ui_MainWindow(object):
         MainWindow.setFont(font)
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
+        self.horizontalLayout = QHBoxLayout(self.centralwidget)
+        self.horizontalLayout.setSpacing(12)
+        self.horizontalLayout.setObjectName(u"horizontalLayout")
+        self.horizontalLayout.setContentsMargins(8, 8, 8, 8)
         self.mainTab = QTabWidget(self.centralwidget)
         self.mainTab.setObjectName(u"mainTab")
-        self.mainTab.setGeometry(QRect(0, 0, 721, 641))
+        self.mainTab.setMinimumSize(QSize(680, 0))
         self.mainTab.setStyleSheet(u"QTabBar {\n"
 "    background: #2e2e2e;\n"
 "}\n"
@@ -62,38 +67,54 @@ class Ui_MainWindow(object):
         self.tab_3 = QWidget()
         self.tab_3.setObjectName(u"tab_3")
         self.mainTab.addTab(self.tab_3, "")
+
+        self.horizontalLayout.addWidget(self.mainTab)
+
+        self.wordleColumnLayout = QVBoxLayout()
+        self.wordleColumnLayout.setSpacing(12)
+        self.wordleColumnLayout.setObjectName(u"wordleColumnLayout")
         self.wordle = QWidget(self.centralwidget)
         self.wordle.setObjectName(u"wordle")
-        self.wordle.setGeometry(QRect(720, 0, 1024, 640))
-        self.wordle.setMinimumSize(QSize(1024, 640))
+        self.wordle.setMinimumSize(QSize(280, 0))
         self.wordle.setStyleSheet(u"border: 1px solid black")
-        self.layoutWidget = QWidget(self.centralwidget)
-        self.layoutWidget.setObjectName(u"layoutWidget")
-        self.layoutWidget.setGeometry(QRect(720, 490, 301, 141))
-        self.gridLayout = QGridLayout(self.layoutWidget)
+
+        self.wordleColumnLayout.addWidget(self.wordle)
+
+        self.gridLayout = QGridLayout()
         self.gridLayout.setObjectName(u"gridLayout")
-        self.gridLayout.setContentsMargins(0, 0, 0, 0)
-        self.pushButton = QPushButton(self.layoutWidget)
+        self.pushButton = QPushButton(self.centralwidget)
         self.pushButton.setObjectName(u"pushButton")
 
         self.gridLayout.addWidget(self.pushButton, 0, 0, 1, 1)
 
-        self.pushButton_2 = QPushButton(self.layoutWidget)
+        self.pushButton_2 = QPushButton(self.centralwidget)
         self.pushButton_2.setObjectName(u"pushButton_2")
 
         self.gridLayout.addWidget(self.pushButton_2, 1, 0, 1, 1)
 
-        self.pushButton_3 = QPushButton(self.layoutWidget)
+        self.pushButton_3 = QPushButton(self.centralwidget)
         self.pushButton_3.setObjectName(u"pushButton_3")
 
         self.gridLayout.addWidget(self.pushButton_3, 1, 1, 1, 1)
 
-        self.pushButton_4 = QPushButton(self.layoutWidget)
+        self.pushButton_4 = QPushButton(self.centralwidget)
         self.pushButton_4.setObjectName(u"pushButton_4")
 
         self.gridLayout.addWidget(self.pushButton_4, 0, 1, 1, 1)
 
+
+        self.wordleColumnLayout.addLayout(self.gridLayout)
+
+
+        self.horizontalLayout.addLayout(self.wordleColumnLayout)
+
         MainWindow.setCentralWidget(self.centralwidget)
+        self.mainTab.raise_()
+        self.wordle.raise_()
+        self.pushButton.raise_()
+        self.pushButton_2.raise_()
+        self.pushButton_3.raise_()
+        self.pushButton_4.raise_()
 
         self.retranslateUi(MainWindow)
 
