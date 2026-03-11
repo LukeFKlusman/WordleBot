@@ -1,0 +1,7 @@
+NEED TO DO FOR GUI:
+- Implement RViz view (DO THIS SHIT ASAP LIKE ROCKY BRAH)
+- Get buttons to do stuff, start working on topics it subscribes to, blah blah blah
+- Get widgets to stretch properly with window, or just make window non-resizeable (LAST RESORT ONLY)
+- Change camera_poc to use RealSense D435i camera
+- Figure out how to make a thing that actually looks like NYT wordle, probably code it too
+- FIGHT AND WIN
