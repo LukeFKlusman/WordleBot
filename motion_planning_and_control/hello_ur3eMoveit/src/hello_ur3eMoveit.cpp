@@ -1,9 +1,12 @@
 #include <memory>
-
+#include <thread>
 #include <rclcpp/rclcpp.hpp>
+
 #include <tf2/LinearMath/Quaternion.h>
+
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
 
 
 int main(int argc, char ** argv)
@@ -40,12 +43,9 @@ int main(int argc, char ** argv)
                                             );
 
   // Construct and initialize MoveItVisualTools
-  auto moveit_visual_tools = moveit_visual_tools::MoveItVisualTools{
-    node, 
-    "ur_base_link",  
-    rviz_visual_tools::RVIZ_MARKER_TOPIC,
-    move_group_interface.getRobotModel()
-  };
+  auto moveit_visual_tools = 
+    moveit_visual_tools::MoveItVisualTools{ node, "ur_base_link", rviz_visual_tools::RVIZ_MARKER_TOPIC,
+                                            move_group_interface.getRobotModel()};
   moveit_visual_tools.deleteAllMarkers();
   moveit_visual_tools.loadRemoteControl();
 
@@ -81,9 +81,9 @@ int main(int argc, char ** argv)
     msg.orientation.y = quat.y();
     msg.orientation.z = quat.z();
     msg.orientation.w = quat.w();
-    msg.position.x = 0.4;
-    msg.position.y = -0.13;
-    msg.position.z = 0.1;
+    msg.position.x = 0.335;
+    msg.position.y = 0.3;
+    msg.position.z = 0.15;
     return msg;
   }();
   move_group_interface.setPoseTarget(target_pose);
@@ -99,6 +99,39 @@ int main(int argc, char ** argv)
                                               target_pose.orientation.z,
                                               target_pose.orientation.w
                                             );
+
+  // Create collision object for the robot to avoid
+  auto const collision_object = [frame_id =
+                                  move_group_interface.getPlanningFrame()] {
+    moveit_msgs::msg::CollisionObject collision_object;
+    collision_object.header.frame_id = frame_id;
+    collision_object.id = "box1";
+    shape_msgs::msg::SolidPrimitive primitive;
+
+    // Define the size of the box in meters
+    primitive.type = primitive.BOX;
+    primitive.dimensions.resize(3);
+    primitive.dimensions[primitive.BOX_X] = 0.5;
+    primitive.dimensions[primitive.BOX_Y] = 0.05;
+    primitive.dimensions[primitive.BOX_Z] = 0.25;
+
+    // Define the pose of the box (relative to the frame_id)
+    geometry_msgs::msg::Pose box_pose;
+    box_pose.orientation.w = 1.0;
+    box_pose.position.x = 0.35;
+    box_pose.position.y = 0.1;
+    box_pose.position.z = 0.1;
+
+    collision_object.primitives.push_back(primitive);
+    collision_object.primitive_poses.push_back(box_pose);
+    collision_object.operation = collision_object.ADD;
+
+    return collision_object;
+  }();
+
+  // Add the collision object to the scene
+  moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+  planning_scene_interface.applyCollisionObject(collision_object);
 
   // Create a plan to that target pose
   prompt("Press 'Next' in the RvizVisualToolsGui window to plan");
@@ -118,7 +151,9 @@ int main(int argc, char ** argv)
     draw_title("Executing");
     moveit_visual_tools.trigger();
     move_group_interface.execute(plan);
-  } else {
+  } 
+  else 
+  {
     draw_title("Planning Failed!");
     moveit_visual_tools.trigger();
     RCLCPP_ERROR(logger, "Planing failed!");
