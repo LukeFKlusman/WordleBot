@@ -33,7 +33,9 @@ int main(int argc, char ** argv)
   // Get the current end-effector pose
   auto const end_effector_pose = move_group_interface.getCurrentPose();
 
-  RCLCPP_INFO(logger, "Current end-effector pose:\n x: %f, y: %f, z: %f\n r: %f, p: %f, y: %f, w: %f", end_effector_pose.pose.position.x, 
+  RCLCPP_INFO(logger, "Current end-effector pose:\n x: %f, y: %f, z: %f\n r: %f, p: %f, y: %f, w: %f", 
+                                              
+    end_effector_pose.pose.position.x, 
                                               end_effector_pose.pose.position.y, 
                                               end_effector_pose.pose.position.z, 
                                               end_effector_pose.pose.orientation.x, 
