@@ -28,11 +28,18 @@ public:
   // More predictable path shape than free-space planning; returns false if < 90% of path planned.
   bool moveToTargetCartesian(const geometry_msgs::msg::Pose & target, double lift_height = 0.15);
 
-  // Add a placeholder collision box to the planning scene.
+  // Add floor collision and attach a sensor guard cylinder to the end effector.
   void setupCollisionScene();
 
-  // Remove all collision objects added by this controller.
+  // Remove all collision objects and detach the sensor guard.
   void clearCollisionScene();
+
+  // Attach a protective cylinder collision shape to the tool0 end-effector link.
+  // The cylinder moves rigidly with the robot so the planner avoids it.
+  void attachSensorCollisionObject();
+
+  // Detach the sensor guard cylinder from tool0.
+  void detachSensorCollisionObject();
 
   // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
   static geometry_msgs::msg::Pose buildPose(double x, double y, double z,

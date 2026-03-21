@@ -1,8 +1,10 @@
 #include "wordleBot_control/wordle_bot_controller.hpp"
 
+#include <chrono>
 #include <cmath>
 
 #include <geometry_msgs/msg/pose.hpp>
+#include <moveit_msgs/msg/attached_collision_object.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/joint_constraint.hpp>
@@ -24,6 +26,14 @@ WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
   // Give OMPL more time and attempts to find a better path
   move_group_.setPlanningTime(10.0);
   move_group_.setNumPlanningAttempts(5);
+
+  // DEBUG: log all link names in the robot model so we can verify touch_links names
+  RCLCPP_INFO(LOGGER, "Robot model link names:");
+  for (const auto & link : move_group_.getRobotModel()->getLinkModelNames()) {
+    RCLCPP_INFO(LOGGER, "  link: %s", link.c_str());
+  }
+  RCLCPP_INFO(LOGGER, "End effector link: %s", move_group_.getEndEffectorLink().c_str());
+  RCLCPP_INFO(LOGGER, "Planning frame: %s", move_group_.getPlanningFrame().c_str());
 }
 
 WordleBotController::~WordleBotController()
@@ -60,8 +70,12 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
 
   if (success) {
     visualisePlan(&plan, "Executing", "Press 'Next' in the RvizVisualToolsGui window to execute");
-    move_group_.execute(plan);
-    RCLCPP_INFO(LOGGER, "Motion executed successfully.");
+    const auto exec_result = move_group_.execute(plan);
+    if (exec_result == moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_INFO(LOGGER, "Motion executed successfully.");
+    } else {
+      RCLCPP_ERROR(LOGGER, "Execution FAILED with error code: %d", exec_result.val);
+    }
   }
   else
   {
@@ -157,14 +171,67 @@ void WordleBotController::setupCollisionScene()
   floor.operation = moveit_msgs::msg::CollisionObject::ADD;
 
   planning_scene_.applyCollisionObject(floor);
-  RCLCPP_INFO(LOGGER, "Collision scene set up: box1 and floor added.");
+
+  attachSensorCollisionObject();
+  RCLCPP_INFO(LOGGER, "Collision scene set up: floor added, sensor guard attached.");
 }
 
 
 void WordleBotController::clearCollisionScene()
 {
+  detachSensorCollisionObject();
   planning_scene_.removeCollisionObjects({"box1", "floor"});
   RCLCPP_INFO(LOGGER, "Collision scene cleared.");
+}
+
+
+void WordleBotController::attachSensorCollisionObject()
+{
+  moveit_msgs::msg::AttachedCollisionObject attached_object;
+  // Attach to tool0 — the last active joint link on the UR3e.
+  // No physical tool is mounted, so there is no tool0 geometry to clear.
+  attached_object.link_name = "tool0";
+  attached_object.object.id = "sensor_guard";
+  attached_object.object.header.frame_id = "tool0";
+  attached_object.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+  shape_msgs::msg::SolidPrimitive cylinder;
+  cylinder.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+  cylinder.dimensions = {0.03, 0.06};  // [height, radius] in metres
+
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = 0.0;
+  pose.position.y = 0.0;
+  pose.position.z = -0.015;  // slight offset to avoid collision with the end-effector link itself
+  pose.orientation.w = 1.0;
+
+  attached_object.object.primitives.push_back(cylinder);
+  attached_object.object.primitive_poses.push_back(pose);
+
+  // Only allow the links that physically surround tool0 to touch the cylinder.
+  // All other links (forearm, upper_arm, shoulder, etc.) remain real collision
+  // targets — the planner will prevent them from entering the sensor guard zone.
+  attached_object.touch_links = {
+    "wrist_3_link", "flange", "tool0", "ft_frame"
+  };
+
+  planning_scene_.applyAttachedCollisionObject(attached_object);
+
+  // Give the move_group server time to propagate the scene update before planning begins.
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  RCLCPP_INFO(LOGGER, "Sensor guard attached to tool0");
+}
+
+
+void WordleBotController::detachSensorCollisionObject()
+{
+  moveit_msgs::msg::AttachedCollisionObject detach;
+  detach.link_name = "tool0";
+  detach.object.id = "sensor_guard";
+  detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+  planning_scene_.applyAttachedCollisionObject(detach);
+  RCLCPP_INFO(LOGGER, "Sensor guard collision cylinder detached from tool0.");
 }
 
 
