@@ -25,6 +25,8 @@ source install/setup.bash
 
 ```bash
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
+# Or if using real Hardware
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
 ```
 
 ### 3. Launch MoveIt + RViz (Terminal 1)

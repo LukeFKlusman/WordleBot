@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -19,8 +20,13 @@ public:
   explicit WordleBotController(rclcpp::Node::SharedPtr node);
   ~WordleBotController();
 
-  // Move the end-effector to the specified target pose. Returns true if successful.
+  // Move the end-effector to the specified target pose using free-space OMPL planning.
+  // Applies floor collision, shoulder joint constraint, and syncs robot state before planning.
   bool moveToTarget(const geometry_msgs::msg::Pose & target);
+
+  // Move to target via a Cartesian waypoint path: lift up → translate → descend.
+  // More predictable path shape than free-space planning; returns false if < 90% of path planned.
+  bool moveToTargetCartesian(const geometry_msgs::msg::Pose & target, double lift_height = 0.15);
 
   // Add a placeholder collision box to the planning scene.
   void setupCollisionScene();
@@ -29,11 +35,14 @@ public:
   void clearCollisionScene();
 
   // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
-  static geometry_msgs::msg::Pose buildPose(
-    double x, double y, double z,
-    double roll, double pitch, double yaw);
+  static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
+                                            double roll, double pitch, double yaw);
 
 private:
+  void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
+                     const std::string & title,
+                     const std::string & prompt = "");
+
   rclcpp::Node::SharedPtr node_;
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters
   moveit::planning_interface::MoveGroupInterface move_group_;
