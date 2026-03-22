@@ -3,6 +3,12 @@
 #include <chrono>
 #include <cmath>
 
+#include <algorithm>
+#include <limits>
+#include <vector>
+
+#include <angles/angles.h>
+
 #include <geometry_msgs/msg/pose.hpp>
 #include <moveit_msgs/msg/attached_collision_object.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
@@ -40,10 +46,211 @@ WordleBotController::~WordleBotController()
 {
 }
 
+namespace
+{
+constexpr char kPlanningGroup[] = "ur_manipulator";
+
+double jointDistance(const moveit::core::JointModel * joint_model, double from, double to)
+{
+  if (joint_model->getType() == moveit::core::JointModel::REVOLUTE) {
+    return std::abs(angles::shortest_angular_distance(from, to));
+  }
+
+  return std::abs(to - from);
+}
+
+double configurationDistance(const moveit::core::JointModelGroup * joint_model_group,
+                             const std::vector<double> & from,
+                             const std::vector<double> & to)
+{
+  const auto & joint_models = joint_model_group->getActiveJointModels();
+  double total_distance = 0.0;
+
+  for (std::size_t i = 0; i < joint_models.size() && i < from.size() && i < to.size(); ++i) {
+    total_distance += jointDistance(joint_models[i], from[i], to[i]);
+  }
+
+  return total_distance;
+}
+
+int jointNameIndex(const std::vector<std::string> & names, const std::string & joint_name)
+{
+  const auto it = std::find(names.begin(), names.end(), joint_name);
+  if (it == names.end()) {
+    return -1;
+  }
+
+  return static_cast<int>(std::distance(names.begin(), it));
+}
+}  // namespace
+
+std::vector<double> WordleBotController::computeBestIK(const moveit::core::RobotStatePtr & current_state,
+                                                       const geometry_msgs::msg::Pose & target_pose)
+{
+  const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
+  if (joint_model_group == nullptr || current_state == nullptr) {
+    return {};
+  }
+
+  std::vector<double> current_joint_values;
+  current_state->copyJointGroupPositions(joint_model_group, current_joint_values);
+
+  std::vector<double> best_joint_values;
+  double best_cost = std::numeric_limits<double>::infinity();
+
+  for (int attempt = 0; attempt < 15; ++attempt) {
+    moveit::core::RobotState ik_state(*current_state);
+    ik_state.setToRandomPositions(joint_model_group);
+
+    if (!ik_state.setFromIK(joint_model_group, target_pose, 0.1)) {
+      continue;
+    }
+
+    std::vector<double> candidate_joint_values;
+    ik_state.copyJointGroupPositions(joint_model_group, candidate_joint_values);
+
+    const double candidate_cost = configurationDistance(
+      joint_model_group, current_joint_values, candidate_joint_values);
+
+    if (candidate_cost < best_cost) {
+      best_cost = candidate_cost;
+      best_joint_values = candidate_joint_values;
+    }
+  }
+
+  return best_joint_values;
+}
+
+std::vector<moveit::planning_interface::MoveGroupInterface::Plan>WordleBotController::generateCandidatePlans(int num_attempts)
+{
+  std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
+  plans.reserve(static_cast<std::size_t>(std::max(num_attempts, 0)));
+
+  for (int attempt = 0; attempt < num_attempts; ++attempt) {
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    if (static_cast<bool>(move_group_.plan(plan))) {
+      plans.push_back(plan);
+    }
+  }
+
+  return plans;
+}
+
+moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::selectBestPlan(const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans,
+                                                                                         const std::vector<double> & q_start,
+                                                                                         const std::vector<double> & q_goal)
+{
+  moveit::planning_interface::MoveGroupInterface::Plan best_plan;
+  moveit::planning_interface::MoveGroupInterface::Plan fallback_plan;
+  double best_cost = std::numeric_limits<double>::infinity();
+  double fallback_cost = std::numeric_limits<double>::infinity();
+
+  const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
+  if (joint_model_group == nullptr) {
+    return best_plan;
+  }
+
+  const auto & variable_names = joint_model_group->getVariableNames();
+  const auto & joint_models = joint_model_group->getActiveJointModels();
+  const double direct_distance = configurationDistance(joint_model_group, q_start, q_goal);
+  const int base_joint_index = jointNameIndex(variable_names, "shoulder_pan_joint");
+  const int wrist_joint_index = jointNameIndex(variable_names, "wrist_3_joint");
+
+  for (const auto & plan : plans) {
+    const auto & trajectory = plan.trajectory_.joint_trajectory;
+    const auto & points = trajectory.points;
+    if (points.empty()) {
+      continue;
+    }
+
+    std::vector<int> trajectory_indices;
+    trajectory_indices.reserve(variable_names.size());
+    bool missing_joint = false;
+
+    for (const auto & variable_name : variable_names) {
+      const int index = jointNameIndex(trajectory.joint_names, variable_name);
+      if (index < 0) {
+        missing_joint = true;
+        break;
+      }
+      trajectory_indices.push_back(index);
+    }
+
+    if (missing_joint) {
+      continue;
+    }
+
+    double total_path_length = 0.0;
+    double max_joint_movement = 0.0;
+    double base_rotation = 0.0;
+    double wrist_rotation = 0.0;
+
+    for (std::size_t point_index = 0; point_index < points.size(); ++point_index) {
+      const auto & point = points[point_index];
+
+      for (std::size_t joint_index = 0; joint_index < joint_models.size(); ++joint_index) {
+        const double point_position = point.positions[trajectory_indices[joint_index]];
+        const double movement_from_start = jointDistance(
+          joint_models[joint_index], q_start[joint_index], point_position);
+        max_joint_movement = std::max(max_joint_movement, movement_from_start);
+      }
+
+      if (point_index == 0) {
+        continue;
+      }
+
+      const auto & previous_point = points[point_index - 1];
+      double segment_length = 0.0;
+
+      for (std::size_t joint_index = 0; joint_index < joint_models.size(); ++joint_index) {
+        const double previous_position = previous_point.positions[trajectory_indices[joint_index]];
+        const double current_position = point.positions[trajectory_indices[joint_index]];
+        const double delta = jointDistance(joint_models[joint_index], previous_position, current_position);
+        segment_length += delta;
+
+        if (static_cast<int>(joint_index) == base_joint_index) {
+          base_rotation += delta;
+        }
+        if (static_cast<int>(joint_index) == wrist_joint_index) {
+          wrist_rotation += delta;
+        }
+      }
+
+      total_path_length += segment_length;
+    }
+
+    const double plan_cost =
+      (1.0 * total_path_length) +
+      (0.5 * max_joint_movement) +
+      (0.75 * base_rotation) +
+      (0.25 * wrist_rotation);
+
+    if (plan_cost < fallback_cost) {
+      fallback_cost = plan_cost;
+      fallback_plan = plan;
+    }
+
+    const bool exceeds_path_ratio = direct_distance > 1e-6 && total_path_length > (2.0 * direct_distance);
+    const bool excessive_base_rotation = base_rotation > M_PI;
+    if (exceeds_path_ratio || excessive_base_rotation) {
+      continue;
+    }
+
+    if (plan_cost < best_cost) {
+      best_cost = plan_cost;
+      best_plan = plan;
+    }
+  }
+
+  if (best_cost < std::numeric_limits<double>::infinity()) {
+    return best_plan;
+  }
+
+  return fallback_plan;
+}
+
 bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
 {
-  move_group_.setPoseTarget(target);
-
   RCLCPP_INFO(LOGGER, "Target pose:\n  pos  x=%.3f y=%.3f z=%.3f\n  quat x=%.3f y=%.3f z=%.3f w=%.3f",
     target.position.x, target.position.y, target.position.z,
     target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
@@ -63,10 +270,36 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
 
   visualisePlan(nullptr, "Planning", "Press 'Next' in the RvizVisualToolsGui window to plan");
 
-  moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const bool success = static_cast<bool>(move_group_.plan(plan));
+  current_state = move_group_.getCurrentState();
+  const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
 
+  std::vector<double> q_start;
+  if (current_state != nullptr && joint_model_group != nullptr) {
+    current_state->copyJointGroupPositions(joint_model_group, q_start);
+  }
+
+  const std::vector<double> best_q = computeBestIK(current_state, target);
+  if (best_q.empty()) {
+    move_group_.clearPathConstraints();
+    visualisePlan(nullptr, "Planning Failed!");
+    RCLCPP_ERROR(LOGGER, "Planning failed!");
+    return false;
+  }
+
+  move_group_.clearPoseTargets();
+  move_group_.setJointValueTarget(best_q);
+
+  const auto plans = generateCandidatePlans(5);
   move_group_.clearPathConstraints();
+
+  if (plans.empty()) {
+    visualisePlan(nullptr, "Planning Failed!");
+    RCLCPP_ERROR(LOGGER, "Planning failed!");
+    return false;
+  }
+
+  auto plan = selectBestPlan(plans, q_start, best_q);
+  const bool success = !plan.trajectory_.joint_trajectory.points.empty();
 
   if (success) {
     visualisePlan(&plan, "Executing", "Press 'Next' in the RvizVisualToolsGui window to execute");

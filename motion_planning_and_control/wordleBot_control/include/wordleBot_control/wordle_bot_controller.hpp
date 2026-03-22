@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -46,6 +47,15 @@ public:
                                             double roll, double pitch, double yaw);
 
 private:
+  std::vector<double> computeBestIK(const moveit::core::RobotStatePtr & current_state,
+                                    const geometry_msgs::msg::Pose & target_pose);
+
+  std::vector<moveit::planning_interface::MoveGroupInterface::Plan> generateCandidatePlans(int num_attempts);
+  
+  moveit::planning_interface::MoveGroupInterface::Plan selectBestPlan(const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans,
+                                                                      const std::vector<double> & q_start,
+                                                                      const std::vector<double> & q_goal);
+
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
                      const std::string & title,
                      const std::string & prompt = "");
@@ -55,4 +65,5 @@ private:
   moveit::planning_interface::MoveGroupInterface move_group_;
   moveit::planning_interface::PlanningSceneInterface planning_scene_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
+  moveit::core::RobotStatePtr current_state;
 };
