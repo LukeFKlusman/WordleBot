@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cmath>
 
+#include <moveit/kinematics_base/kinematics_base.h>
+
 #include <algorithm>
 #include <limits>
 #include <vector>
@@ -46,7 +48,7 @@ WordleBotController::~WordleBotController()
 {
 }
 
-namespace
+namespace 
 {
 constexpr char kPlanningGroup[] = "ur_manipulator";
 
@@ -88,34 +90,66 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
                                                        const geometry_msgs::msg::Pose & target_pose)
 {
   const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
-  if (joint_model_group == nullptr || current_state == nullptr) {
+  if (joint_model_group == nullptr) {
+    RCLCPP_ERROR(LOGGER, "computeBestIK: joint model group '%s' not found in robot model.", kPlanningGroup);
     return {};
   }
+  if (current_state == nullptr) {
+    RCLCPP_ERROR(LOGGER, "computeBestIK: current robot state is null.");
+    return {};
+  }
+
+  // Verify kinematics solver is available before attempting IK
+  const kinematics::KinematicsBaseConstPtr & solver = joint_model_group->getSolverInstance();
+  if (!solver) {
+    RCLCPP_ERROR(LOGGER,
+      "computeBestIK: No kinematics solver loaded for group '%s'. "
+      "Ensure kinematics.yaml is passed as a node parameter and the plugin is installed.",
+      kPlanningGroup);
+    return {};
+  }
+  RCLCPP_DEBUG(LOGGER, "computeBestIK: Using kinematics solver '%s'.", solver->getGroupName().c_str());
 
   std::vector<double> current_joint_values;
   current_state->copyJointGroupPositions(joint_model_group, current_joint_values);
 
   std::vector<double> best_joint_values;
   double best_cost = std::numeric_limits<double>::infinity();
+  int ik_successes = 0;
 
   for (int attempt = 0; attempt < 15; ++attempt) {
     moveit::core::RobotState ik_state(*current_state);
     ik_state.setToRandomPositions(joint_model_group);
 
     if (!ik_state.setFromIK(joint_model_group, target_pose, 0.1)) {
+      RCLCPP_DEBUG(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
       continue;
     }
 
+    ++ik_successes;
     std::vector<double> candidate_joint_values;
     ik_state.copyJointGroupPositions(joint_model_group, candidate_joint_values);
 
     const double candidate_cost = configurationDistance(
       joint_model_group, current_joint_values, candidate_joint_values);
 
+    RCLCPP_DEBUG(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
+      attempt, candidate_cost, best_cost);
+
     if (candidate_cost < best_cost) {
       best_cost = candidate_cost;
       best_joint_values = candidate_joint_values;
     }
+  }
+
+  RCLCPP_INFO(LOGGER, "computeBestIK: %d/15 IK solutions found. Best cost: %.4f",
+    ik_successes, best_cost);
+
+  if (best_joint_values.empty()) {
+    RCLCPP_ERROR(LOGGER,
+      "computeBestIK: No valid IK solution found for target pose "
+      "(x=%.3f y=%.3f z=%.3f). Target may be out of reach or in collision.",
+      target_pose.position.x, target_pose.position.y, target_pose.position.z);
   }
 
   return best_joint_values;
@@ -126,12 +160,22 @@ std::vector<moveit::planning_interface::MoveGroupInterface::Plan>WordleBotContro
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
   plans.reserve(static_cast<std::size_t>(std::max(num_attempts, 0)));
 
+  RCLCPP_INFO(LOGGER, "generateCandidatePlans: generating %d plan attempts.", num_attempts);
+  int successes = 0;
   for (int attempt = 0; attempt < num_attempts; ++attempt) {
     moveit::planning_interface::MoveGroupInterface::Plan plan;
-    if (static_cast<bool>(move_group_.plan(plan))) {
+    const auto result = move_group_.plan(plan);
+    if (static_cast<bool>(result)) {
+      ++successes;
+      RCLCPP_DEBUG(LOGGER, "generateCandidatePlans: attempt %d succeeded (%zu waypoints).",
+        attempt, plan.trajectory_.joint_trajectory.points.size());
       plans.push_back(plan);
+    } else {
+      RCLCPP_WARN(LOGGER, "generateCandidatePlans: attempt %d failed (error code %d).",
+        attempt, result.val);
     }
   }
+  RCLCPP_INFO(LOGGER, "generateCandidatePlans: %d/%d plans succeeded.", successes, num_attempts);
 
   return plans;
 }
@@ -285,6 +329,59 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
     RCLCPP_ERROR(LOGGER, "Planning failed!");
     return false;
   }
+
+  // --- Diagnostic: log the chosen joint target values ---
+  if (joint_model_group != nullptr) {
+    const auto & joint_names = joint_model_group->getVariableNames();
+    RCLCPP_INFO(LOGGER, "Target joint values (%zu joints):", best_q.size());
+    for (std::size_t i = 0; i < best_q.size() && i < joint_names.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        joint_names[i].c_str(), best_q[i], best_q[i] * 180.0 / M_PI);
+    }
+
+    // --- Diagnostic: check shoulder constraint satisfaction at goal ---
+    const int shoulder_idx = jointNameIndex(
+      std::vector<std::string>(joint_names.begin(), joint_names.end()),
+      "shoulder_lift_joint");
+    if (shoulder_idx >= 0 && shoulder_idx < static_cast<int>(best_q.size())) {
+      const double shoulder_val = best_q[shoulder_idx];
+      const double shoulder_center = -M_PI / 2.0;
+      const double shoulder_tol = M_PI / 180.0 * 110.0;
+      const bool within = std::abs(shoulder_val - shoulder_center) <= shoulder_tol;
+      RCLCPP_INFO(LOGGER,
+        "Shoulder constraint check: shoulder_lift_joint=%.4f rad (%.1f deg), "
+        "allowed range [%.4f, %.4f] -> %s",
+        shoulder_val, shoulder_val * 180.0 / M_PI,
+        shoulder_center - shoulder_tol, shoulder_center + shoulder_tol,
+        within ? "WITHIN constraint" : "VIOLATES constraint");
+    }
+
+    // --- Diagnostic: check if goal joint values violate joint bounds ---
+    if (current_state != nullptr) {
+      moveit::core::RobotState goal_state(*current_state);
+      goal_state.setJointGroupPositions(joint_model_group, best_q);
+      goal_state.update();
+
+      bool bounds_ok = true;
+      const auto & active_joints = joint_model_group->getActiveJointModels();
+      for (std::size_t i = 0; i < active_joints.size() && i < best_q.size(); ++i) {
+        if (!active_joints[i]->satisfiesPositionBounds(&best_q[i])) {
+          RCLCPP_ERROR(LOGGER,
+            "Goal joint '%s' value %.4f rad VIOLATES joint limits!",
+            active_joints[i]->getName().c_str(), best_q[i]);
+          bounds_ok = false;
+        }
+      }
+      if (bounds_ok) {
+        RCLCPP_INFO(LOGGER, "Goal state joint bounds check: ALL within limits");
+      }
+    }
+  }
+
+  // --- Diagnostic: log the path constraint being applied ---
+  RCLCPP_INFO(LOGGER,
+    "Path constraint: shoulder_lift_joint center=%.4f rad, tolerance=+/-%.4f rad (%.1f deg)",
+    -M_PI / 2.0, M_PI / 180.0 * 110.0, 110.0);
 
   move_group_.clearPoseTargets();
   move_group_.setJointValueTarget(best_q);
