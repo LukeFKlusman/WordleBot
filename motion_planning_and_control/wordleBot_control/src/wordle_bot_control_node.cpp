@@ -19,6 +19,7 @@ WordleBotControlNode::getNodeBaseInterface()
 
 void WordleBotControlNode::setupScene()
 {
+  controller_->clearCollisionScene();
   controller_->setupCollisionScene();
 }
 
@@ -27,8 +28,17 @@ void WordleBotControlNode::run()
   RCLCPP_INFO(LOGGER, "Running goal sequence.");
 
   // Test goal: end-effector facing downward (180 deg roll), matching hello_ur3eMoveit
-  auto target = WordleBotController::buildPose( 0.335, 0.3, 0.15,   // x, y, z
+  auto target1 = WordleBotController::buildPose( 0.3, 0.3, 0.15,   // x, y, z
                                                 M_PI, 0.0, 0.0 );    // roll, pitch, yaw
 
-  controller_->moveToTarget(target);
+  auto target2 = WordleBotController::buildPose( 0.3, -0.3, 0.15, M_PI, 0.0, 0.0 ); 
+  auto target3 = WordleBotController::buildPose( -0.3, -0.3, 0.15, M_PI, 0.0, 0.0 );
+  auto target4 = WordleBotController::buildPose( -0.3, 0.3, 0.15, M_PI, 0.0, 0.0 );
+
+  controller_->moveToTarget(target1);
+  controller_->moveToTarget(target2);
+  controller_->moveToTarget(target3);
+  controller_->moveToTarget(target4);
+
+  return;
 }
