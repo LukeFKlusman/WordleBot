@@ -12,7 +12,7 @@ Main control package for the WordleBot UR3e robotic arm.
 
 ## How to Run
 
-### 1. Build the package
+### Terminal 1. Build the package
 
 From the workspace root:
 
@@ -21,7 +21,9 @@ colcon build --packages-select wordleBot_control
 source install/setup.bash
 ```
 
-### 2. Start URSim (UR3e)
+### Terminal 2. Start URSim (UR3e) 
+
+if not simulation and real hardware ignore this step
 
 In a new terminal:
 
@@ -29,7 +31,7 @@ In a new terminal:
 ros2 run ur_client_library start_ursim.sh -m ur3e
 ```
 
-### 3. Launch Robot driver
+### Terminal 3. Launch Robot driver
 
 ```bash
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
@@ -37,7 +39,7 @@ ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
 ```
 
-### 4. Launch MoveIt + RViz (Terminal 1)
+### Terminal 4. Launch MoveIt + RViz (Terminal 1)
 
 This starts the UR3e MoveIt stack and RViz. Keep this running throughout your session.
 
@@ -47,7 +49,9 @@ ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:=192.168
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
 ```
 
-### 5. Launch the control node (Terminal 2)
+### Terminal 5. Launch the control node (Terminal 2)
+
+Only ran after the previous terminals are running
 
 ```bash
 ros2 launch wordleBot_control wordle_bot.launch.py

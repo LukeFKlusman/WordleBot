@@ -12,6 +12,7 @@ find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 set(DEPENDENCIES
   rclcpp
@@ -19,6 +20,7 @@ set(DEPENDENCIES
   moveit_visual_tools
   tf2
   geometry_msgs
+  std_msgs
 )
 
 # --- Library: controller + node sources ---
@@ -61,6 +63,12 @@ if(BUILD_TESTING)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(goal_motion_test
+    test/goal_motion_test.py
+    TIMEOUT 300
+  )
 endif()
 
 ament_package()
