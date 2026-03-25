@@ -25,10 +25,10 @@ int main(int argc, char * argv[])
 
   // Create the MoveIt MoveGroup Interface
   using moveit::planning_interface::MoveGroupInterface;
-  auto move_group_interface = MoveGroupInterface(node, "panda_arm");
+  auto move_group_interface = MoveGroupInterface(node, "ur3e");
 
   // Construct and initialize MoveItVisualTools
-  auto moveit_visual_tools = moveit_visual_tools::MoveItVisualTools{node, "panda_link0", 
+  auto moveit_visual_tools = moveit_visual_tools::MoveItVisualTools{node, "ur3e_base", 
                                                                     rviz_visual_tools::RVIZ_MARKER_TOPIC,
                                                                     move_group_interface.getRobotModel()};
   moveit_visual_tools.deleteAllMarkers();
@@ -50,7 +50,7 @@ int main(int argc, char * argv[])
   auto const draw_trajectory_tool_path =
       [&moveit_visual_tools,
       jmg = move_group_interface.getRobotModel()->getJointModelGroup(
-          "panda_arm")](auto const trajectory) {
+          "ur3e")](auto const trajectory) {
         moveit_visual_tools.publishTrajectoryLine(trajectory, jmg);
       };
 
@@ -65,38 +65,38 @@ int main(int argc, char * argv[])
   }();
   move_group_interface.setPoseTarget(target_pose);
 
-  // Create collision object for the robot to avoid
-  auto const collision_object = [frame_id =
-                                  move_group_interface.getPlanningFrame()] {
-    moveit_msgs::msg::CollisionObject collision_object;
-    collision_object.header.frame_id = frame_id;
-    collision_object.id = "box1";
-    shape_msgs::msg::SolidPrimitive primitive;
+  // // Create collision object for the robot to avoid
+  // auto const collision_object = [frame_id =
+  //                                 move_group_interface.getPlanningFrame()] {
+  //   moveit_msgs::msg::CollisionObject collision_object;
+  //   collision_object.header.frame_id = frame_id;
+  //   collision_object.id = "box1";
+  //   shape_msgs::msg::SolidPrimitive primitive;
 
-    // Define the size of the box in meters
-    primitive.type = primitive.BOX;
-    primitive.dimensions.resize(3);
-    primitive.dimensions[primitive.BOX_X] = 0.5;
-    primitive.dimensions[primitive.BOX_Y] = 0.1;
-    primitive.dimensions[primitive.BOX_Z] = 0.5;
+  //   // Define the size of the box in meters
+  //   primitive.type = primitive.BOX;
+  //   primitive.dimensions.resize(3);
+  //   primitive.dimensions[primitive.BOX_X] = 0.5;
+  //   primitive.dimensions[primitive.BOX_Y] = 0.1;
+  //   primitive.dimensions[primitive.BOX_Z] = 0.5;
 
-    // Define the pose of the box (relative to the frame_id)
-    geometry_msgs::msg::Pose box_pose;
-    box_pose.orientation.w = 1.0;
-    box_pose.position.x = 0.2;
-    box_pose.position.y = 0.2;
-    box_pose.position.z = 0.25;
+  //   // Define the pose of the box (relative to the frame_id)
+  //   geometry_msgs::msg::Pose box_pose;
+  //   box_pose.orientation.w = 1.0;
+  //   box_pose.position.x = 0.2;
+  //   box_pose.position.y = 0.2;
+  //   box_pose.position.z = 0.25;
 
-    collision_object.primitives.push_back(primitive);
-    collision_object.primitive_poses.push_back(box_pose);
-    collision_object.operation = collision_object.ADD;
+  //   collision_object.primitives.push_back(primitive);
+  //   collision_object.primitive_poses.push_back(box_pose);
+  //   collision_object.operation = collision_object.ADD;
 
-    return collision_object;
-  }();
+  //   return collision_object;
+  // }();
 
-  // Add the collision object to the scene
-  moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
-  planning_scene_interface.applyCollisionObject(collision_object);
+  // // Add the collision object to the scene
+  // moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+  // planning_scene_interface.applyCollisionObject(collision_object);
 
   // Create a plan to that target pose
   prompt("Press 'Next' in the RvizVisualToolsGui window to plan");
