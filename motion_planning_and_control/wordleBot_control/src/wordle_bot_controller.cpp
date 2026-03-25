@@ -113,16 +113,29 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
   std::vector<double> current_joint_values;
   current_state->copyJointGroupPositions(joint_model_group, current_joint_values);
 
+  // Find shoulder_lift_joint index so we can normalise its angle to satisfy the path constraint.
+  // The path constraint applied during planning is centred at -π/2 with ±110° tolerance.
+  const double shoulder_center = -M_PI / 2.0;
+  const double shoulder_tol    = M_PI / 180.0 * 110.0;
+  const auto & joint_names = joint_model_group->getVariableNames();
+  const int shoulder_idx = jointNameIndex(joint_names, "shoulder_lift_joint");
+
   std::vector<double> best_joint_values;
   double best_cost = std::numeric_limits<double>::infinity();
   int ik_successes = 0;
+  int constraint_rejects = 0;
+
+  // Functional position [0°, -135°, -90°, -45°, 0°, 0°] and per-joint weights.
+  // The quadratic penalty steers IK selection toward a comfortable canonical posture.
+  static const double q_func[6] = {0.0, -2.3562, -1.5708, -0.7854, 0.0, 0.0};
+  static const double w_func[6] = {0.3,  0.5,     0.5,     0.5,    0.3,  0.3};
 
   for (int attempt = 0; attempt < 15; ++attempt) {
     moveit::core::RobotState ik_state(*current_state);
     ik_state.setToRandomPositions(joint_model_group);
 
     if (!ik_state.setFromIK(joint_model_group, target_pose, 0.1)) {
-      RCLCPP_DEBUG(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
+      RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
       continue;
     }
 
@@ -130,10 +143,62 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     std::vector<double> candidate_joint_values;
     ik_state.copyJointGroupPositions(joint_model_group, candidate_joint_values);
 
-    const double candidate_cost = configurationDistance(
-      joint_model_group, current_joint_values, candidate_joint_values);
+    // Normalise every revolute joint to the 2π-equivalent numerically closest to the current
+    // joint state. Without this, the planner receives a raw IK angle like 4.24 rad when the
+    // robot is at -6.12 rad — they are equivalent mod 2π but 10.36 rad apart numerically,
+    // causing the planner to generate a huge spinning trajectory.
+    const auto & active_joints = joint_model_group->getActiveJointModels();
+    for (std::size_t i = 0; i < candidate_joint_values.size() && i < active_joints.size(); ++i) {
+      if (active_joints[i]->getType() != moveit::core::JointModel::REVOLUTE) {
+        continue;
+      }
+      const double curr    = current_joint_values[i];
+      const double raw     = candidate_joint_values[i];
+      double best_norm     = raw;
+      double best_dist     = std::abs(raw - curr);
+      for (int k = -3; k <= 3; ++k) {
+        const double offset = raw + k * 2.0 * M_PI;
+        const double dist   = std::abs(offset - curr);
+        if (dist < best_dist && active_joints[i]->satisfiesPositionBounds(&offset)) {
+          best_dist = dist;
+          best_norm = offset;
+        }
+      }
+      if (std::abs(best_norm - raw) > 1e-6) {
+        RCLCPP_INFO(LOGGER,
+          "computeBestIK: attempt %d normalised joint '%s': raw=%.4f -> norm=%.4f rad.",
+          attempt, active_joints[i]->getName().c_str(), raw, best_norm);
+      }
+      candidate_joint_values[i] = best_norm;
+    }
 
-    RCLCPP_DEBUG(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
+    // Reject if shoulder_lift_joint is outside the path constraint range after normalisation.
+    if (shoulder_idx >= 0 && shoulder_idx < static_cast<int>(candidate_joint_values.size())) {
+      const double sh = candidate_joint_values[shoulder_idx];
+      if (std::abs(sh - shoulder_center) > shoulder_tol) {
+        RCLCPP_INFO(LOGGER,
+          "computeBestIK: attempt %d rejected — shoulder %.4f rad outside constraint [%.4f, %.4f].",
+          attempt, sh, shoulder_center - shoulder_tol, shoulder_center + shoulder_tol);
+        ++constraint_rejects;
+        continue;
+      }
+    }
+
+    // Cost = actual joint movement (numeric distance after normalisation, not wrapped shortest
+    // angle) + quadratic penalty for deviation from functional position.
+    // Movement term (2×) dominates; functional penalty is a tiebreaker for canonical posture.
+    double movement_cost = 0.0;
+    double functional_penalty = 0.0;
+    for (std::size_t i = 0; i < candidate_joint_values.size(); ++i) {
+      movement_cost += std::abs(candidate_joint_values[i] - current_joint_values[i]);
+      if (i < 6) {
+        const double d = candidate_joint_values[i] - q_func[i];
+        functional_penalty += w_func[i] * d * d;
+      }
+    }
+    const double candidate_cost = (2.0 * movement_cost) + (0.3 * functional_penalty);
+
+    RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
       attempt, candidate_cost, best_cost);
 
     if (candidate_cost < best_cost) {
@@ -142,8 +207,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     }
   }
 
-  RCLCPP_INFO(LOGGER, "computeBestIK: %d/15 IK solutions found. Best cost: %.4f",
-    ik_successes, best_cost);
+  RCLCPP_INFO(LOGGER,
+    "computeBestIK: %d/15 IK solutions found, %d rejected for shoulder constraint. Best cost: %.4f",
+    ik_successes, constraint_rejects, best_cost);
 
   if (best_joint_values.empty()) {
     RCLCPP_ERROR(LOGGER,
@@ -185,9 +251,7 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
                                                                                          const std::vector<double> & q_goal)
 {
   moveit::planning_interface::MoveGroupInterface::Plan best_plan;
-  moveit::planning_interface::MoveGroupInterface::Plan fallback_plan;
   double best_cost = std::numeric_limits<double>::infinity();
-  double fallback_cost = std::numeric_limits<double>::infinity();
 
   const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
   if (joint_model_group == nullptr) {
@@ -200,10 +264,20 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
   const int base_joint_index = jointNameIndex(variable_names, "shoulder_pan_joint");
   const int wrist_joint_index = jointNameIndex(variable_names, "wrist_3_joint");
 
+  // Functional position penalty at the goal state: sum of |q_goal[i] - q_func[i]| per joint.
+  // This steers plan selection toward paths that land in a comfortable canonical posture.
+  static const double q_func[6] = {0.0, -2.3562, -1.5708, -0.7854, 0.0, 0.0};
+  double functional_goal_penalty = 0.0;
+  for (std::size_t i = 0; i < q_goal.size() && i < 6; ++i) {
+    functional_goal_penalty += std::abs(q_goal[i] - q_func[i]);
+  }
+
+  std::size_t plan_index = 0;
   for (const auto & plan : plans) {
     const auto & trajectory = plan.trajectory_.joint_trajectory;
     const auto & points = trajectory.points;
     if (points.empty()) {
+      ++plan_index;
       continue;
     }
 
@@ -221,35 +295,27 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
     }
 
     if (missing_joint) {
+      ++plan_index;
       continue;
     }
 
     double total_path_length = 0.0;
-    double max_joint_movement = 0.0;
     double base_rotation = 0.0;
     double wrist_rotation = 0.0;
 
     for (std::size_t point_index = 0; point_index < points.size(); ++point_index) {
-      const auto & point = points[point_index];
-
-      for (std::size_t joint_index = 0; joint_index < joint_models.size(); ++joint_index) {
-        const double point_position = point.positions[trajectory_indices[joint_index]];
-        const double movement_from_start = jointDistance(
-          joint_models[joint_index], q_start[joint_index], point_position);
-        max_joint_movement = std::max(max_joint_movement, movement_from_start);
-      }
-
       if (point_index == 0) {
         continue;
       }
 
       const auto & previous_point = points[point_index - 1];
+      const auto & current_point  = points[point_index];
       double segment_length = 0.0;
 
       for (std::size_t joint_index = 0; joint_index < joint_models.size(); ++joint_index) {
-        const double previous_position = previous_point.positions[trajectory_indices[joint_index]];
-        const double current_position = point.positions[trajectory_indices[joint_index]];
-        const double delta = jointDistance(joint_models[joint_index], previous_position, current_position);
+        const double prev_pos = previous_point.positions[trajectory_indices[joint_index]];
+        const double curr_pos = current_point.positions[trajectory_indices[joint_index]];
+        const double delta = jointDistance(joint_models[joint_index], prev_pos, curr_pos);
         segment_length += delta;
 
         if (static_cast<int>(joint_index) == base_joint_index) {
@@ -263,34 +329,36 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
       total_path_length += segment_length;
     }
 
+    // Soft cost: path length (primary) + base rotation (secondary) + wrist rotation (tertiary)
+    // + functional goal penalty (quaternary). No hard rejections — the lowest-cost plan always
+    // wins regardless of ratio or rotation thresholds.
     const double plan_cost =
-      (1.0 * total_path_length) +
-      (0.5 * max_joint_movement) +
-      (0.75 * base_rotation) +
-      (0.25 * wrist_rotation);
+      (2.0 * total_path_length) +
+      (1.5 * base_rotation) +
+      (0.5 * wrist_rotation) +
+      (0.25 * functional_goal_penalty);
 
-    if (plan_cost < fallback_cost) {
-      fallback_cost = plan_cost;
-      fallback_plan = plan;
-    }
-
-    const bool exceeds_path_ratio = direct_distance > 1e-6 && total_path_length > (2.0 * direct_distance);
-    const bool excessive_base_rotation = base_rotation > M_PI;
-    if (exceeds_path_ratio || excessive_base_rotation) {
-      continue;
-    }
+    RCLCPP_INFO(LOGGER,
+      "selectBestPlan: plan %zu — path=%.3f direct=%.3f ratio=%.2fx base_rot=%.3f rad cost=%.3f -> %s",
+      plan_index,
+      total_path_length, direct_distance,
+      direct_distance > 1e-6 ? total_path_length / direct_distance : 0.0,
+      base_rotation, plan_cost,
+      plan_cost < best_cost ? "best so far" : "worse");
 
     if (plan_cost < best_cost) {
       best_cost = plan_cost;
       best_plan = plan;
     }
+    ++plan_index;
   }
 
-  if (best_cost < std::numeric_limits<double>::infinity()) {
-    return best_plan;
+  if (best_cost > 15.0) {
+    RCLCPP_WARN(LOGGER,
+      "selectBestPlan: best plan cost=%.3f is high — motion may not be fully optimal.", best_cost);
   }
 
-  return fallback_plan;
+  return best_plan;
 }
 
 bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
@@ -314,12 +382,28 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
 
   visualisePlan(nullptr, "Planning", "Press 'Next' in the RvizVisualToolsGui window to plan");
 
-  current_state = move_group_.getCurrentState();
+  move_group_.setStartStateToCurrentState();
+  current_state = move_group_.getCurrentState(2.0);  // 2s timeout for fresh state
   const auto * joint_model_group = move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup);
 
   std::vector<double> q_start;
   if (current_state != nullptr && joint_model_group != nullptr) {
     current_state->copyJointGroupPositions(joint_model_group, q_start);
+
+    // DEBUG: log current joint angles so we can verify state monitor is reading correctly
+    const auto & jnames = joint_model_group->getVariableNames();
+    RCLCPP_INFO(LOGGER, "Current joint state (%zu joints):", q_start.size());
+    for (std::size_t i = 0; i < q_start.size() && i < jnames.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        jnames[i].c_str(), q_start[i], q_start[i] * 180.0 / M_PI);
+    }
+
+    // DEBUG: forward kinematics — does the computed EEF position match where the robot actually is?
+    const Eigen::Isometry3d & eef_tf = current_state->getGlobalLinkTransform("tool0");
+    RCLCPP_INFO(LOGGER, "Current EEF pose (FK): x=%.4f y=%.4f z=%.4f",
+      eef_tf.translation().x(), eef_tf.translation().y(), eef_tf.translation().z());
+  } else {
+    RCLCPP_ERROR(LOGGER, "getCurrentState returned null — state monitor has no data yet!");
   }
 
   const std::vector<double> best_q = computeBestIK(current_state, target);
@@ -518,8 +602,6 @@ void WordleBotController::clearCollisionScene()
 void WordleBotController::attachSensorCollisionObject()
 {
   moveit_msgs::msg::AttachedCollisionObject attached_object;
-  // Attach to tool0 — the last active joint link on the UR3e.
-  // No physical tool is mounted, so there is no tool0 geometry to clear.
   attached_object.link_name = "tool0";
   attached_object.object.id = "sensor_guard";
   attached_object.object.header.frame_id = "tool0";
@@ -539,8 +621,6 @@ void WordleBotController::attachSensorCollisionObject()
   attached_object.object.primitive_poses.push_back(pose);
 
   // Only allow the links that physically surround tool0 to touch the cylinder.
-  // All other links (forearm, upper_arm, shoulder, etc.) remain real collision
-  // targets — the planner will prevent them from entering the sensor guard zone.
   attached_object.touch_links = {
     "wrist_3_link", "flange", "tool0", "ft_frame"
   };
@@ -606,4 +686,7 @@ void WordleBotController::visualisePlan(const moveit::planning_interface::MoveGr
   }
 
   visual_tools_.trigger();
+
+  // Waits until Visualistion is complete before returning, ensuring the user sees the updated plan before the next step.
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
 }
