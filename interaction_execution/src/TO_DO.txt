@@ -1,6 +1,5 @@
 NEED TO DO FOR GUI:
 - Get buttons to do stuff, start working on topics it subscribes to, blah blah blah
-- Get widgets to stretch properly with window, or just make window non-resizeable (LAST RESORT ONLY)
-- Change camera_poc to use RealSense D435i camera
-- Figure out how to make a thing that actually looks like NYT wordle, probably code it too
-- FIGHT AND WIN
+- Fix wordle plugin to not be buggy
+- Determine why the fuck the sim is buggy (it's because of drivers but needs to consistently work brah)
+- MUST BE DONE BY END OF SATURDAY

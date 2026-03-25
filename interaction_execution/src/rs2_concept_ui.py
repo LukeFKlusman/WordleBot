@@ -16,15 +16,15 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout, QMainWindow,
-    QPushButton, QSizePolicy, QTabWidget, QVBoxLayout,
-    QWidget)
+    QPushButton, QSizePolicy, QSpacerItem, QTabWidget,
+    QVBoxLayout, QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1024, 640)
-        MainWindow.setMinimumSize(QSize(1024, 640))
+        MainWindow.resize(1024, 600)
+        MainWindow.setMinimumSize(QSize(1024, 600))
         palette = QPalette()
         brush = QBrush(QColor(255, 255, 220, 255))
         brush.setStyle(Qt.BrushStyle.SolidPattern)
@@ -71,39 +71,69 @@ class Ui_MainWindow(object):
         self.horizontalLayout.addWidget(self.mainTab)
 
         self.wordleColumnLayout = QVBoxLayout()
-        self.wordleColumnLayout.setSpacing(12)
+        self.wordleColumnLayout.setSpacing(10)
         self.wordleColumnLayout.setObjectName(u"wordleColumnLayout")
         self.wordle = QWidget(self.centralwidget)
         self.wordle.setObjectName(u"wordle")
+        sizePolicy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        sizePolicy.setHorizontalStretch(0)
+        sizePolicy.setVerticalStretch(1)
+        sizePolicy.setHeightForWidth(self.wordle.sizePolicy().hasHeightForWidth())
+        self.wordle.setSizePolicy(sizePolicy)
         self.wordle.setMinimumSize(QSize(280, 0))
         self.wordle.setStyleSheet(u"border: 1px solid black")
 
         self.wordleColumnLayout.addWidget(self.wordle)
 
+        self.safetyControls = QWidget(self.centralwidget)
+        self.safetyControls.setObjectName(u"safetyControls")
+        sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        sizePolicy1.setHorizontalStretch(0)
+        sizePolicy1.setVerticalStretch(0)
+        sizePolicy1.setHeightForWidth(self.safetyControls.sizePolicy().hasHeightForWidth())
+        self.safetyControls.setSizePolicy(sizePolicy1)
+        self.safetyControls.setMinimumSize(QSize(0, 128))
+        self.safetyControls.setMaximumSize(QSize(16777215, 128))
+        self.safetyControlsLayout = QVBoxLayout(self.safetyControls)
+        self.safetyControlsLayout.setObjectName(u"safetyControlsLayout")
+        self.safetyControlsLayout.setContentsMargins(0, 0, 0, 0)
+        self.verticalSpacerTop = QSpacerItem(20, 8, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+
+        self.safetyControlsLayout.addItem(self.verticalSpacerTop)
+
         self.gridLayout = QGridLayout()
         self.gridLayout.setObjectName(u"gridLayout")
-        self.pushButton = QPushButton(self.centralwidget)
+        self.gridLayout.setHorizontalSpacing(12)
+        self.gridLayout.setVerticalSpacing(12)
+        self.pushButton = QPushButton(self.safetyControls)
         self.pushButton.setObjectName(u"pushButton")
 
         self.gridLayout.addWidget(self.pushButton, 0, 0, 1, 1)
 
-        self.pushButton_2 = QPushButton(self.centralwidget)
+        self.pushButton_2 = QPushButton(self.safetyControls)
         self.pushButton_2.setObjectName(u"pushButton_2")
 
         self.gridLayout.addWidget(self.pushButton_2, 1, 0, 1, 1)
 
-        self.pushButton_3 = QPushButton(self.centralwidget)
+        self.pushButton_3 = QPushButton(self.safetyControls)
         self.pushButton_3.setObjectName(u"pushButton_3")
 
         self.gridLayout.addWidget(self.pushButton_3, 1, 1, 1, 1)
 
-        self.pushButton_4 = QPushButton(self.centralwidget)
+        self.pushButton_4 = QPushButton(self.safetyControls)
         self.pushButton_4.setObjectName(u"pushButton_4")
 
         self.gridLayout.addWidget(self.pushButton_4, 0, 1, 1, 1)
 
 
-        self.wordleColumnLayout.addLayout(self.gridLayout)
+        self.safetyControlsLayout.addLayout(self.gridLayout)
+
+        self.verticalSpacerBottom = QSpacerItem(20, 8, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+
+        self.safetyControlsLayout.addItem(self.verticalSpacerBottom)
+
+
+        self.wordleColumnLayout.addWidget(self.safetyControls)
 
 
         self.horizontalLayout.addLayout(self.wordleColumnLayout)
