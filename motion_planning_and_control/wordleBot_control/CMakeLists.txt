@@ -65,9 +65,23 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 
   find_package(ament_cmake_pytest REQUIRED)
-  ament_add_pytest_test(goal_motion_test
-    test/goal_motion_test.py
-    TIMEOUT 300
+
+  # TC1 — Key Control Concepts (validates P, C, D)
+  ament_add_pytest_test(tc1_key_control_concepts
+    test/tc1_key_control_concepts.py
+    TIMEOUT 600
+  )
+
+  # TC2 — Advanced Motion Control (validates HD)
+  ament_add_pytest_test(tc2_advanced_motion_control
+    test/tc2_advanced_motion_control.py
+    TIMEOUT 600
+  )
+
+  # TC3 — Advanced Collision Avoidance (validates Perfect)
+  ament_add_pytest_test(tc3_advanced_collision_avoidance
+    test/tc3_advanced_collision_avoidance.py
+    TIMEOUT 600
   )
 endif()
 
