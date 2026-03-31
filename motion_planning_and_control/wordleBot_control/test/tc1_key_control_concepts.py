@@ -464,8 +464,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         #     rclpy.spin_once(self.node, timeout_sec=0.05)
         #     self.assertLess(time.time(), deadline, "Gripper did not close within 2 s")
 
-        print("[TC1.3] Gripper open/close test not implemented — update once gripper interface is defined >> Skipping test.")
-        passed = False
+        self.fail("[TC1.3] Not implemented — update once gripper interface is defined.")
 
     # -----------------------------------------------------------------------
     # TC1.4 — Mission Control: Stop / Resume / Abort  (validates C)
@@ -535,8 +534,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         #     rclpy.spin_once(self.node, timeout_sec=0.1)
         #     self.assertLess(time.time(), deadline, f"Arm did not return home within {ABORT_TIMEOUT_S} s after Abort")
 
-        print("[TC1.4] Mission control Stop/Resume/Abort test not fully implemented — update once mission control interface is defined >> Skipping test.")
-        passed = False
+        self.fail("[TC1.4] Not implemented — update once mission control interface is defined.")
 
     # -----------------------------------------------------------------------
     # TC1.5 — Collision Detection and Replanning  (validates D)
@@ -557,11 +555,14 @@ class TestKeyControlConcepts(unittest.TestCase):
         """
         
         # ------------------------------------------------------------------ #
-        # Return to safe Pose
+        # Move to safe start pose before obstacle is added
         # ------------------------------------------------------------------ #
-        # start_pose = _make_pose_stamped(-0.2,  0.3,  0.15, roll=math.pi)
-        
-        
+        start_pose = _make_pose_stamped(0.2, 0.3, 0.15, roll=math.pi)
+        self._send_mission_and_wait([start_pose])
+        self.node.get_logger().info("[TC1.5] Reached safe start pose.")
+
+        time.sleep(1.0)  # brief pause to ensure the arm is at the start pose
+
         # ------------------------------------------------------------------ #
         # Obstacle geometry (world frame)
         # ------------------------------------------------------------------ #
@@ -857,10 +858,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         # TODO: remove obstacle from planning scene
         # <remove obstacle>
 
-        print("[TC1.6] Basic pick-and-place integration test not fully implemented — update once gripper and mission control interfaces are defined >> Skipping test.")
-        
-        # Pass a failed test to ensure visibility in test results until implemented
-        passed = False
+        self.fail("[TC1.6] Not implemented — update once gripper and mission control interfaces are defined.")
     
     # -----------------------------------------------------------------------
     # Internal helpers
