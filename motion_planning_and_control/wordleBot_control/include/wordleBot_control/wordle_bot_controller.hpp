@@ -46,6 +46,11 @@ public:
   static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
                                             double roll, double pitch, double yaw);
 
+  // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
+  // This is the L1 path length in joint space — used to validate motion efficiency.
+  static double computeTotalJointDisplacement(
+    const moveit::planning_interface::MoveGroupInterface::Plan & plan);
+
 private:
   std::vector<double> computeBestIK(const moveit::core::RobotStatePtr & current_state,
                                     const geometry_msgs::msg::Pose & target_pose);
@@ -57,8 +62,7 @@ private:
                                                                       const std::vector<double> & q_goal);
 
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
-                     const std::string & title,
-                     const std::string & prompt = "");
+                     const std::string & title);
 
   rclcpp::Node::SharedPtr node_;
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters

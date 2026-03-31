@@ -31,7 +31,7 @@ import time
 import unittest
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseArray, PoseStamped
 from rclpy.serialization import deserialize_message
 import rosbag2_py
 from sensor_msgs.msg import JointState
@@ -59,17 +59,45 @@ class TestKeyControlConcepts(unittest.TestCase):
         rclpy.init()
         cls.node = rclpy.create_node("tc1_key_control_concepts_node")
 
-        # Goal publisher
+        # Legacy single-goal publisher (backward compat; auto-arms mission)
         cls.goal_pub = cls.node.create_publisher(
             PoseStamped, "/wordle_bot/goal_pose", 10
         )
 
-        # Motion complete subscriber
+        # Mission-level publishers
+        cls.set_mission_pub = cls.node.create_publisher(
+            PoseArray, "/wordle_bot/set_mission", 10
+        )
+        cls.start_mission_pub = cls.node.create_publisher(
+            Bool, "/wordle_bot/start_mission", 10
+        )
+
+        # Motion complete subscriber (per-goal, backward compat)
         cls.motion_complete = False
         cls.node.create_subscription(
             Bool,
             "/wordle_bot/motion_complete",
             cls._on_motion_complete,
+            10,
+        )
+
+        # Per-goal reached signal
+        cls.goal_reached_count = 0
+        cls.pending_pose_lookup = False
+        cls.goal_reached_poses = []
+        cls.node.create_subscription(
+            Bool,
+            "/wordle_bot/goal_reached",
+            cls._on_goal_reached,
+            10,
+        )
+
+        # Mission complete signal
+        cls.mission_complete = False
+        cls.node.create_subscription(
+            Bool,
+            "/wordle_bot/mission_complete",
+            cls._on_mission_complete,
             10,
         )
 
@@ -101,6 +129,17 @@ class TestKeyControlConcepts(unittest.TestCase):
         if msg.data:
             cls.motion_complete = True
 
+    @classmethod
+    def _on_goal_reached(cls, msg: Bool):
+        if msg.data:
+            cls.goal_reached_count += 1
+            cls.pending_pose_lookup = True
+
+    @classmethod
+    def _on_mission_complete(cls, msg: Bool):
+        if msg.data:
+            cls.mission_complete = True
+
     # TODO (TC1.3): implement _on_gripper_state callback once message type is known
     # @classmethod
     # def _on_gripper_state(cls, msg):
@@ -120,35 +159,37 @@ class TestKeyControlConcepts(unittest.TestCase):
         Validates: P — basic trajectory generation and EE tracking to a single pose.
 
         Procedure:
-          - Publish a single goal to /wordle_bot/goal_pose.
-          - Wait for /wordle_bot/motion_complete = true.
+          - Set a single-goal mission via /wordle_bot/set_mission.
+          - Arm the mission via /wordle_bot/start_mission.
+          - Wait for /wordle_bot/mission_complete = true.
           - Assert EE pose within tolerance via TF lookup.
 
-        Pass: EE within 5 mm / 5° of goal; motion_complete=true within 60 s.
+        Pass: EE within 5 mm / 5° of goal; mission_complete=true within 60 s.
         Fail: Tolerance exceeded, timeout, or planning/execution error.
         """
         goal = _make_pose_stamped(0.3, 0.25, 0.25, roll=math.pi)
 
-        # Start bag recording: capture joint states, TF, and motion_complete signal
+        # Start bag recording
         bag_dir = tempfile.mkdtemp(prefix='tc1_1_')
         bag_path = os.path.join(bag_dir, 'tc1_1')
         bag_proc = subprocess.Popen(
             ['ros2', 'bag', 'record', '-o', bag_path,
-             '/joint_states', '/tf', '/wordle_bot/motion_complete'],
+             '/joint_states', '/tf',
+             '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        time.sleep(1.0)  # allow the recorder to initialise before sending the goal
+        time.sleep(1.0)  # allow the recorder to initialise
+
+        # Reset state flags
+        TestKeyControlConcepts.mission_complete = False
+        TestKeyControlConcepts.goal_reached_count = 0
+        TestKeyControlConcepts.goal_reached_poses = []
 
         start_time = time.time()
-        self._send_goal_and_wait(goal)
+        self._send_mission_and_wait([goal])
         execution_time = time.time() - start_time
 
-        print(f"Waiting for motion to complete... (timeout in {MOTION_TIMEOUT_S} s)")
-
-        while not TestKeyControlConcepts.motion_complete:
-            rclpy.spin_once(self.node, timeout_sec=0.01)
-
-        print("Motion complete signal received. Stopping bag recording...") 
+        print("Mission complete signal received. Stopping bag recording...")
 
         bag_proc.terminate()
         bag_proc.wait()
@@ -220,39 +261,158 @@ class TestKeyControlConcepts(unittest.TestCase):
 
     def test_tc1_2_optimised_path_planning(self):
         """
-        Validates: C — controller selects the most efficient trajectory via cost function.
+        Validates: C — controller executes a 3-waypoint mission and selects efficient trajectories.
 
         Procedure:
-          - Publish a goal with multiple valid IK solutions from a fixed start state.
-          - Extract the full joint trajectory from /joint_states in the bag.
-          - Compute total joint displacement: Σ|Δq| across all 6 joints.
-          - Compute the minimum-displacement IK baseline for the same goal/start.
+          - Set a 3-goal mission via /wordle_bot/set_mission.
+          - Arm the mission via /wordle_bot/start_mission.
+          - After each /wordle_bot/goal_reached signal, record EE pose via TF lookup.
+          - Wait for /wordle_bot/mission_complete.
+          - Assert each EE pose reached within tolerance.
+          - Assert total joint displacement ≤ 1.5× sum of per-leg minimum-IK baselines.
 
-        Pass: Executed displacement ≤ 1.5× the minimum-IK baseline.
-        Fail: Displacement exceeds 1.5× baseline (no meaningful optimisation).
+        Pass: All goals within 5 mm / 5°; displacement ratio within threshold.
+        Fail: Any goal tolerance exceeded, timeout, or displacement exceeds 1.5× baseline.
         """
-        goal = _make_pose_stamped(-0.2, 0.3, 0.15, roll=math.pi)
+        goals = [
+            _make_pose_stamped( 0.40,  0.10, 0.25, roll=math.pi),
+            _make_pose_stamped(-0.30,  0.20, 0.10, roll=math.pi),
+            _make_pose_stamped( 0.05,  0.20, 0.40, roll=math.pi),
+        ]
 
-        # TODO: record start joint state from /joint_states
-        # start_joint_state = ...
+        bag_dir = tempfile.mkdtemp(prefix='tc1_2_')
+        bag_path = os.path.join(bag_dir, 'tc1_2')
+        bag_proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', bag_path,
+             '/joint_states', '/tf',
+             '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
 
-        # TODO: send goal and wait for completion
-        # self._send_goal_and_wait(goal)
+        # Reset state flags
+        TestKeyControlConcepts.mission_complete = False
+        TestKeyControlConcepts.goal_reached_count = 0
+        TestKeyControlConcepts.pending_pose_lookup = False
+        TestKeyControlConcepts.goal_reached_poses = []
 
-        # TODO: extract joint trajectory from bag or live /joint_states subscription
-        # trajectory_points = ...  # list of joint position vectors
+        # Build and send the mission
+        pa = PoseArray()
+        pa.header.frame_id = 'world'
+        pa.header.stamp = self.node.get_clock().now().to_msg()
+        pa.poses = [g.pose for g in goals]
+        self.set_mission_pub.publish(pa)
+        time.sleep(0.5)
 
-        # TODO: compute total joint displacement from trajectory_points
-        # total_displacement = sum(sum(abs(q1 - q0) for q0, q1 in zip(p, trajectory_points[i+1]))
-        #                          for i, p in enumerate(trajectory_points[:-1]))
+        start_msg = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
+        self.node.get_logger().info("[TC1.2] Mission armed with 3 goals.")
 
-        # TODO: compute minimum-displacement IK baseline
-        # (call IK solver with the same start state and goal, pick the lowest-cost solution)
-        # min_displacement_baseline = ...
+        # Wait for each goal_reached signal and record EE pose after each
+        for i in range(len(goals)):
+            deadline = time.time() + MOTION_TIMEOUT_S
+            TestKeyControlConcepts.pending_pose_lookup = False
+            while not TestKeyControlConcepts.pending_pose_lookup:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                self.assertLess(
+                    time.time(), deadline,
+                    f"goal_reached signal {i + 1} did not arrive within {MOTION_TIMEOUT_S:.0f} s"
+                )
+            tf_result = self._get_ee_transform()
+            TestKeyControlConcepts.goal_reached_poses.append(tf_result)
+            self.node.get_logger().info(f"[TC1.2] EE pose recorded for goal {i + 1}.")
 
-        # TODO: assert displacement ratio within threshold
-        # self.assertLessEqual(total_displacement, 1.5 * min_displacement_baseline,
-        #     "Path displacement exceeds 1.5× minimum-IK baseline — cost function may not be optimising")
+        # Wait for mission_complete
+        deadline = time.time() + MOTION_TIMEOUT_S
+        while not TestKeyControlConcepts.mission_complete:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            self.assertLess(
+                time.time(), deadline,
+                f"mission_complete did not arrive within {MOTION_TIMEOUT_S:.0f} s after last goal"
+            )
+
+        bag_proc.terminate()
+        bag_proc.wait()
+        print(f"[TC1.2] Bag recorded to: {bag_path}")
+
+        # Validate 3 goal_reached signals were received
+        self.assertEqual(
+            len(TestKeyControlConcepts.goal_reached_poses), len(goals),
+            f"Expected {len(goals)} goal_reached signals, "
+            f"got {len(TestKeyControlConcepts.goal_reached_poses)}"
+        )
+
+        passed = True
+        try:
+            # Validate EE pose at each waypoint
+            for i, (tf_result, goal) in enumerate(
+                    zip(TestKeyControlConcepts.goal_reached_poses, goals)):
+                t = tf_result.transform.translation
+                q = tf_result.transform.rotation
+                pos_err = math.sqrt(
+                    (t.x - goal.pose.position.x) ** 2 +
+                    (t.y - goal.pose.position.y) ** 2 +
+                    (t.z - goal.pose.position.z) ** 2
+                )
+                orient_err = _quat_angle_diff_deg(q, goal.pose.orientation)
+                self.node.get_logger().info(
+                    f"[TC1.2] Goal {i + 1}: pos_err={pos_err * 1000:.1f} mm  "
+                    f"orient_err={orient_err:.2f}°"
+                )
+                self.assertLessEqual(
+                    pos_err, POSITION_TOLERANCE_M,
+                    f"Goal {i + 1}: position error {pos_err * 1000:.1f} mm exceeds "
+                    f"{POSITION_TOLERANCE_M * 1000:.0f} mm tolerance"
+                )
+                self.assertLessEqual(
+                    orient_err, ORIENTATION_TOLERANCE_DEG,
+                    f"Goal {i + 1}: orientation error {orient_err:.2f}° exceeds "
+                    f"{ORIENTATION_TOLERANCE_DEG:.0f}° tolerance"
+                )
+
+            # Validate path optimality: per-leg actual displacement vs straight-line baseline.
+            # For each leg: actual path length in joint space must be within 10% of the
+            # straight-line L1 distance from the start to the end joint configuration.
+            traj_stamped = _read_joint_trajectory(bag_path)
+            goal_reached_ts = _read_goal_reached_timestamps(bag_path)
+            if traj_stamped and goal_reached_ts:
+                legs = _segment_trajectory_by_goals(traj_stamped, goal_reached_ts)
+                for leg_idx, leg in enumerate(legs):
+                    if len(leg) < 2:
+                        continue
+                    q_start_leg = leg[0]
+                    q_end_leg   = leg[-1]
+                    baseline = sum(abs(e - s) for s, e in zip(q_start_leg, q_end_leg))
+                    actual   = sum(
+                        sum(abs(b - a) for a, b in zip(leg[t], leg[t + 1]))
+                        for t in range(len(leg) - 1)
+                    )
+                    ratio = actual / baseline if baseline > 1e-6 else 1.0
+                    print(
+                        f"[TC1.2] Leg {leg_idx + 1}: "
+                        f"actual={actual:.4f} rad  baseline={baseline:.4f} rad  "
+                        f"ratio={ratio:.3f}x  (limit=1.10x)"
+                    )
+                    self.assertLessEqual(
+                        actual, 1.10 * baseline,
+                        f"Leg {leg_idx + 1}: joint displacement {actual:.4f} rad exceeds "
+                        f"1.10× straight-line baseline ({1.10 * baseline:.4f} rad)"
+                    )
+        except AssertionError:
+            passed = False
+            raise
+        finally:
+            for i, (tf_result, goal) in enumerate(
+                    zip(TestKeyControlConcepts.goal_reached_poses, goals)):
+                t = tf_result.transform.translation
+                print(
+                    f"[TC1.2] Goal {i + 1} EE: "
+                    f"x={t.x:.4f}  y={t.y:.4f}  z={t.z:.4f}  "
+                    f"target: x={goal.pose.position.x:.4f}  "
+                    f"y={goal.pose.position.y:.4f}  z={goal.pose.position.z:.4f}"
+                )
+            print(f"[TC1.2] Result: {'PASS' if passed else 'FAIL'}")
 
     # -----------------------------------------------------------------------
     # TC1.3 — Gripper Open/Close  (validates C)
@@ -469,8 +629,32 @@ class TestKeyControlConcepts(unittest.TestCase):
     # Internal helpers
     # -----------------------------------------------------------------------
 
+    def _send_mission_and_wait(self, poses: list) -> None:
+        """Set a mission from a list of PoseStamped and block until mission_complete fires."""
+        pa = PoseArray()
+        pa.header.frame_id = 'world'
+        pa.header.stamp = self.node.get_clock().now().to_msg()
+        pa.poses = [p.pose for p in poses]
+        self.set_mission_pub.publish(pa)
+        time.sleep(0.5)  # allow node to process set_mission
+
+        start_msg = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
+        self.node.get_logger().info(
+            f"Mission sent with {len(poses)} goal(s). Waiting for mission_complete."
+        )
+
+        deadline = time.time() + MOTION_TIMEOUT_S * len(poses)
+        while not TestKeyControlConcepts.mission_complete:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            if time.time() > deadline:
+                self.fail(
+                    f"Mission did not complete within {MOTION_TIMEOUT_S * len(poses):.0f} s"
+                )
+
     def _send_goal_and_wait(self, pose: PoseStamped) -> None:
-        """Publish a goal and block until /wordle_bot/motion_complete fires."""
+        """Publish a single goal via legacy topic and block until motion_complete fires."""
         TestKeyControlConcepts.motion_complete = False
         time.sleep(0.5)  # subscriber handshake
         pose.header.stamp = self.node.get_clock().now().to_msg()
@@ -585,3 +769,61 @@ def _read_last_joint_state(bag_path: str):
     except Exception as exc:
         print(f"[TC1.1] Warning: could not read joint states from bag: {exc}")
         return None
+
+
+def _read_joint_trajectory(bag_path: str) -> list:
+    """Return ordered list of (timestamp_ns, positions) from all JointState messages in a bag."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3')
+        converter_options = rosbag2_py.ConverterOptions('', '')
+        reader.open(storage_options, converter_options)
+        trajectory = []
+        while reader.has_next():
+            topic, data, timestamp_ns = reader.read_next()
+            if topic == '/joint_states':
+                msg = deserialize_message(data, JointState)
+                trajectory.append((timestamp_ns, list(msg.position)))
+        return trajectory
+    except Exception as exc:
+        print(f"[TC1.2] Warning: could not read joint trajectory from bag: {exc}")
+        return []
+
+
+def _read_goal_reached_timestamps(bag_path: str) -> list:
+    """Return ordered list of timestamp_ns for each /wordle_bot/goal_reached message in a bag."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3')
+        converter_options = rosbag2_py.ConverterOptions('', '')
+        reader.open(storage_options, converter_options)
+        timestamps = []
+        while reader.has_next():
+            topic, data, timestamp_ns = reader.read_next()
+            if topic == '/wordle_bot/goal_reached':
+                msg = deserialize_message(data, Bool)
+                if msg.data:
+                    timestamps.append(timestamp_ns)
+        return timestamps
+    except Exception as exc:
+        print(f"[TC1.2] Warning: could not read goal_reached timestamps from bag: {exc}")
+        return []
+
+
+def _segment_trajectory_by_goals(traj_stamped: list, goal_reached_ts: list) -> list:
+    """Split a stamped joint trajectory into per-leg lists of position vectors.
+
+    traj_stamped: list of (timestamp_ns, positions) in chronological order
+    goal_reached_ts: list of timestamp_ns marking the end of each goal leg
+
+    Returns a list of N lists of position vectors, one list per goal leg.
+    Leg i contains all joint states from the end of leg i-1 (or mission start) up to
+    and including the joint state closest to goal_reached_ts[i].
+    """
+    legs = []
+    leg_start_ts = 0  # before the first recorded joint state
+    for goal_ts in goal_reached_ts:
+        leg = [pos for ts, pos in traj_stamped if leg_start_ts <= ts <= goal_ts]
+        legs.append(leg)
+        leg_start_ts = goal_ts
+    return legs
