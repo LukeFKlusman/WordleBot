@@ -21,13 +21,17 @@ Run with:
 """
 
 import math
+import os
+import subprocess
+import tempfile
 import time
 import unittest
 
-import launch_testing
-import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
+from rclpy.serialization import deserialize_message
+import rosbag2_py
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
 import tf2_ros
 from tf2_ros import TransformException
@@ -51,7 +55,7 @@ GRIPPER_TIMEOUT_S       = 2.0     # gripper must respond within this time
 def _make_pose_stamped(x: float, y: float, z: float,
                        roll: float = math.pi, pitch: float = 0.0,
                        yaw: float = 0.0,
-                       frame_id: str = "ur_base_link") -> PoseStamped:
+                       frame_id: str = "world") -> PoseStamped:
     """Build a PoseStamped from (x, y, z, roll, pitch, yaw) in the given frame."""
     cy, sy = math.cos(yaw / 2),   math.sin(yaw / 2)
     cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
@@ -80,7 +84,25 @@ def _quat_angle_diff_deg(q1, q2) -> float:
 # Test fixture
 # ---------------------------------------------------------------------------
 
-@pytest.mark.launch(fixture=launch_testing.fixtures.launch_context_with_nodes)
+def _read_last_joint_state(bag_path: str):
+    """Return the last JointState message recorded in a bag, or None on failure."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3')
+        converter_options = rosbag2_py.ConverterOptions('', '')
+        reader.open(storage_options, converter_options)
+        last_msg = None
+        while reader.has_next():
+            topic, data, _ = reader.read_next()
+            if topic == '/joint_states':
+                last_msg = deserialize_message(data, JointState)
+        return last_msg
+    except Exception as exc:
+        print(f"[TC1.1] Warning: could not read joint states from bag: {exc}")
+        return None
+
+
+
 class TestKeyControlConcepts(unittest.TestCase):
     """Test Case 1: Key Control Concepts (validates P, C, D criteria)."""
 
@@ -166,17 +188,20 @@ class TestKeyControlConcepts(unittest.TestCase):
                 )
 
     def _get_ee_transform(self):
-        """Look up the current tool0 → ur_base_link transform from /tf."""
+        """Look up the current world → tool0 transform from /tf."""
         deadline = time.time() + 5.0
         while time.time() < deadline:
+            # Spin first to populate the TF buffer, then do an instant lookup.
+            # Using a timeout inside lookup_transform blocks this thread and
+            # prevents the spin_once calls needed to receive TF callbacks.
+            rclpy.spin_once(self.node, timeout_sec=0.1)
             try:
                 return self.tf_buffer.lookup_transform(
-                    "ur_base_link", "tool0",
+                    "world", "tool0",
                     rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=1.0),
                 )
             except TransformException:
-                rclpy.spin_once(self.node, timeout_sec=0.1)
+                pass
         self.fail("Could not look up tool0 → ur_base_link transform within 5 s")
 
     def _assert_pose_reached(self, goal: PoseStamped) -> None:
@@ -226,11 +251,90 @@ class TestKeyControlConcepts(unittest.TestCase):
         """
         goal = _make_pose_stamped(0.3, 0.25, 0.25, roll=math.pi)
 
-        # TODO: send goal and wait for completion
-        # self._send_goal_and_wait(goal)
+        # Start bag recording: capture joint states, TF, and motion_complete signal
+        bag_dir = tempfile.mkdtemp(prefix='tc1_1_')
+        bag_path = os.path.join(bag_dir, 'tc1_1')
+        bag_proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', bag_path,
+             '/joint_states', '/tf', '/wordle_bot/motion_complete'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)  # allow the recorder to initialise before sending the goal
 
-        # TODO: assert EE pose matches goal within tolerance
-        # self._assert_pose_reached(goal)
+        start_time = time.time()
+        self._send_goal_and_wait(goal)
+        execution_time = time.time() - start_time
+
+        print(f"Waiting for motion to complete... (timeout in {MOTION_TIMEOUT_S} s)")
+
+        while not TestKeyControlConcepts.motion_complete:
+            rclpy.spin_once(self.node, timeout_sec=0.01)
+
+        print("Motion complete signal received. Stopping bag recording...") 
+
+        bag_proc.terminate()
+        bag_proc.wait()
+        print(f"[TC1.1] Bag recorded to: {bag_path}")
+
+        # EE pose: use live TF buffer (composed world→tool0 chain).
+        # The bag /tf only has direct parent→child transforms, not the composed
+        # world→tool0 result, so we must query the live buffer here.
+        tf_result = self._get_ee_transform()
+        t = tf_result.transform.translation
+        q = tf_result.transform.rotation
+
+        # Joint angles: read final state from bag
+        last_js = _read_last_joint_state(bag_path)
+
+        pos_err = math.sqrt(
+            (t.x - goal.pose.position.x) ** 2 +
+            (t.y - goal.pose.position.y) ** 2 +
+            (t.z - goal.pose.position.z) ** 2
+        )
+        orient_err = _quat_angle_diff_deg(q, goal.pose.orientation)
+
+        passed = True
+        try:
+            self.node.get_logger().info(
+                f"Position error: {pos_err * 1000:.1f} mm | "
+                f"Orientation error: {orient_err:.2f} deg"
+            )
+            self.assertLessEqual(
+                pos_err, POSITION_TOLERANCE_M,
+                f"Position error {pos_err * 1000:.1f} mm exceeds "
+                f"{POSITION_TOLERANCE_M * 1000:.0f} mm tolerance"
+            )
+            self.assertLessEqual(
+                orient_err, ORIENTATION_TOLERANCE_DEG,
+                f"Orientation error {orient_err:.2f}° exceeds "
+                f"{ORIENTATION_TOLERANCE_DEG:.0f}° tolerance"
+            )
+        except AssertionError:
+            passed = False
+            raise
+        finally:
+            # Print final EE pose
+            print(
+                f"\n[TC1.1] Final EE pose:  "
+                f"x={t.x:.4f}  y={t.y:.4f}  z={t.z:.4f}  "
+                f"qx={q.x:.4f}  qy={q.y:.4f}  qz={q.z:.4f}  qw={q.w:.4f}"
+            )
+
+            # Print joint angles (from bag)
+            if last_js:
+                angle_str = '  '.join(
+                    f"{n}={math.degrees(a):.1f}°"
+                    for n, a in zip(last_js.name, last_js.position)
+                )
+                print(f"[TC1.1] Final joints:   {angle_str}")
+            else:
+                print("[TC1.1] Final joints:   (not available — bag read failed)")
+
+            # Print execution time
+            print(f"[TC1.1] Execution time: {execution_time:.2f} s")
+
+            # Print overall result
+            print(f"[TC1.1] Result:         {'PASS' if passed else 'FAIL'}")
 
     # -----------------------------------------------------------------------
     # TC1.2 — Optimised Path Planning  (validates C)

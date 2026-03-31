@@ -1,6 +1,7 @@
 #include "wordleBot_control/wordle_bot_control_node.hpp"
 
-#include <cmath>
+#include <chrono>
+#include <thread>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
@@ -15,18 +16,65 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   motion_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/motion_complete", 10);
 
+  mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
+
+  // Wake the mission thread when the node shuts down so it can exit cleanly
+  rclcpp::on_shutdown([this]() { cv_.notify_all(); });
+
   RCLCPP_INFO(LOGGER, "WordleBotControlNode initialised.");
+}
+
+WordleBotControlNode::~WordleBotControlNode()
+{
+  cv_.notify_all();
+  if (mission_thread_.joinable()) {
+    mission_thread_.join();
+  }
 }
 
 void WordleBotControlNode::goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
-  RCLCPP_INFO(LOGGER, "Received goal on /wordle_bot/goal_pose — executing motion.");
-  controller_->moveToTarget(msg->pose);
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    goal_queue_.push(msg->pose);
+  }
+  cv_.notify_one();
+  RCLCPP_INFO(LOGGER, "Goal enqueued. Queue size: %zu", goal_queue_.size());
+}
 
-  std_msgs::msg::Bool complete;
-  complete.data = true;
-  motion_complete_pub_->publish(complete);
-  RCLCPP_INFO(LOGGER, "Motion complete — published to /wordle_bot/motion_complete.");
+void WordleBotControlNode::missionLoop()
+{
+  RCLCPP_INFO(LOGGER, "Mission thread started.");
+  while (rclcpp::ok()) {
+    geometry_msgs::msg::Pose goal;
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      cv_.wait(lock, [this]() {
+        return !goal_queue_.empty() || !rclcpp::ok();
+      });
+      if (!rclcpp::ok()) break;
+      goal = goal_queue_.front();
+      goal_queue_.pop();
+    }
+
+    // Lock released — safe to call the long-running moveToTarget
+    mission_state_ = MissionState::RUNNING;
+    RCLCPP_INFO(LOGGER, "Mission thread: executing goal.");
+    controller_->moveToTarget(goal);
+
+    std_msgs::msg::Bool complete;
+    complete.data = true;
+    motion_complete_pub_->publish(complete);
+    RCLCPP_INFO(LOGGER, "Motion complete published.");
+
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      if (goal_queue_.empty()) {
+        mission_state_ = MissionState::IDLE;
+      }
+    }
+  }
+  RCLCPP_INFO(LOGGER, "Mission thread exiting.");
 }
 
 rclcpp::node_interfaces::NodeBaseInterface::SharedPtr
@@ -43,20 +91,13 @@ void WordleBotControlNode::setupScene()
 
 void WordleBotControlNode::run()
 {
-  RCLCPP_INFO(LOGGER, "Running goal sequence.");
-
-  // Test goal: end-effector facing downward (180 deg roll), matching hello_ur3eMoveit
-  auto target1 = WordleBotController::buildPose( 0.3, 0.25, 0.25,   // x, y, z
-                                                M_PI, 0.0, 0.0 );    // roll, pitch, yaw
-
-  auto target2 = WordleBotController::buildPose( -0.2, 0.3, 0.15, M_PI, 0.0, 0.0 ); 
-  auto target3 = WordleBotController::buildPose( 0.2, 0.25, 0.20, M_PI, 0.0, 0.0 );
-  auto target4 = WordleBotController::buildPose( -0.3, 0.3, 0.10, M_PI, 0.0, 0.0 );
-
-  controller_->moveToTarget(target1);
-  controller_->moveToTarget(target2);
-  controller_->moveToTarget(target3);
-  controller_->moveToTarget(target4);
-
-  return;
+  RCLCPP_INFO(LOGGER, "run(): mission interface active — waiting for goals on /wordle_bot/goal_pose.");
+  while (rclcpp::ok()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  RCLCPP_INFO(LOGGER, "run(): shutdown detected, joining mission thread.");
+  if (mission_thread_.joinable()) {
+    mission_thread_.join();
+  }
+  RCLCPP_INFO(LOGGER, "run(): mission thread joined.");
 }
