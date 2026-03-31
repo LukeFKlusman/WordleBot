@@ -17,6 +17,9 @@ class WordleView : public QWidget
 public:
   explicit WordleView(QWidget * parent = nullptr);
   ~WordleView() override;
+  void previewGuess(const QString & guess);
+  void clearPreviewGuess();
+  void submitPreviewGuess();
 
 protected:
   bool eventFilter(QObject * watched, QEvent * event) override;

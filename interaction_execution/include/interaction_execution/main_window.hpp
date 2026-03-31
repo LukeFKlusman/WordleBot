@@ -27,6 +27,8 @@ public:
 
 private:
   void setupTabs();
+  void setupVoiceControls();
+  void updateVoiceControlsState();
   void setupMissionOverlay();
   void handleMainTabChanged(int index);
   void toggleMissionOverlay();
@@ -45,4 +47,6 @@ private:
   int mission_tab_index_{-1};
   int last_content_tab_index_{0};
   bool restoring_content_tab_{false};
+  bool voice_recording_{false};
+  QString pending_voice_guess_;
 };

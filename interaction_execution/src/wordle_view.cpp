@@ -113,6 +113,51 @@ WordleView::~WordleView()
   }
 }
 
+void WordleView::previewGuess(const QString & guess)
+{
+#ifdef HAS_QT_WEBENGINE
+  if (web_view_ == nullptr) {
+    return;
+  }
+
+  web_view_->page()->runJavaScript(
+    QStringLiteral(
+      "if (typeof window.wordleSetQtGuess === 'function') {"
+      "  window.wordleSetQtGuess('%1');"
+      "}").arg(guess.toLower()));
+#else
+  (void)guess;
+#endif
+}
+
+void WordleView::clearPreviewGuess()
+{
+#ifdef HAS_QT_WEBENGINE
+  if (web_view_ == nullptr) {
+    return;
+  }
+
+  web_view_->page()->runJavaScript(
+    "if (typeof window.wordleClearQtGuess === 'function') {"
+    "  window.wordleClearQtGuess();"
+    "}");
+#endif
+}
+
+void WordleView::submitPreviewGuess()
+{
+#ifdef HAS_QT_WEBENGINE
+  if (web_view_ == nullptr) {
+    return;
+  }
+
+  web_view_->page()->runJavaScript(
+    "if (typeof window.wordleSubmitQtGuess === 'function') {"
+    "  window.wordleSubmitQtGuess();"
+    "}");
+#endif
+}
+
 bool WordleView::eventFilter(QObject * watched, QEvent * event)
 {
 #ifdef HAS_QT_WEBENGINE

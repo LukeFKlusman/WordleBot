@@ -15,9 +15,9 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QFont, QFontDatabase, QGradient, QIcon,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
-from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout, QLabel,
-    QMainWindow, QPushButton, QSizePolicy, QTabWidget,
-    QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QMainWindow, QPushButton, QSizePolicy,
+    QTabWidget, QVBoxLayout, QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
@@ -36,7 +36,7 @@ class Ui_MainWindow(object):
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.centralwidget.setStyleSheet(u"QWidget#centralwidget {\n"
-"    background-color: #0f1117;\n"
+"    background-color: #1a1f2e;\n"
 "}")
         self.horizontalLayout = QHBoxLayout(self.centralwidget)
         self.horizontalLayout.setSpacing(0)
@@ -45,19 +45,26 @@ class Ui_MainWindow(object):
         self.mainTab = QTabWidget(self.centralwidget)
         self.mainTab.setObjectName(u"mainTab")
         self.mainTab.setMinimumSize(QSize(680, 0))
-        self.mainTab.setStyleSheet(u"QTabWidget::pane {\n"
-"    background-color: #0d1018;\n"
+        self.mainTab.setStyleSheet(u"QTabWidget {\n"
+"    background-color: #1a1f2e;\n"
+"}\n"
+"QTabWidget::pane {\n"
+"    background-color: #1a1f2e;\n"
 "    border: none;\n"
+"    border-top: 8px solid #1a1f2e;\n"
 "    margin: 0px;\n"
 "    padding: 0px;\n"
 "    top: -8px;\n"
 "}\n"
+"QWidget#tab,\n"
+"QWidget#tab_2,\n"
+"QWidget#tab_3 {\n"
+"    background-color: #0d1018;\n"
+"}\n"
 "QTabWidget::tab-bar {\n"
 "    alignment: left;\n"
 "}\n"
-"QTabBar {\n"colcon build --packages-select interaction_execution
-    source install/setup.bash
-    ros2 launch interaction_execution gui.launch.py
+"QTabBar {\n"
 "    background-color: #1a1f2e;\n"
 "}\n"
 "QTabBar::tab {\n"
@@ -112,11 +119,137 @@ class Ui_MainWindow(object):
 
         self.wordleColumnLayout.addWidget(self.wordle)
 
-        self.safetyControls = QWidget(self.centralwidget)
-        self.safetyControls.setObjectName(u"safetyControls")
+        self.voiceControls = QWidget(self.centralwidget)
+        self.voiceControls.setObjectName(u"voiceControls")
         sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         sizePolicy1.setHorizontalStretch(0)
         sizePolicy1.setVerticalStretch(0)
+        sizePolicy1.setHeightForWidth(self.voiceControls.sizePolicy().hasHeightForWidth())
+        self.voiceControls.setSizePolicy(sizePolicy1)
+        self.voiceControls.setMinimumSize(QSize(0, 176))
+        self.voiceControls.setMaximumSize(QSize(16777215, 176))
+        self.voiceControls.setStyleSheet(u"QWidget#voiceControls {\n"
+"    background-color: #0f1117;\n"
+"    border-top: 1px solid rgba(255, 255, 255, 0.06);\n"
+"    border-bottom: 1px solid rgba(255, 255, 255, 0.06);\n"
+"}\n"
+"QLabel#voiceLabel {\n"
+"    color: #38bdf8;\n"
+"    font-size: 8pt;\n"
+"    font-weight: 700;\n"
+"    letter-spacing: 2px;\n"
+"    background: transparent;\n"
+"}\n"
+"QFrame#voiceTranscriptFrame {\n"
+"    background-color: #111827;\n"
+"    border: 1px solid rgba(148, 163, 184, 0.18);\n"
+"    border-radius: 8px;\n"
+"}\n"
+"QLabel#voiceTranscriptValue {\n"
+"    color: #f8fafc;\n"
+"    font-size: 15pt;\n"
+"    font-weight: 700;\n"
+"    background: transparent;\n"
+"}\n"
+"QPushButton#voiceRecordButton,\n"
+"QPushButton#voiceStopButton,\n"
+"QPushButton#voiceConfirmButton,\n"
+"QPushButton#voiceRetryButton {\n"
+"    border-radius: 6px;\n"
+"    font-size: 9pt;\n"
+"    font-weight: 700;\n"
+"    padding: 8px 0px;\n"
+"}\n"
+"QPushButton#voiceRecordButton {\n"
+"    background-color: #1f2937;\n"
+"    color: #f8fafc;\n"
+"    border: 1px solid rgb"
+                        "a(248, 113, 113, 0.35);\n"
+"}\n"
+"QPushButton#voiceRecordButton:hover {\n"
+"    background-color: #273244;\n"
+"}\n"
+"QPushButton#voiceStopButton {\n"
+"    background-color: #111827;\n"
+"    color: #f8fafc;\n"
+"    border: 1px solid rgba(255, 255, 255, 0.16);\n"
+"}\n"
+"QPushButton#voiceStopButton:hover {\n"
+"    background-color: #1b2432;\n"
+"}\n"
+"QPushButton#voiceConfirmButton {\n"
+"    background-color: #0f2f20;\n"
+"    color: #dcfce7;\n"
+"    border: 1px solid rgba(74, 222, 128, 0.28);\n"
+"}\n"
+"QPushButton#voiceConfirmButton:hover {\n"
+"    background-color: #16402d;\n"
+"}\n"
+"QPushButton#voiceRetryButton {\n"
+"    background-color: #1e293b;\n"
+"    color: #cbd5e1;\n"
+"    border: 1px solid rgba(255, 255, 255, 0.1);\n"
+"}\n"
+"QPushButton#voiceRetryButton:hover {\n"
+"    background-color: #273449;\n"
+"}")
+        self.voiceControlsLayout = QVBoxLayout(self.voiceControls)
+        self.voiceControlsLayout.setSpacing(10)
+        self.voiceControlsLayout.setObjectName(u"voiceControlsLayout")
+        self.voiceControlsLayout.setContentsMargins(12, 12, 12, 12)
+        self.voiceLabel = QLabel(self.voiceControls)
+        self.voiceLabel.setObjectName(u"voiceLabel")
+
+        self.voiceControlsLayout.addWidget(self.voiceLabel)
+
+        self.voiceTranscriptFrame = QFrame(self.voiceControls)
+        self.voiceTranscriptFrame.setObjectName(u"voiceTranscriptFrame")
+        self.voiceTranscriptFrame.setFrameShape(QFrame.StyledPanel)
+        self.voiceTranscriptFrame.setFrameShadow(QFrame.Raised)
+        self.voiceTranscriptLayout = QVBoxLayout(self.voiceTranscriptFrame)
+        self.voiceTranscriptLayout.setObjectName(u"voiceTranscriptLayout")
+        self.voiceTranscriptLayout.setContentsMargins(12, 12, 12, 12)
+        self.voiceTranscriptValue = QLabel(self.voiceTranscriptFrame)
+        self.voiceTranscriptValue.setObjectName(u"voiceTranscriptValue")
+        self.voiceTranscriptValue.setAlignment(Qt.AlignCenter)
+
+        self.voiceTranscriptLayout.addWidget(self.voiceTranscriptValue)
+
+
+        self.voiceControlsLayout.addWidget(self.voiceTranscriptFrame)
+
+        self.voiceButtonsLayout = QGridLayout()
+        self.voiceButtonsLayout.setObjectName(u"voiceButtonsLayout")
+        self.voiceButtonsLayout.setHorizontalSpacing(8)
+        self.voiceButtonsLayout.setVerticalSpacing(8)
+        self.voiceRecordButton = QPushButton(self.voiceControls)
+        self.voiceRecordButton.setObjectName(u"voiceRecordButton")
+
+        self.voiceButtonsLayout.addWidget(self.voiceRecordButton, 0, 0, 1, 1)
+
+        self.voiceStopButton = QPushButton(self.voiceControls)
+        self.voiceStopButton.setObjectName(u"voiceStopButton")
+
+        self.voiceButtonsLayout.addWidget(self.voiceStopButton, 0, 1, 1, 1)
+
+        self.voiceConfirmButton = QPushButton(self.voiceControls)
+        self.voiceConfirmButton.setObjectName(u"voiceConfirmButton")
+
+        self.voiceButtonsLayout.addWidget(self.voiceConfirmButton, 1, 0, 1, 1)
+
+        self.voiceRetryButton = QPushButton(self.voiceControls)
+        self.voiceRetryButton.setObjectName(u"voiceRetryButton")
+
+        self.voiceButtonsLayout.addWidget(self.voiceRetryButton, 1, 1, 1, 1)
+
+
+        self.voiceControlsLayout.addLayout(self.voiceButtonsLayout)
+
+
+        self.wordleColumnLayout.addWidget(self.voiceControls)
+
+        self.safetyControls = QWidget(self.centralwidget)
+        self.safetyControls.setObjectName(u"safetyControls")
         sizePolicy1.setHeightForWidth(self.safetyControls.sizePolicy().hasHeightForWidth())
         self.safetyControls.setSizePolicy(sizePolicy1)
         self.safetyControls.setMinimumSize(QSize(0, 130))
@@ -240,7 +373,13 @@ class Ui_MainWindow(object):
         self.mainTab.setTabText(self.mainTab.indexOf(self.tab), QCoreApplication.translate("MainWindow", u"Sim View", None))
         self.mainTab.setTabText(self.mainTab.indexOf(self.tab_2), QCoreApplication.translate("MainWindow", u"Camera", None))
         self.mainTab.setTabText(self.mainTab.indexOf(self.tab_3), QCoreApplication.translate("MainWindow", u"Diagnostics", None))
-        self.safetyLabel.setText(QCoreApplication.translate("MainWindow", u"\u26a0  SAFETY CONTROLS", None))
+        self.voiceLabel.setText(QCoreApplication.translate("MainWindow", u"VOICE CONTROL", None))
+        self.voiceTranscriptValue.setText(QCoreApplication.translate("MainWindow", u"Awaiting input...", None))
+        self.voiceRecordButton.setText(QCoreApplication.translate("MainWindow", u"Record", None))
+        self.voiceStopButton.setText(QCoreApplication.translate("MainWindow", u"Stop", None))
+        self.voiceConfirmButton.setText(QCoreApplication.translate("MainWindow", u"Confirm", None))
+        self.voiceRetryButton.setText(QCoreApplication.translate("MainWindow", u"Retry", None))
+        self.safetyLabel.setText(QCoreApplication.translate("MainWindow", u"SAFETY CONTROLS", None))
         self.pushButton.setText(QCoreApplication.translate("MainWindow", u"START", None))
         self.pushButton_2.setText(QCoreApplication.translate("MainWindow", u"RESUME", None))
         self.pushButton_3.setText(QCoreApplication.translate("MainWindow", u"HOME", None))

@@ -7,20 +7,87 @@
 
 #include <algorithm>
 #include <QFrame>
+#include <QIcon>
 #include <QLabel>
 #include <QMoveEvent>
+#include <QPainter>
+#include <QPixmap>
+#include <QPushButton>
+#include <QRandomGenerator>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QStyle>
 #include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+
+namespace
+{
+const QStringList kWordleDemoWords{
+  "apple", "baker", "chair", "droid", "eagle", "flame", "grape", "house",
+  "input", "jolly", "kneel", "laser", "mango", "noble", "ocean", "piano",
+  "queen", "robot", "smile", "table", "ultra", "vivid", "whale", "xenon",
+  "yacht", "zebra"};
+
+QIcon makeRecordIcon()
+{
+  QPixmap pixmap(18, 18);
+  pixmap.fill(Qt::transparent);
+
+  QPainter painter(&pixmap);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(QColor("#ef4444"));
+  painter.drawEllipse(2, 2, 14, 14);
+
+  return QIcon(pixmap);
+}
+
+QIcon makeStopIcon()
+{
+  QPixmap pixmap(18, 18);
+  pixmap.fill(Qt::transparent);
+
+  QPainter painter(&pixmap);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(QColor("#f8fafc"));
+  painter.drawRect(3, 3, 12, 12);
+
+  return QIcon(pixmap);
+}
+
+QIcon makeConfirmIcon()
+{
+  QPixmap pixmap(18, 18);
+  pixmap.fill(Qt::transparent);
+
+  QPainter painter(&pixmap);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  QPen pen(QColor("#4ade80"));
+  pen.setWidth(3);
+  pen.setCapStyle(Qt::RoundCap);
+  pen.setJoinStyle(Qt::RoundJoin);
+  painter.setPen(pen);
+  painter.drawLine(3, 10, 7, 14);
+  painter.drawLine(7, 14, 15, 4);
+
+  return QIcon(pixmap);
+}
+
+QString randomWordleWord()
+{
+  const int index = QRandomGenerator::global()->bounded(kWordleDemoWords.size());
+  return kWordleDemoWords.at(index);
+}
+}  // namespace
 
 MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
 : QMainWindow(parent), ui_(std::make_unique<Ui::MainWindow>()), node_(std::move(node))
 {
   ui_->setupUi(this);
   setupTabs();
+  setupVoiceControls();
   setupMissionOverlay();
 }
 
@@ -48,6 +115,70 @@ void MainWindow::setupTabs()
   last_content_tab_index_ = ui_->mainTab->currentIndex();
 
   connect(ui_->mainTab, &QTabWidget::currentChanged, this, &MainWindow::handleMainTabChanged);
+}
+
+void MainWindow::setupVoiceControls()
+{
+  ui_->voiceRecordButton->setIcon(makeRecordIcon());
+  ui_->voiceRecordButton->setIconSize(QSize(18, 18));
+  ui_->voiceStopButton->setIcon(makeStopIcon());
+  ui_->voiceStopButton->setIconSize(QSize(18, 18));
+  ui_->voiceConfirmButton->setIcon(makeConfirmIcon());
+  ui_->voiceConfirmButton->setIconSize(QSize(18, 18));
+  ui_->voiceRetryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
+  ui_->voiceRetryButton->setIconSize(QSize(18, 18));
+
+  connect(ui_->voiceRecordButton, &QPushButton::clicked, this, [this]() {
+    voice_recording_ = true;
+    ui_->voiceTranscriptValue->setText(tr("Listening..."));
+    updateVoiceControlsState();
+  });
+
+  connect(ui_->voiceStopButton, &QPushButton::clicked, this, [this]() {
+    if (!voice_recording_) {
+      return;
+    }
+
+    voice_recording_ = false;
+    pending_voice_guess_ = randomWordleWord();
+    wordle_view_->previewGuess(pending_voice_guess_);
+    ui_->voiceTranscriptValue->setText(tr("Preview ready"));
+    updateVoiceControlsState();
+  });
+
+  connect(ui_->voiceConfirmButton, &QPushButton::clicked, this, [this]() {
+    if (pending_voice_guess_.isEmpty()) {
+      return;
+    }
+
+    wordle_view_->submitPreviewGuess();
+    pending_voice_guess_.clear();
+    ui_->voiceTranscriptValue->setText(tr("Guess submitted"));
+    updateVoiceControlsState();
+  });
+
+  connect(ui_->voiceRetryButton, &QPushButton::clicked, this, [this]() {
+    if (pending_voice_guess_.isEmpty()) {
+      return;
+    }
+
+    wordle_view_->clearPreviewGuess();
+    pending_voice_guess_.clear();
+    ui_->voiceTranscriptValue->setText(tr("Awaiting input..."));
+    updateVoiceControlsState();
+  });
+
+  updateVoiceControlsState();
+}
+
+void MainWindow::updateVoiceControlsState()
+{
+  const bool has_pending_guess = !pending_voice_guess_.isEmpty();
+
+  ui_->voiceRecordButton->setEnabled(!voice_recording_ && !has_pending_guess);
+  ui_->voiceStopButton->setEnabled(voice_recording_);
+  ui_->voiceConfirmButton->setEnabled(has_pending_guess);
+  ui_->voiceRetryButton->setEnabled(has_pending_guess);
 }
 
 void MainWindow::setupMissionOverlay()
@@ -97,7 +228,7 @@ void MainWindow::setupMissionOverlay()
   header->setObjectName("missionSubheader");
   overlay_layout->addWidget(header);
 
-  auto * title = new QLabel(tr("Assemble Wordle Guess Pipeline"), mission_overlay_);
+  auto * title = new QLabel(tr("Wordle Game Pick and Place"), mission_overlay_);
   title->setObjectName("missionHeader");
   title->setWordWrap(true);
   overlay_layout->addWidget(title);
