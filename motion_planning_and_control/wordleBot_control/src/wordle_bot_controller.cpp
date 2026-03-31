@@ -635,6 +635,15 @@ void WordleBotController::clearCollisionScene()
 }
 
 
+void WordleBotController::addCollisionObject(const moveit_msgs::msg::CollisionObject & obj)
+{
+  planning_scene_.applyCollisionObject(obj);
+  rclcpp::sleep_for(std::chrono::milliseconds(300));
+  RCLCPP_INFO(LOGGER, "addCollisionObject: applied object '%s' (operation=%d).",
+    obj.id.c_str(), static_cast<int>(obj.operation));
+}
+
+
 void WordleBotController::attachSensorCollisionObject()
 {
   moveit_msgs::msg::AttachedCollisionObject attached_object;

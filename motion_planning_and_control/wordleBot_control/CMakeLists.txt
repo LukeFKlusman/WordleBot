@@ -13,6 +13,7 @@ find_package(moveit_visual_tools REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(moveit_msgs REQUIRED)
 
 set(DEPENDENCIES
   rclcpp
@@ -21,6 +22,7 @@ set(DEPENDENCIES
   tf2
   geometry_msgs
   std_msgs
+  moveit_msgs
 )
 
 # --- Library: controller + node sources ---

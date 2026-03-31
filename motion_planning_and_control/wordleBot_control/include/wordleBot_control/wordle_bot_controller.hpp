@@ -35,6 +35,11 @@ public:
   // Remove all collision objects and detach the sensor guard.
   void clearCollisionScene();
 
+  // Apply a CollisionObject to the planning scene.
+  // The obj.operation field (ADD / REMOVE / MOVE) is forwarded unchanged.
+  // Sleeps 300 ms after applying to allow the planning scene to propagate.
+  void addCollisionObject(const moveit_msgs::msg::CollisionObject & obj);
+
   // Attach a protective cylinder collision shape to the tool0 end-effector link.
   // The cylinder moves rigidly with the robot so the planner avoids it.
   void attachSensorCollisionObject();

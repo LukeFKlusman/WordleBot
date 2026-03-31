@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <moveit_msgs/msg/collision_object.hpp>
 
 #include "wordleBot_control/wordle_bot_controller.hpp"
 
@@ -44,6 +45,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr goal_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mission_complete_pub_;
 
+  // Collision object injection interface
+  rclcpp::Subscription<moveit_msgs::msg::CollisionObject>::SharedPtr add_collision_object_sub_;
+
   // Mission state (extensible for TC1.4 Stop/Resume/Abort)
   enum class MissionState { IDLE, RUNNING };
 
@@ -67,4 +71,7 @@ private:
 
   // Runs on mission_thread_: waits until armed, then executes all goals sequentially
   void missionLoop();
+
+  // Forward an incoming CollisionObject to the controller's planning scene
+  void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
 };

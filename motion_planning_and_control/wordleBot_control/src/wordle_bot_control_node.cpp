@@ -32,6 +32,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   mission_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/mission_complete", 10);
 
+  add_collision_object_sub_ = node_->create_subscription<moveit_msgs::msg::CollisionObject>(
+    "/wordle_bot/add_collision_object", 10,
+    std::bind(&WordleBotControlNode::collisionObjectCallback, this, std::placeholders::_1));
+
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
 
   // Wake the mission thread when the node shuts down so it can exit cleanly
@@ -85,6 +89,14 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
   }
   cv_.notify_one();
   RCLCPP_INFO(LOGGER, "Mission armed — execution will begin.");
+}
+
+void WordleBotControlNode::collisionObjectCallback(
+  const moveit_msgs::msg::CollisionObject::SharedPtr msg)
+{
+  RCLCPP_INFO(LOGGER, "collisionObjectCallback: received object '%s' (operation=%d).",
+    msg->id.c_str(), static_cast<int>(msg->operation));
+  controller_->addCollisionObject(*msg);
 }
 
 void WordleBotControlNode::missionLoop()
