@@ -16,70 +16,43 @@
     <height>600</height>
    </size>
   </property>
-  <property name="palette">
-   <palette>
-    <active>
-     <colorrole role="Button">
-      <brush brushstyle="SolidPattern">
-       <color alpha="255">
-        <red>255</red>
-        <green>255</green>
-        <blue>220</blue>
-       </color>
-      </brush>
-     </colorrole>
-    </active>
-    <inactive>
-     <colorrole role="Button">
-      <brush brushstyle="SolidPattern">
-       <color alpha="255">
-        <red>255</red>
-        <green>255</green>
-        <blue>220</blue>
-       </color>
-      </brush>
-     </colorrole>
-    </inactive>
-    <disabled>
-     <colorrole role="Button">
-      <brush brushstyle="SolidPattern">
-       <color alpha="255">
-        <red>255</red>
-        <green>255</green>
-        <blue>220</blue>
-       </color>
-      </brush>
-     </colorrole>
-    </disabled>
-   </palette>
-  </property>
   <property name="font">
    <font>
-    <family>Abyssinica SIL</family>
-    <pointsize>20</pointsize>
-    <weight>75</weight>
-    <bold>true</bold>
+    <family>Ubuntu</family>
+    <pointsize>10</pointsize>
+    <weight>50</weight>
+    <bold>false</bold>
    </font>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">QMainWindow {
+    background-color: #0f1117;
+}</string>
   </property>
   <property name="windowTitle">
    <string>WordleBot</string>
   </property>
   <widget class="QWidget" name="centralwidget">
+   <property name="styleSheet">
+    <string notr="true">QWidget#centralwidget {
+    background-color: #0f1117;
+}</string>
+   </property>
    <layout class="QHBoxLayout" name="horizontalLayout">
     <property name="spacing">
-     <number>12</number>
+     <number>0</number>
     </property>
     <property name="leftMargin">
-     <number>8</number>
+     <number>0</number>
     </property>
     <property name="topMargin">
-     <number>8</number>
+     <number>0</number>
     </property>
     <property name="rightMargin">
-     <number>8</number>
+     <number>0</number>
     </property>
     <property name="bottomMargin">
-     <number>8</number>
+     <number>0</number>
     </property>
     <item>
      <widget class="QTabWidget" name="mainTab">
@@ -90,17 +63,39 @@
        </size>
       </property>
       <property name="styleSheet">
-       <string notr="true">QTabBar {
-    background: #2e2e2e;
+       <string notr="true">QTabWidget::pane {
+    background-color: #0d1018;
+    border: none;
+    margin: 0px;
+    padding: 0px;
+    top: -8px;
 }
-
+QTabWidget::tab-bar {
+    alignment: left;
+}
+QTabBar {
+    background-color: #1a1f2e;
+}
 QTabBar::tab {
-    background: #4a4a4a;
-    color: white;
+    background-color: transparent;
+    color: #64748b;
+    padding: 8px 20px;
+    font-size: 9pt;
+    font-weight: 600;
+    border-bottom: 2px solid transparent;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+    min-width: 80px;
 }
-
 QTabBar::tab:selected {
-    background: #1e1e1e;
+    color: #a5b4fc;
+    border-bottom: 2px solid #6366f1;
+    background-color: transparent;
+}
+QTabBar::tab:hover:!selected {
+    color: #94a3b8;
+    background-color: rgba(255, 255, 255, 0.04);
 }</string>
       </property>
       <property name="currentIndex">
@@ -126,7 +121,19 @@ QTabBar::tab:selected {
     <item>
      <layout class="QVBoxLayout" name="wordleColumnLayout">
       <property name="spacing">
-       <number>10</number>
+       <number>0</number>
+      </property>
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
       </property>
       <item>
        <widget class="QWidget" name="wordle">
@@ -138,12 +145,15 @@ QTabBar::tab:selected {
         </property>
         <property name="minimumSize">
          <size>
-          <width>280</width>
+          <width>230</width>
           <height>0</height>
          </size>
         </property>
         <property name="styleSheet">
-         <string notr="true">border: 1px solid black</string>
+         <string notr="true">QWidget#wordle {
+    background-color: #0f1117;
+    border: none;
+}</string>
         </property>
        </widget>
       </item>
@@ -158,48 +168,104 @@ QTabBar::tab:selected {
         <property name="minimumSize">
          <size>
           <width>0</width>
-          <height>128</height>
+          <height>130</height>
          </size>
         </property>
         <property name="maximumSize">
          <size>
-          <width>16777215</width>
-          <height>128</height>
+           <width>16777215</width>
+          <height>130</height>
          </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QWidget#safetyControls {
+    background-color: #130d0d;
+    border-top: 2px solid rgba(220, 38, 38, 0.5);
+}
+QPushButton {
+    border-radius: 6px;
+    font-size: 9pt;
+    font-weight: 700;
+    padding: 8px 0px;
+}
+QPushButton#pushButton {
+    background-color: #6366f1;
+    color: white;
+    border: none;
+}
+QPushButton#pushButton:hover {
+    background-color: #4f52d4;
+}
+QPushButton#pushButton:pressed {
+    background-color: #4338ca;
+}
+QPushButton#pushButton_4 {
+    background-color: #dc2626;
+    color: white;
+    border: 1px solid #ef4444;
+}
+QPushButton#pushButton_4:hover {
+    background-color: #b91c1c;
+}
+QPushButton#pushButton_4:pressed {
+    background-color: #991b1b;
+}
+QPushButton#pushButton_2,
+QPushButton#pushButton_3 {
+    background-color: #1e293b;
+    color: #94a3b8;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+QPushButton#pushButton_2:hover,
+QPushButton#pushButton_3:hover {
+    background-color: #273449;
+}
+QPushButton#pushButton_2:pressed,
+QPushButton#pushButton_3:pressed {
+    background-color: #1a2438;
+}</string>
         </property>
         <layout class="QVBoxLayout" name="safetyControlsLayout">
          <property name="leftMargin">
-          <number>0</number>
+          <number>12</number>
          </property>
          <property name="topMargin">
-          <number>0</number>
+          <number>10</number>
          </property>
          <property name="rightMargin">
-          <number>0</number>
+          <number>12</number>
          </property>
          <property name="bottomMargin">
-          <number>0</number>
+          <number>12</number>
+         </property>
+         <property name="spacing">
+          <number>8</number>
          </property>
          <item>
-          <spacer name="verticalSpacerTop">
-           <property name="orientation">
-            <enum>Qt::Vertical</enum>
+          <widget class="QLabel" name="safetyLabel">
+           <property name="text">
+            <string>⚠  SAFETY CONTROLS</string>
            </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>20</width>
-             <height>8</height>
-            </size>
+           <property name="styleSheet">
+            <string notr="true">QLabel#safetyLabel {
+    color: #ef4444;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 2px;
+    background: transparent;
+    border: none;
+    padding: 0px;
+}</string>
            </property>
-          </spacer>
+          </widget>
          </item>
          <item>
           <layout class="QGridLayout" name="gridLayout">
            <property name="horizontalSpacing">
-            <number>12</number>
+            <number>8</number>
            </property>
            <property name="verticalSpacing">
-            <number>12</number>
+            <number>8</number>
            </property>
            <item row="0" column="0">
             <widget class="QPushButton" name="pushButton">
@@ -230,19 +296,6 @@ QTabBar::tab:selected {
             </widget>
            </item>
           </layout>
-         </item>
-         <item>
-          <spacer name="verticalSpacerBottom">
-           <property name="orientation">
-            <enum>Qt::Vertical</enum>
-           </property>
-           <property name="sizeHint" stdset="0">
-            <size>
-             <width>20</width>
-             <height>8</height>
-            </size>
-           </property>
-          </spacer>
          </item>
         </layout>
        </widget>

@@ -7,6 +7,7 @@ find_package(cv_bridge REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 find_package(rviz_common REQUIRED)
 find_package(rviz_rendering REQUIRED)
@@ -44,6 +45,7 @@ ament_target_dependencies(interaction_execution_node
   rviz_rendering
   rviz_default_plugins
   sensor_msgs
+  std_msgs
 )
 
 target_link_libraries(interaction_execution_node
@@ -63,6 +65,11 @@ install(TARGETS interaction_execution_node
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
+
+install(DIRECTORY rviz
+  DESTINATION share/${PROJECT_NAME}
+)
+
 
 install(DIRECTORY src/wordle-clone
   DESTINATION share/${PROJECT_NAME}
