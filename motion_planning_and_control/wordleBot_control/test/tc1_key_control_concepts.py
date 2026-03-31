@@ -3,7 +3,7 @@ Test Case 1 — Key Control Concepts
 Validates: P (Pass), C (Credit), D (Distinction) criteria
 
 Sub-tests:
-  TC1.1  Basic point-to-point movement                   (P)
+  TC1.1  Basic point-to-point movement                    (P)
   TC1.2  Optimised path planning via cost function        (C)
   TC1.3  Gripper open/close                               (C)
   TC1.4  Mission control: Stop / Resume / Abort           (C)
@@ -18,6 +18,9 @@ Prerequisites (must be running before colcon test):
 Run with:
   colcon test --packages-select wordleBot_control --pytest-args -k tc1
   colcon test-result --verbose
+
+  Run TC1.1 in isolation:
+  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
 """
 
 import math
