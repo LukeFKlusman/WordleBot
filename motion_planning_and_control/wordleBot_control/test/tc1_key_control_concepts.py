@@ -41,8 +41,8 @@ from rclpy.serialization import deserialize_message
 import rosbag2_py
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool
-import numpy as np
 import tf2_ros
+from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformException, sleep
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
@@ -187,7 +187,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         bag_path = os.path.join(bag_dir, 'tc1_1')
         bag_proc = subprocess.Popen(
             ['ros2', 'bag', 'record', '-o', bag_path,
-             '/joint_states', '/tf',
+             '/joint_states', '/tf', '/tf_static',
              '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -208,10 +208,10 @@ class TestKeyControlConcepts(unittest.TestCase):
         bag_proc.wait()
         print(f"[TC1.1] Bag recorded to: {bag_path}")
 
-        # EE pose: use live TF buffer (composed world→tool0 chain).
-        # The bag /tf only has direct parent→child transforms, not the composed
-        # world→tool0 result, so we must query the live buffer here.
-        tf_result = self._get_ee_transform()
+        # EE pose: read from bag using BufferCore (handles full world→tool0 chain
+        # by composing both /tf_static and /tf transforms offline).
+        goal_reached_ts = _read_goal_reached_timestamps(bag_path)
+        tf_result = _read_ee_pose_from_bag(bag_path, goal_reached_ts[0] if goal_reached_ts else 0)
         t = tf_result.transform.translation
         q = tf_result.transform.rotation
 
@@ -224,6 +224,15 @@ class TestKeyControlConcepts(unittest.TestCase):
             (t.z - goal.pose.position.z) ** 2
         )
         orient_err = _quat_angle_diff_deg(q, goal.pose.orientation)
+
+        # print final results and assert tolerances — ensure this runs even if assertions fail, to show final pose and execution time
+        self.node.get_logger().info(f"Final EE pose: x={t.x:.4f}  y={t.y:.4f}  z={t.z:.4f}  ")
+        self.node.get_logger().info(f"Final EE orientation: qx={q.x:.4f}  qy={q.y:.4f}  qz={q.z:.4f}  qw={q.w:.4f}")
+        self.node.get_logger().info(f"Goal pose: x={goal.pose.position.x:.4f}  y={goal.pose.position.y:.4f}  z={goal.pose.position.z:.4f}")
+        self.node.get_logger().info(f"Goal orientation: qx={goal.pose.orientation.x:.4f}  qy={goal.pose.orientation.y:.4f}  qz={goal.pose.orientation.z:.4f}  qw={goal.pose.orientation.w:.4f}")
+        self.node.get_logger().info(f"Final joints: {', '.join(f'{n}={math.degrees(a):.1f}°' for n, a in zip(last_js.name, last_js.position)) if last_js else '(not available)'}")
+        self.node.get_logger().info(f"Execution time: {execution_time:.2f} s")
+        self.node.get_logger().info(f"Position error: {pos_err * 1000:.1f} mm | Orientation error: {orient_err:.2f} deg")
 
         passed = True
         try:
@@ -297,7 +306,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         bag_path = os.path.join(bag_dir, 'tc1_2')
         bag_proc = subprocess.Popen(
             ['ros2', 'bag', 'record', '-o', bag_path,
-             '/joint_states', '/tf',
+             '/joint_states', '/tf', '/tf_static',
              '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -306,8 +315,6 @@ class TestKeyControlConcepts(unittest.TestCase):
         # Reset state flags
         TestKeyControlConcepts.mission_complete = False
         TestKeyControlConcepts.goal_reached_count = 0
-        TestKeyControlConcepts.pending_pose_lookup = False
-        TestKeyControlConcepts.goal_reached_poses = []
 
         # Build and send the mission
         pa = PoseArray()
@@ -322,19 +329,16 @@ class TestKeyControlConcepts(unittest.TestCase):
         self.start_mission_pub.publish(start_msg)
         self.node.get_logger().info("[TC1.2] Mission armed with 3 goals.")
 
-        # Wait for each goal_reached signal and record EE pose after each
+        # Wait for each goal_reached signal (timeout guard only — poses are read from bag)
         for i in range(len(goals)):
             deadline = time.time() + MOTION_TIMEOUT_S
-            TestKeyControlConcepts.pending_pose_lookup = False
-            while not TestKeyControlConcepts.pending_pose_lookup:
+            prev_count = TestKeyControlConcepts.goal_reached_count
+            while TestKeyControlConcepts.goal_reached_count <= prev_count:
                 rclpy.spin_once(self.node, timeout_sec=0.1)
                 self.assertLess(
                     time.time(), deadline,
                     f"goal_reached signal {i + 1} did not arrive within {MOTION_TIMEOUT_S:.0f} s"
                 )
-            tf_result = self._get_ee_transform()
-            TestKeyControlConcepts.goal_reached_poses.append(tf_result)
-            self.node.get_logger().info(f"[TC1.2] EE pose recorded for goal {i + 1}.")
 
         # Wait for mission_complete
         deadline = time.time() + MOTION_TIMEOUT_S
@@ -349,18 +353,18 @@ class TestKeyControlConcepts(unittest.TestCase):
         bag_proc.wait()
         print(f"[TC1.2] Bag recorded to: {bag_path}")
 
-        # Validate 3 goal_reached signals were received
+        # Read all per-goal EE poses from the bag using BufferCore
+        goal_reached_ts = _read_goal_reached_timestamps(bag_path)
         self.assertEqual(
-            len(TestKeyControlConcepts.goal_reached_poses), len(goals),
-            f"Expected {len(goals)} goal_reached signals, "
-            f"got {len(TestKeyControlConcepts.goal_reached_poses)}"
+            len(goal_reached_ts), len(goals),
+            f"Expected {len(goals)} goal_reached signals in bag, got {len(goal_reached_ts)}"
         )
+        goal_reached_poses = [_read_ee_pose_from_bag(bag_path, ts) for ts in goal_reached_ts]
 
         passed = True
         try:
             # Validate EE pose at each waypoint
-            for i, (tf_result, goal) in enumerate(
-                    zip(TestKeyControlConcepts.goal_reached_poses, goals)):
+            for i, (tf_result, goal) in enumerate(zip(goal_reached_poses, goals)):
                 t = tf_result.transform.translation
                 q = tf_result.transform.rotation
                 pos_err = math.sqrt(
@@ -369,6 +373,15 @@ class TestKeyControlConcepts(unittest.TestCase):
                     (t.z - goal.pose.position.z) ** 2
                 )
                 orient_err = _quat_angle_diff_deg(q, goal.pose.orientation)
+                self.node.get_logger().info(
+                    f"[TC1.2] Goal {i + 1} EE:     x={t.x:.4f}  y={t.y:.4f}  z={t.z:.4f}  "
+                    f"qx={q.x:.4f}  qy={q.y:.4f}  qz={q.z:.4f}  qw={q.w:.4f}"
+                )
+                self.node.get_logger().info(
+                    f"[TC1.2] Goal {i + 1} target: "
+                    f"x={goal.pose.position.x:.4f}  y={goal.pose.position.y:.4f}  "
+                    f"z={goal.pose.position.z:.4f}"
+                )
                 self.node.get_logger().info(
                     f"[TC1.2] Goal {i + 1}: pos_err={pos_err * 1000:.1f} mm  "
                     f"orient_err={orient_err:.2f}°"
@@ -416,14 +429,35 @@ class TestKeyControlConcepts(unittest.TestCase):
             passed = False
             raise
         finally:
-            for i, (tf_result, goal) in enumerate(
-                    zip(TestKeyControlConcepts.goal_reached_poses, goals)):
+            for i, (tf_result, goal) in enumerate(zip(goal_reached_poses, goals)):
                 t = tf_result.transform.translation
+                q = tf_result.transform.rotation
+                pos_err = math.sqrt(
+                    (t.x - goal.pose.position.x) ** 2 +
+                    (t.y - goal.pose.position.y) ** 2 +
+                    (t.z - goal.pose.position.z) ** 2
+                )
+                orient_err = _quat_angle_diff_deg(q, goal.pose.orientation)
+                js = _read_joint_state_at_time(bag_path, goal_reached_ts[i])
                 print(
-                    f"[TC1.2] Goal {i + 1} EE: "
+                    f"[TC1.2] Goal {i + 1} EE:     "
                     f"x={t.x:.4f}  y={t.y:.4f}  z={t.z:.4f}  "
-                    f"target: x={goal.pose.position.x:.4f}  "
-                    f"y={goal.pose.position.y:.4f}  z={goal.pose.position.z:.4f}"
+                    f"qx={q.x:.4f}  qy={q.y:.4f}  qz={q.z:.4f}  qw={q.w:.4f}"
+                )
+                print(
+                    f"[TC1.2] Goal {i + 1} target: "
+                    f"x={goal.pose.position.x:.4f}  y={goal.pose.position.y:.4f}  "
+                    f"z={goal.pose.position.z:.4f}"
+                )
+                if js:
+                    angle_str = '  '.join(
+                        f"{n}={math.degrees(a):.1f}°"
+                        for n, a in zip(js.name, js.position)
+                    )
+                    print(f"[TC1.2] Goal {i + 1} joints:  {angle_str}")
+                print(
+                    f"[TC1.2] Goal {i + 1} error:   "
+                    f"pos={pos_err * 1000:.1f} mm  orient={orient_err:.2f}°"
                 )
             print(f"[TC1.2] Result: {'PASS' if passed else 'FAIL'}")
 
@@ -557,11 +591,14 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         # Move to safe start pose before obstacle is added
         # ------------------------------------------------------------------ #
-        start_pose = _make_pose_stamped(0.2, 0.3, 0.15, roll=math.pi)
+        start_pose = _make_pose_stamped(-0.2, 0.3, 0.15, roll=math.pi)
         self._send_mission_and_wait([start_pose])
         self.node.get_logger().info("[TC1.5] Reached safe start pose.")
 
         time.sleep(1.0)  # brief pause to ensure the arm is at the start pose
+
+        print("\n =================================================================== \n")
+        self.node.get_logger().info("[TC1.5] Starting collision test — adding obstacle and arming mission with 3 waypoints.")
 
         # ------------------------------------------------------------------ #
         # Obstacle geometry (world frame)
@@ -609,7 +646,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         obs_pose.orientation.w = 1.0
         obs.primitive_poses.append(obs_pose)
 
-        print(f"[TC1.5] Publishing collision object '{OBS_ID}' at position {OBS_POS}")
+        self.node.get_logger().info(f"[TC1.5] Publishing collision object '{OBS_ID}' at position {OBS_POS}")
 
         time.sleep(0.5)  # brief pause to ensure publisher is ready
 
@@ -659,19 +696,18 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         # Wait for goal_reached × 3 + mission_complete
         # ------------------------------------------------------------------ #
-        for i in range(len(waypoints)):
+        expected_count = len(waypoints)
+        for i in range(expected_count):
             deadline = time.time() + MOTION_TIMEOUT_S
-            TestKeyControlConcepts.pending_pose_lookup = False
-            while not TestKeyControlConcepts.pending_pose_lookup:
+            prev_count = TestKeyControlConcepts.goal_reached_count
+            while TestKeyControlConcepts.goal_reached_count <= prev_count:
                 rclpy.spin_once(self.node, timeout_sec=0.1)
                 self.assertLess(
                     time.time(), deadline,
                     f"[TC1.5] goal_reached signal {i + 1} did not arrive within "
                     f"{MOTION_TIMEOUT_S:.0f} s"
                 )
-            tf_result = self._get_ee_transform()
-            TestKeyControlConcepts.goal_reached_poses.append(tf_result)
-            self.node.get_logger().info(f"[TC1.5] EE pose recorded for goal {i + 1}.")
+            self.node.get_logger().info(f"[TC1.5] goal_reached {i + 1} received.")
 
         deadline = time.time() + MOTION_TIMEOUT_S
         while not TestKeyControlConcepts.mission_complete:
@@ -683,23 +719,33 @@ class TestKeyControlConcepts(unittest.TestCase):
 
         bag_proc.terminate()
         bag_proc.wait()
-        print(f"[TC1.5] Bag recorded to: {bag_path}")
+        self.node.get_logger().info(f"[TC1.5] Bag recorded to: {bag_path}")
+
+        goal_reached_ts = _read_goal_reached_timestamps(bag_path)
+        goal_reached_poses = [_read_ee_pose_from_bag(bag_path, ts) for ts in goal_reached_ts]
 
         # ------------------------------------------------------------------ #
         # Assertions
         # ------------------------------------------------------------------ #
+        
+        self.node.get_logger().info(
+            f"[TC1.5] Validating results: {len(goal_reached_poses)} goal_reached poses, "
+            f"checking against {len(waypoints)} waypoints and obstacle AABB."
+        )
+
+
         passed = True
         try:
             # 1. Validate 3 goal_reached signals
             self.assertEqual(
-                len(TestKeyControlConcepts.goal_reached_poses), len(waypoints),
+                len(goal_reached_poses), len(waypoints),
                 f"[TC1.5] Expected {len(waypoints)} goal_reached signals, "
-                f"got {len(TestKeyControlConcepts.goal_reached_poses)}"
+                f"got {len(goal_reached_poses)}"
             )
 
             # 2. Validate EE pose at each waypoint
             for i, (tf_result, wp) in enumerate(
-                    zip(TestKeyControlConcepts.goal_reached_poses, waypoints)):
+                    zip(goal_reached_poses, waypoints)):
                 t = tf_result.transform.translation
                 q = tf_result.transform.rotation
                 pos_err = math.sqrt(
@@ -726,18 +772,7 @@ class TestKeyControlConcepts(unittest.TestCase):
             # 3. Verify EE trajectory never entered the obstacle AABB.
             # NOTE: adjust frame names below if robot_state_publisher uses different
             #       link names (check with: ros2 topic echo /tf --once).
-            ur3e_chain = [
-                ('world',          'base_link'),
-                ('base_link',      'shoulder_link'),
-                ('shoulder_link',  'upper_arm_link'),
-                ('upper_arm_link', 'forearm_link'),
-                ('forearm_link',   'wrist_1_link'),
-                ('wrist_1_link',   'wrist_2_link'),
-                ('wrist_2_link',   'wrist_3_link'),
-                ('wrist_3_link',   'flange'),
-                ('flange',         'tool0'),
-            ]
-            ee_positions = _read_ee_positions_from_tf(bag_path, ur3e_chain)
+            ee_positions = _read_ee_positions_from_bag(bag_path)
 
             if not ee_positions:
                 self.node.get_logger().warn(
@@ -771,8 +806,7 @@ class TestKeyControlConcepts(unittest.TestCase):
             passed = False
             raise
         finally:
-            for i, (tf_result, wp) in enumerate(
-                    zip(TestKeyControlConcepts.goal_reached_poses, waypoints)):
+            for i, (tf_result, wp) in enumerate(zip(goal_reached_poses, waypoints)):
                 t = tf_result.transform.translation
                 print(
                     f"[TC1.5] Goal {i + 1} EE:  "
@@ -780,7 +814,10 @@ class TestKeyControlConcepts(unittest.TestCase):
                     f"target: x={wp.pose.position.x:.4f}  "
                     f"y={wp.pose.position.y:.4f}  z={wp.pose.position.z:.4f}"
                 )
-            print(f"[TC1.5] Result: {'PASS' if passed else 'FAIL'}")
+            
+            print("\n =================================================================== \n")
+            self.node.get_logger().info(f"[TC1.5] Result: {'PASS' if passed else 'FAIL'}")
+            print("\n =================================================================== \n")
 
             # Clean up: remove obstacle from planning scene regardless of outcome
             remove_obs = CollisionObject()
@@ -795,6 +832,9 @@ class TestKeyControlConcepts(unittest.TestCase):
             self.node.get_logger().info(
                 f"[TC1.5] Obstacle '{OBS_ID}' removal published."
             )
+            time.sleep(1.0)  # allow time for the planning scene to update after obstacle removal
+
+            print("\n")
 
     # -----------------------------------------------------------------------
     # TC1.6 — Integration: Basic Pick and Place  (validates D)
@@ -1006,6 +1046,25 @@ def _read_last_joint_state(bag_path: str):
         return None
 
 
+def _read_joint_state_at_time(bag_path: str, lookup_time_ns: int):
+    """Return the last JointState recorded in the bag at or before lookup_time_ns."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        reader.open(
+            rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+            rosbag2_py.ConverterOptions('', ''),
+        )
+        last_msg = None
+        while reader.has_next():
+            topic, data, ts = reader.read_next()
+            if topic == '/joint_states' and ts <= lookup_time_ns:
+                last_msg = deserialize_message(data, JointState)
+        return last_msg
+    except Exception as exc:
+        print(f"[TC1.2] Warning: could not read joint state at time from bag: {exc}")
+        return None
+
+
 def _read_joint_trajectory(bag_path: str) -> list:
     """Return ordered list of (timestamp_ns, positions) from all JointState messages in a bag."""
     try:
@@ -1064,48 +1123,42 @@ def _segment_trajectory_by_goals(traj_stamped: list, goal_reached_ts: list) -> l
     return legs
 
 
-def _read_ee_positions_from_tf(bag_path: str, chain: list) -> list:
-    """Read /tf and /tf_static from a bag and compute world→EE positions.
 
-    chain: ordered list of (parent_frame, child_frame) pairs forming the
-           kinematic chain from the world frame to the end-effector link.
+def _read_ee_pose_from_bag(bag_path: str, lookup_time_ns: int):
+    """Look up world→tool0 transform using offline bag TF data via BufferCore.
 
-    Returns: list of (timestamp_ns, x, y, z) for each /tf message where the
-             full chain was resolvable.
+    Loads all /tf_static messages and /tf messages up to lookup_time_ns into a
+    BufferCore, then queries world→tool0 at the latest available time. Filtering
+    /tf by lookup_time_ns ensures the returned pose reflects the robot state at
+    the moment goal_reached was published, not the end of the recording.
     """
-    import tf2_msgs.msg
+    buffer = tf2_ros.BufferCore(cache_time=rclpy.duration.Duration(seconds=600))
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+        rosbag2_py.ConverterOptions('', ''),
+    )
+    while reader.has_next():
+        topic, data, ts = reader.read_next()
+        if topic == '/tf_static':
+            msg = deserialize_message(data, TFMessage)
+            for tf in msg.transforms:
+                buffer.set_transform_static(tf, 'bag')
+        elif topic == '/tf' and ts <= lookup_time_ns:
+            msg = deserialize_message(data, TFMessage)
+            for tf in msg.transforms:
+                buffer.set_transform(tf, 'bag')
+    return buffer.lookup_transform_core('world', 'tool0', rclpy.time.Time())
 
-    # Rolling transform store: key=(parent, child) → TransformStamped.
-    # Static transforms are seeded once (setdefault) and never overwritten.
-    tf_store: dict = {}
 
-    def _to_matrix(t):
-        tx = t.transform.translation.x
-        ty = t.transform.translation.y
-        tz = t.transform.translation.z
-        qx = t.transform.rotation.x
-        qy = t.transform.rotation.y
-        qz = t.transform.rotation.z
-        qw = t.transform.rotation.w
-        R = np.array([
-            [1 - 2*(qy**2 + qz**2),   2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
-            [  2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2),   2*(qy*qz - qx*qw)],
-            [  2*(qx*qz - qy*qw),   2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2)],
-        ])
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3]  = [tx, ty, tz]
-        return T
+def _read_ee_positions_from_bag(bag_path: str) -> list:
+    """Read /tf_static and /tf from a bag and compute world→tool0 positions via BufferCore.
 
-    def _compose():
-        T = np.eye(4)
-        for parent, child in chain:
-            if (parent, child) not in tf_store:
-                return None
-            T = T @ _to_matrix(tf_store[(parent, child)])
-        return T
-
-    results = []
+    Returns: list of (timestamp_ns, x, y, z) for each /tf message timestep where
+             world→tool0 is resolvable.
+    """
+    buffer = tf2_ros.BufferCore(cache_time=rclpy.duration.Duration(seconds=600))
+    tf_timestamps = []
     try:
         reader = rosbag2_py.SequentialReader()
         reader.open(
@@ -1115,16 +1168,24 @@ def _read_ee_positions_from_tf(bag_path: str, chain: list) -> list:
         while reader.has_next():
             topic, data, ts = reader.read_next()
             if topic == '/tf_static':
-                msg = deserialize_message(data, tf2_msgs.msg.TFMessage)
-                for t in msg.transforms:
-                    tf_store.setdefault((t.header.frame_id, t.child_frame_id), t)
+                msg = deserialize_message(data, TFMessage)
+                for tf in msg.transforms:
+                    buffer.set_transform_static(tf, 'bag')
             elif topic == '/tf':
-                msg = deserialize_message(data, tf2_msgs.msg.TFMessage)
-                for t in msg.transforms:
-                    tf_store[(t.header.frame_id, t.child_frame_id)] = t
-                T = _compose()
-                if T is not None:
-                    results.append((ts, float(T[0, 3]), float(T[1, 3]), float(T[2, 3])))
+                msg = deserialize_message(data, TFMessage)
+                for tf in msg.transforms:
+                    buffer.set_transform(tf, 'bag')
+                tf_timestamps.append(ts)
     except Exception as exc:
-        print(f"[TC1.5] Warning: _read_ee_positions_from_tf failed: {exc}")
+        print(f"[TC1.5] Warning: _read_ee_positions_from_bag failed reading bag: {exc}")
+        return []
+
+    results = []
+    for ts in tf_timestamps:
+        try:
+            result = buffer.lookup_transform_core('world', 'tool0', rclpy.time.Time())
+            t = result.transform.translation
+            results.append((ts, t.x, t.y, t.z))
+        except Exception:
+            pass
     return results

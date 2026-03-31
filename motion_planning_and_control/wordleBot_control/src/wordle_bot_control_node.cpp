@@ -89,6 +89,9 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
   }
   cv_.notify_one();
   RCLCPP_INFO(LOGGER, "Mission armed — execution will begin.");
+
+  controller_->clearCollisionScene();
+  controller_->setupCollisionScene();
 }
 
 void WordleBotControlNode::collisionObjectCallback(

@@ -135,7 +135,7 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     ik_state.setToRandomPositions(joint_model_group);
 
     if (!ik_state.setFromIK(joint_model_group, target_pose, 0.1)) {
-      RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
+      // RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
       continue;
     }
 
@@ -165,9 +165,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
         }
       }
       if (std::abs(best_norm - raw) > 1e-6) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d normalised joint '%s': raw=%.4f -> norm=%.4f rad.",
-          attempt, active_joints[i]->getName().c_str(), raw, best_norm);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d normalised joint '%s': raw=%.4f -> norm=%.4f rad.",
+        //   attempt, active_joints[i]->getName().c_str(), raw, best_norm);
       }
       candidate_joint_values[i] = best_norm;
     }
@@ -185,9 +185,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
       while (w3 > M_PI)  w3 -= 2.0 * M_PI;
       while (w3 < -M_PI) w3 += 2.0 * M_PI;
       if (std::abs(w3 - raw_w3) > 1e-6) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d clamped wrist_3 to [-pi,pi]: %.4f -> %.4f rad.",
-          attempt, raw_w3, w3);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d clamped wrist_3 to [-pi,pi]: %.4f -> %.4f rad.",
+        //   attempt, raw_w3, w3);
       }
     }
 
@@ -195,9 +195,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     if (shoulder_idx >= 0 && shoulder_idx < static_cast<int>(candidate_joint_values.size())) {
       const double sh = candidate_joint_values[shoulder_idx];
       if (std::abs(sh - shoulder_center) > shoulder_tol) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d rejected — shoulder %.4f rad outside constraint [%.4f, %.4f].",
-          attempt, sh, shoulder_center - shoulder_tol, shoulder_center + shoulder_tol);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d rejected — shoulder %.4f rad outside constraint [%.4f, %.4f].",
+        //   attempt, sh, shoulder_center - shoulder_tol, shoulder_center + shoulder_tol);
         ++constraint_rejects;
         continue;
       }
@@ -217,8 +217,8 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     }
     const double candidate_cost = (2.0 * movement_cost) + (0.3 * functional_penalty);
 
-    RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
-      attempt, candidate_cost, best_cost);
+    // RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
+    //   attempt, candidate_cost, best_cost);
 
     if (candidate_cost < best_cost) {
       best_cost = candidate_cost;
