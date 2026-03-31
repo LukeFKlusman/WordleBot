@@ -172,6 +172,25 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
       candidate_joint_values[i] = best_norm;
     }
 
+    // Clamp wrist_3_joint to [-π, π].
+    // The UR RTDE hardware interface represents this continuous joint in [-π, π]. Allowing
+    // values outside that range causes a 6.283 rad (2π) PATH_TOLERANCE_VIOLATED abort on
+    // the scaled_joint_trajectory_controller when the controller's tracked state disagrees
+    // with the planned trajectory start by exactly one full revolution.
+    const int wrist3_idx = jointNameIndex(
+      std::vector<std::string>(joint_names.begin(), joint_names.end()), "wrist_3_joint");
+    if (wrist3_idx >= 0 && wrist3_idx < static_cast<int>(candidate_joint_values.size())) {
+      double & w3 = candidate_joint_values[wrist3_idx];
+      const double raw_w3 = w3;
+      while (w3 > M_PI)  w3 -= 2.0 * M_PI;
+      while (w3 < -M_PI) w3 += 2.0 * M_PI;
+      if (std::abs(w3 - raw_w3) > 1e-6) {
+        RCLCPP_INFO(LOGGER,
+          "computeBestIK: attempt %d clamped wrist_3 to [-pi,pi]: %.4f -> %.4f rad.",
+          attempt, raw_w3, w3);
+      }
+    }
+
     // Reject if shoulder_lift_joint is outside the path constraint range after normalisation.
     if (shoulder_idx >= 0 && shoulder_idx < static_cast<int>(candidate_joint_values.size())) {
       const double sh = candidate_joint_values[shoulder_idx];
@@ -372,12 +391,23 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
   moveit_msgs::msg::JointConstraint shoulder;
   shoulder.joint_name        = "shoulder_lift_joint";
   shoulder.position          = -M_PI / 2.0;
-  shoulder.tolerance_above   = M_PI / 180.0 * 110.0; 
+  shoulder.tolerance_above   = M_PI / 180.0 * 110.0;
   shoulder.tolerance_below   = M_PI / 180.0 * 110.0;
   shoulder.weight            = 1.0;
 
+  // Keep wrist_3_joint within [-π, π] throughout the planned path.
+  // The UR RTDE interface reports wrist_3 in this range; going outside it causes
+  // a PATH_TOLERANCE_VIOLATED (2π position error) on the trajectory controller.
+  moveit_msgs::msg::JointConstraint wrist3;
+  wrist3.joint_name      = "wrist_3_joint";
+  wrist3.position        = 0.0;
+  wrist3.tolerance_above = M_PI;
+  wrist3.tolerance_below = M_PI;
+  wrist3.weight          = 1.0;
+
   moveit_msgs::msg::Constraints constraints;
   constraints.joint_constraints.push_back(shoulder);
+  constraints.joint_constraints.push_back(wrist3);
   move_group_.setPathConstraints(constraints);
 
   visualisePlan(nullptr, "Planning", "Press 'Next' in the RvizVisualToolsGui window to plan");

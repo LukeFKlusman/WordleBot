@@ -12,6 +12,7 @@ find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 set(DEPENDENCIES
   rclcpp
@@ -19,6 +20,7 @@ set(DEPENDENCIES
   moveit_visual_tools
   tf2
   geometry_msgs
+  std_msgs
 )
 
 # --- Library: controller + node sources ---
@@ -61,6 +63,26 @@ if(BUILD_TESTING)
   set(ament_cmake_copyright_FOUND TRUE)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_pytest REQUIRED)
+
+  # TC1 — Key Control Concepts (validates P, C, D)
+  ament_add_pytest_test(tc1_key_control_concepts
+    test/tc1_key_control_concepts.py
+    TIMEOUT 600
+  )
+
+  # TC2 — Advanced Motion Control (validates HD)
+  ament_add_pytest_test(tc2_advanced_motion_control
+    test/tc2_advanced_motion_control.py
+    TIMEOUT 600
+  )
+
+  # TC3 — Advanced Collision Avoidance (validates Perfect)
+  ament_add_pytest_test(tc3_advanced_collision_avoidance
+    test/tc3_advanced_collision_avoidance.py
+    TIMEOUT 600
+  )
 endif()
 
 ament_package()
