@@ -51,61 +51,6 @@ ABORT_TIMEOUT_S         = 30.0    # arm must reach home within this time of Abor
 GRIPPER_TIMEOUT_S       = 2.0     # gripper must respond within this time
 
 
-# ---------------------------------------------------------------------------
-# Helpers  (shared utilities reused across sub-tests)
-# ---------------------------------------------------------------------------
-
-def _make_pose_stamped(x: float, y: float, z: float,
-                       roll: float = math.pi, pitch: float = 0.0,
-                       yaw: float = 0.0,
-                       frame_id: str = "world") -> PoseStamped:
-    """Build a PoseStamped from (x, y, z, roll, pitch, yaw) in the given frame."""
-    cy, sy = math.cos(yaw / 2),   math.sin(yaw / 2)
-    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
-    cr, sr = math.cos(roll / 2),  math.sin(roll / 2)
-
-    msg = PoseStamped()
-    msg.header.frame_id = frame_id
-    msg.pose.position.x = x
-    msg.pose.position.y = y
-    msg.pose.position.z = z
-    msg.pose.orientation.w = cr * cp * cy + sr * sp * sy
-    msg.pose.orientation.x = sr * cp * cy - cr * sp * sy
-    msg.pose.orientation.y = cr * sp * cy + sr * cp * sy
-    msg.pose.orientation.z = cr * cp * sy - sr * sp * cy
-    return msg
-
-
-def _quat_angle_diff_deg(q1, q2) -> float:
-    """Return the angular difference between two quaternions in degrees."""
-    dot = abs(q1.w * q2.w + q1.x * q2.x + q1.y * q2.y + q1.z * q2.z)
-    dot = min(dot, 1.0)
-    return math.degrees(2.0 * math.acos(dot))
-
-
-# ---------------------------------------------------------------------------
-# Test fixture
-# ---------------------------------------------------------------------------
-
-def _read_last_joint_state(bag_path: str):
-    """Return the last JointState message recorded in a bag, or None on failure."""
-    try:
-        reader = rosbag2_py.SequentialReader()
-        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3')
-        converter_options = rosbag2_py.ConverterOptions('', '')
-        reader.open(storage_options, converter_options)
-        last_msg = None
-        while reader.has_next():
-            topic, data, _ = reader.read_next()
-            if topic == '/joint_states':
-                last_msg = deserialize_message(data, JointState)
-        return last_msg
-    except Exception as exc:
-        print(f"[TC1.1] Warning: could not read joint states from bag: {exc}")
-        return None
-
-
-
 class TestKeyControlConcepts(unittest.TestCase):
     """Test Case 1: Key Control Concepts (validates P, C, D criteria)."""
 
@@ -165,76 +110,6 @@ class TestKeyControlConcepts(unittest.TestCase):
     # @classmethod
     # def _on_mission_state(cls, msg):
     #     cls.mission_state = msg
-
-    # -----------------------------------------------------------------------
-    # Internal helpers
-    # -----------------------------------------------------------------------
-
-    def _send_goal_and_wait(self, pose: PoseStamped) -> None:
-        """Publish a goal and block until /wordle_bot/motion_complete fires."""
-        TestKeyControlConcepts.motion_complete = False
-        time.sleep(0.5)  # subscriber handshake
-        pose.header.stamp = self.node.get_clock().now().to_msg()
-        self.goal_pub.publish(pose)
-        self.node.get_logger().info(
-            f"Published goal: ({pose.pose.position.x:.3f}, "
-            f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
-        )
-        deadline = time.time() + MOTION_TIMEOUT_S
-        while not TestKeyControlConcepts.motion_complete:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            if time.time() > deadline:
-                self.fail(
-                    f"Motion did not complete within {MOTION_TIMEOUT_S}s "
-                    f"for goal ({pose.pose.position.x:.3f}, "
-                    f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
-                )
-
-    def _get_ee_transform(self):
-        """Look up the current world → tool0 transform from /tf."""
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            # Spin first to populate the TF buffer, then do an instant lookup.
-            # Using a timeout inside lookup_transform blocks this thread and
-            # prevents the spin_once calls needed to receive TF callbacks.
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            try:
-                return self.tf_buffer.lookup_transform(
-                    "world", "tool0",
-                    rclpy.time.Time(),
-                )
-            except TransformException:
-                pass
-        self.fail("Could not look up tool0 → ur_base_link transform within 5 s")
-
-    def _assert_pose_reached(self, goal: PoseStamped) -> None:
-        """Validate EE transform matches the goal within defined tolerances."""
-        tf       = self._get_ee_transform()
-        t        = tf.transform.translation
-        q_actual = tf.transform.rotation
-        q_goal   = goal.pose.orientation
-
-        pos_err = math.sqrt(
-            (t.x - goal.pose.position.x) ** 2 +
-            (t.y - goal.pose.position.y) ** 2 +
-            (t.z - goal.pose.position.z) ** 2
-        )
-        orient_err = _quat_angle_diff_deg(q_actual, q_goal)
-
-        self.node.get_logger().info(
-            f"Position error: {pos_err * 1000:.1f} mm | "
-            f"Orientation error: {orient_err:.2f} deg"
-        )
-        self.assertLessEqual(
-            pos_err, POSITION_TOLERANCE_M,
-            f"Position error {pos_err * 1000:.1f} mm exceeds "
-            f"{POSITION_TOLERANCE_M * 1000:.0f} mm tolerance"
-        )
-        self.assertLessEqual(
-            orient_err, ORIENTATION_TOLERANCE_DEG,
-            f"Orientation error {orient_err:.2f}° exceeds "
-            f"{ORIENTATION_TOLERANCE_DEG:.0f}° tolerance"
-        )
 
     # -----------------------------------------------------------------------
     # TC1.1 — Basic Point-to-Point Movement  (validates P)
@@ -589,3 +464,124 @@ class TestKeyControlConcepts(unittest.TestCase):
 
         # TODO: remove obstacle from planning scene
         # <remove obstacle>
+    
+    # -----------------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------------
+
+    def _send_goal_and_wait(self, pose: PoseStamped) -> None:
+        """Publish a goal and block until /wordle_bot/motion_complete fires."""
+        TestKeyControlConcepts.motion_complete = False
+        time.sleep(0.5)  # subscriber handshake
+        pose.header.stamp = self.node.get_clock().now().to_msg()
+        self.goal_pub.publish(pose)
+        self.node.get_logger().info(
+            f"Published goal: ({pose.pose.position.x:.3f}, "
+            f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
+        )
+        deadline = time.time() + MOTION_TIMEOUT_S
+        while not TestKeyControlConcepts.motion_complete:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            if time.time() > deadline:
+                self.fail(
+                    f"Motion did not complete within {MOTION_TIMEOUT_S}s "
+                    f"for goal ({pose.pose.position.x:.3f}, "
+                    f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
+                )
+
+    def _get_ee_transform(self):
+        """Look up the current world → tool0 transform from /tf."""
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            # Spin first to populate the TF buffer, then do an instant lookup.
+            # Using a timeout inside lookup_transform blocks this thread and
+            # prevents the spin_once calls needed to receive TF callbacks.
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            try:
+                return self.tf_buffer.lookup_transform(
+                    "world", "tool0",
+                    rclpy.time.Time(),
+                )
+            except TransformException:
+                pass
+        self.fail("Could not look up tool0 → ur_base_link transform within 5 s")
+
+    def _assert_pose_reached(self, goal: PoseStamped) -> None:
+        """Validate EE transform matches the goal within defined tolerances."""
+        tf       = self._get_ee_transform()
+        t        = tf.transform.translation
+        q_actual = tf.transform.rotation
+        q_goal   = goal.pose.orientation
+
+        pos_err = math.sqrt(
+            (t.x - goal.pose.position.x) ** 2 +
+            (t.y - goal.pose.position.y) ** 2 +
+            (t.z - goal.pose.position.z) ** 2
+        )
+        orient_err = _quat_angle_diff_deg(q_actual, q_goal)
+
+        self.node.get_logger().info(
+            f"Position error: {pos_err * 1000:.1f} mm | "
+            f"Orientation error: {orient_err:.2f} deg"
+        )
+        self.assertLessEqual(
+            pos_err, POSITION_TOLERANCE_M,
+            f"Position error {pos_err * 1000:.1f} mm exceeds "
+            f"{POSITION_TOLERANCE_M * 1000:.0f} mm tolerance"
+        )
+        self.assertLessEqual(
+            orient_err, ORIENTATION_TOLERANCE_DEG,
+            f"Orientation error {orient_err:.2f}° exceeds "
+            f"{ORIENTATION_TOLERANCE_DEG:.0f}° tolerance"
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# Helpers  (shared utilities reused across sub-tests)
+# ---------------------------------------------------------------------------
+
+def _make_pose_stamped(x: float, y: float, z: float,
+                       roll: float = math.pi, pitch: float = 0.0,
+                       yaw: float = 0.0,
+                       frame_id: str = "world") -> PoseStamped:
+    """Build a PoseStamped from (x, y, z, roll, pitch, yaw) in the given frame."""
+    cy, sy = math.cos(yaw / 2),   math.sin(yaw / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cr, sr = math.cos(roll / 2),  math.sin(roll / 2)
+
+    msg = PoseStamped()
+    msg.header.frame_id = frame_id
+    msg.pose.position.x = x
+    msg.pose.position.y = y
+    msg.pose.position.z = z
+    msg.pose.orientation.w = cr * cp * cy + sr * sp * sy
+    msg.pose.orientation.x = sr * cp * cy - cr * sp * sy
+    msg.pose.orientation.y = cr * sp * cy + sr * cp * sy
+    msg.pose.orientation.z = cr * cp * sy - sr * sp * cy
+    return msg
+
+
+def _quat_angle_diff_deg(q1, q2) -> float:
+    """Return the angular difference between two quaternions in degrees."""
+    dot = abs(q1.w * q2.w + q1.x * q2.x + q1.y * q2.y + q1.z * q2.z)
+    dot = min(dot, 1.0)
+    return math.degrees(2.0 * math.acos(dot))
+
+
+def _read_last_joint_state(bag_path: str):
+    """Return the last JointState message recorded in a bag, or None on failure."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3')
+        converter_options = rosbag2_py.ConverterOptions('', '')
+        reader.open(storage_options, converter_options)
+        last_msg = None
+        while reader.has_next():
+            topic, data, _ = reader.read_next()
+            if topic == '/joint_states':
+                last_msg = deserialize_message(data, JointState)
+        return last_msg
+    except Exception as exc:
+        print(f"[TC1.1] Warning: could not read joint states from bag: {exc}")
+        return None
