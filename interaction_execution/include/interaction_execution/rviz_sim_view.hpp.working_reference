@@ -31,10 +31,10 @@ private:
   void buildUi();
   void initializeRvizPanel();
   void createDisplays();
-  void createDisplaysIfReady();
   void publishRelay();
   void ensureRobotDescriptionAvailable();
   void configureRobotModelDisplay(rviz_common::Display * display);
+  void logRobotModelStatus();
 
   rclcpp::Node::SharedPtr node_;
   std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> executor_;
@@ -49,12 +49,14 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr    robot_desc_relay_pub_;
 
   // Cached URDF from either the original topic or the robot_state_publisher
-  // parameter API. We keep re-publishing it so late RViz subscribers can still receive it.
+  // parameter API. We keep re-publishing it until RViz reports the model is OK.
   std::shared_ptr<std_msgs::msg::String> cached_robot_desc_;
   std::atomic<bool> robot_description_request_in_flight_{false};
-  bool displays_created_{false};
+  std::string last_status_;
+  bool status_probe_logged_{false};
   bool rviz_initialized_{false};
 
   QTimer ros_spin_timer_;
   QTimer robot_description_timer_;
+  QTimer robot_status_timer_;
 };

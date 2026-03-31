@@ -4,34 +4,32 @@
 #include <QResizeEvent>
 #include <QVBoxLayout>
 
+#include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
+#include <sensor_msgs/image_encodings.hpp>
 
-CameraView::CameraView(QWidget * parent)
-: QWidget(parent)
+#include <functional>
+
+CameraView::CameraView(rclcpp::Node::SharedPtr node, QWidget * parent)
+: QWidget(parent), node_(std::move(node))
 {
   auto * layout = new QVBoxLayout(this);
   layout->setContentsMargins(6, 6, 6, 6);
 
-  image_label_ = new QLabel("Camera feed will appear here", this);
+  image_label_ = new QLabel("Waiting for camera/image_raw...", this);
   image_label_->setAlignment(Qt::AlignCenter);
   image_label_->setMinimumSize(320, 240);
   layout->addWidget(image_label_);
 
-  if (!capture_.open(0, cv::CAP_ANY)) {
-    showStatusMessage("Could not open laptop camera (index 0).");
-    return;
-  }
-
-  connect(&frame_timer_, &QTimer::timeout, this, &CameraView::updateFrame);
-  frame_timer_.start(33);
+  image_subscription_ = node_->create_subscription<sensor_msgs::msg::Image>(
+    "camera/image_raw",
+    rclcpp::SensorDataQoS(),
+    std::bind(&CameraView::handleImage, this, std::placeholders::_1));
 }
 
 CameraView::~CameraView()
 {
-  frame_timer_.stop();
-  if (capture_.isOpened()) {
-    capture_.release();
-  }
+  image_subscription_.reset();
 }
 
 void CameraView::resizeEvent(QResizeEvent * event)
@@ -40,20 +38,24 @@ void CameraView::resizeEvent(QResizeEvent * event)
   updatePixmap();
 }
 
-void CameraView::updateFrame()
+void CameraView::handleImage(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
-  if (!capture_.isOpened()) {
-    return;
-  }
-
-  cv::Mat frame_bgr;
-  if (!capture_.read(frame_bgr) || frame_bgr.empty()) {
-    showStatusMessage("Camera frame read failed.");
+  cv_bridge::CvImageConstPtr cv_ptr;
+  try {
+    cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+  } catch (const cv_bridge::Exception & ex) {
+    showStatusMessage("Camera frame conversion failed.");
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(),
+      *node_->get_clock(),
+      5000,
+      "Failed to convert image from 'camera/image_raw': %s",
+      ex.what());
     return;
   }
 
   cv::Mat frame_rgb;
-  cv::cvtColor(frame_bgr, frame_rgb, cv::COLOR_BGR2RGB);
+  cv::cvtColor(cv_ptr->image, frame_rgb, cv::COLOR_BGR2RGB);
 
   const auto bytes_per_line = static_cast<int>(frame_rgb.step);
   QImage image(

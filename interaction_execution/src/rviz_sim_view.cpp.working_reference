@@ -6,10 +6,7 @@
 
 #include <rviz_common/display_group.hpp>
 #include <rviz_common/properties/property.hpp>
-#include <rviz_common/tool.hpp>
-#include <rviz_common/tool_manager.hpp>
-#include <rviz_common/view_controller.hpp>
-#include <rviz_common/view_manager.hpp>
+#include <rviz_common/properties/status_property.hpp>
 #include <rviz_rendering/render_window.hpp>
 
 namespace
@@ -19,8 +16,6 @@ constexpr const char * kRobotDescriptionRelayTopic = "/robot_description_relay";
 constexpr const char * kRobotDescriptionParam = "robot_description";
 constexpr const char * kRobotStatePublisherNode = "/robot_state_publisher";
 constexpr const char * kRobotModelClassId = "rviz_default_plugins/RobotModel";
-constexpr const char * kMoveCameraToolClassId = "rviz_default_plugins/MoveCamera";
-constexpr const char * kOrbitViewClassId = "rviz_default_plugins/Orbit";
 
 rviz_common::properties::Property * findPropertyByName(
   rviz_common::properties::Property * parent,
@@ -60,10 +55,15 @@ RvizSimView::RvizSimView(rclcpp::Node::SharedPtr node, QWidget * parent)
 
       cached_robot_desc_ = msg;
       publishRelay();
-      createDisplaysIfReady();
       if (manager_) {
         manager_->queueRender();
       }
+
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Received robot_description (%zu bytes) and relayed it to %s.",
+        msg->data.size(),
+        kRobotDescriptionRelayTopic);
     });
 
   executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>();
@@ -82,11 +82,17 @@ RvizSimView::RvizSimView(rclcpp::Node::SharedPtr node, QWidget * parent)
   });
   robot_description_timer_.start(1000);
 
+  connect(&robot_status_timer_, &QTimer::timeout, this, [this]() {
+    logRobotModelStatus();
+  });
+  robot_status_timer_.start(1000);
+
   ensureRobotDescriptionAvailable();
 }
 
 RvizSimView::~RvizSimView()
 {
+  robot_status_timer_.stop();
   robot_description_timer_.stop();
   ros_spin_timer_.stop();
 
@@ -110,7 +116,7 @@ void RvizSimView::showEvent(QShowEvent * event)
   rviz_initialized_ = true;
   QTimer::singleShot(0, this, [this]() {
     initializeRvizPanel();
-    createDisplaysIfReady();
+    createDisplays();
   });
 }
 
@@ -128,8 +134,6 @@ void RvizSimView::initializeRvizPanel()
   render_panel_ = new rviz_common::RenderPanel(this);
   render_panel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   render_panel_->setAttribute(Qt::WA_NativeWindow, true);
-  render_panel_->setFocusPolicy(Qt::StrongFocus);
-  render_panel_->setMouseTracking(true);
   if (auto * layout = qobject_cast<QVBoxLayout *>(this->layout())) {
     layout->addWidget(render_panel_);
   }
@@ -148,28 +152,8 @@ void RvizSimView::initializeRvizPanel()
   manager_->setFixedFrame("base_link");
   manager_->initialize();
   manager_->startUpdate();
-  manager_->getViewManager()->setCurrentViewControllerType(kOrbitViewClassId);
 
-  auto * tool_manager = manager_->getToolManager();
-  rviz_common::Tool * move_camera_tool = nullptr;
-  for (int i = 0; tool_manager != nullptr && i < tool_manager->numTools(); ++i) {
-    auto * tool = tool_manager->getTool(i);
-    if (tool != nullptr && tool->getClassId() == kMoveCameraToolClassId) {
-      move_camera_tool = tool;
-      break;
-    }
-  }
-
-  if (tool_manager != nullptr && move_camera_tool == nullptr) {
-    move_camera_tool = tool_manager->addTool(kMoveCameraToolClassId);
-  }
-
-  if (tool_manager != nullptr && move_camera_tool != nullptr) {
-    tool_manager->setDefaultTool(move_camera_tool);
-    tool_manager->setCurrentTool(move_camera_tool);
-  } else {
-    RCLCPP_WARN(node_->get_logger(), "Failed to activate RViz MoveCamera tool.");
-  }
+  RCLCPP_INFO(node_->get_logger(), "Initialized RViz RenderPanel and VisualizationManager.");
 }
 
 void RvizSimView::createDisplays()
@@ -180,7 +164,6 @@ void RvizSimView::createDisplays()
   }
 
   manager_->removeAllDisplays();
-  robot_model_display_ = nullptr;
 
   auto * grid = manager_->createDisplay("rviz_default_plugins/Grid", "Grid", true);
   if (grid == nullptr) {
@@ -198,43 +181,10 @@ void RvizSimView::createDisplays()
   }
 
   configureRobotModelDisplay(robot_model_display_);
-
-  if (auto * view = manager_->getViewManager()->getCurrent()) {
-    if (auto * distance = findPropertyByName(view, "Distance")) {
-      distance->setValue(2.5f);
-    }
-    if (auto * focal_point = findPropertyByName(view, "Focal Point")) {
-      if (auto * x = findPropertyByName(focal_point, "X")) {
-        x->setValue(0.0f);
-      }
-      if (auto * y = findPropertyByName(focal_point, "Y")) {
-        y->setValue(0.0f);
-      }
-      if (auto * z = findPropertyByName(focal_point, "Z")) {
-        z->setValue(0.5f);
-      }
-    }
-    if (auto * pitch = findPropertyByName(view, "Pitch")) {
-      pitch->setValue(0.3f);
-    }
-    if (auto * yaw = findPropertyByName(view, "Yaw")) {
-      yaw->setValue(0.785f);
-    }
-  }
-
-  render_panel_->setFocus(Qt::OtherFocusReason);
   manager_->queueRender();
   QApplication::processEvents();
-  displays_created_ = true;
-}
 
-void RvizSimView::createDisplaysIfReady()
-{
-  if (!rviz_initialized_ || manager_ == nullptr || cached_robot_desc_ == nullptr || displays_created_) {
-    return;
-  }
-
-  createDisplays();
+  RCLCPP_INFO(node_->get_logger(), "Created RViz displays programmatically.");
 }
 
 void RvizSimView::publishRelay()
@@ -248,7 +198,6 @@ void RvizSimView::ensureRobotDescriptionAvailable()
 {
   if (cached_robot_desc_) {
     publishRelay();
-    createDisplaysIfReady();
     if (manager_) {
       manager_->queueRender();
     }
@@ -299,11 +248,16 @@ void RvizSimView::ensureRobotDescriptionAvailable()
       cached_robot_desc_ = std::make_shared<std_msgs::msg::String>();
       cached_robot_desc_->data = xml;
       publishRelay();
-      createDisplaysIfReady();
 
       if (manager_) {
         manager_->queueRender();
       }
+
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Fetched robot_description from %s parameter (%zu bytes).",
+        kRobotStatePublisherNode,
+        xml.size());
     });
 }
 
@@ -348,4 +302,80 @@ void RvizSimView::configureRobotModelDisplay(rviz_common::Display * display)
     }
   }
 
+  RCLCPP_INFO(node_->get_logger(), "Configured RobotModel display for topic %s", kRobotDescriptionRelayTopic);
+}
+
+void RvizSimView::logRobotModelStatus()
+{
+  if (manager_ == nullptr) {
+    return;
+  }
+
+  const auto robot_desc_publishers = rviz_node_->get_raw_node()->count_publishers(kRobotDescriptionRelayTopic);
+  std::string fixed_frame_error;
+  auto * frame_manager = manager_->getFrameManager();
+  const bool fixed_frame_missing =
+    frame_manager != nullptr && frame_manager->frameHasProblems("base_link", fixed_frame_error);
+
+  if (robot_model_display_ == nullptr) {
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(),
+      *node_->get_clock(),
+      5000,
+      "RobotModel probe: display is null, %s publishers=%zu, fixed frame problem=%s",
+      kRobotDescriptionRelayTopic,
+      robot_desc_publishers,
+      fixed_frame_missing ? fixed_frame_error.c_str() : "none");
+    return;
+  }
+
+  auto * status_root = findPropertyByName(robot_model_display_, "Status");
+  if (status_root == nullptr) {
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(),
+      *node_->get_clock(),
+      5000,
+      "RobotModel probe: no Status property yet, %s publishers=%zu, fixed frame problem=%s",
+      kRobotDescriptionRelayTopic,
+      robot_desc_publishers,
+      fixed_frame_missing ? fixed_frame_error.c_str() : "none");
+    return;
+  }
+
+  std::string summary = "OK";
+  for (int i = 0; i < status_root->numChildren(); ++i) {
+    auto * child = status_root->childAt(i);
+    auto * status = dynamic_cast<rviz_common::properties::StatusProperty *>(child);
+    if (status == nullptr) {
+      continue;
+    }
+    if (status->getLevel() == rviz_common::properties::StatusProperty::Ok) {
+      continue;
+    }
+
+    summary = status->getName().toStdString() + ": " + status->getValue().toString().toStdString();
+    break;
+  }
+
+  if (summary == last_status_) {
+    return;
+  }
+
+  last_status_ = summary;
+  if (summary == "OK") {
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "RobotModel status: OK (%s publishers=%zu, fixed frame=%s)",
+      kRobotDescriptionRelayTopic,
+      robot_desc_publishers,
+      fixed_frame_missing ? fixed_frame_error.c_str() : "base_link");
+  } else {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "RobotModel status: %s (%s publishers=%zu, fixed frame problem=%s)",
+      summary.c_str(),
+      kRobotDescriptionRelayTopic,
+      robot_desc_publishers,
+      fixed_frame_missing ? fixed_frame_error.c_str() : "none");
+  }
 }
