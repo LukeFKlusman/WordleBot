@@ -44,6 +44,13 @@ ros2 bag record /tf /joint_states \
 
 ---
 
+## Terminal 
+
+```bash
+colcon test --packages-select wordleBot_control --pytest-args -k tc1_1
+```
+
+
 ## Test Case 1 — Key Control Concepts
 
 **Validates:** P, C, D criteria

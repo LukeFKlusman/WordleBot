@@ -410,7 +410,7 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
   constraints.joint_constraints.push_back(wrist3);
   move_group_.setPathConstraints(constraints);
 
-  visualisePlan(nullptr, "Planning", "Press 'Next' in the RvizVisualToolsGui window to plan");
+  visualisePlan(nullptr, "Planning");
 
   move_group_.setStartStateToCurrentState();
   current_state = move_group_.getCurrentState(2.0);  // 2s timeout for fresh state
@@ -513,7 +513,14 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
   const bool success = !plan.trajectory_.joint_trajectory.points.empty();
 
   if (success) {
-    visualisePlan(&plan, "Executing", "Press 'Next' in the RvizVisualToolsGui window to execute");
+    const double total_disp = computeTotalJointDisplacement(plan);
+    const double direct_disp = configurationDistance(
+      move_group_.getRobotModel()->getJointModelGroup(kPlanningGroup), q_start, best_q);
+    RCLCPP_INFO(LOGGER,
+      "Selected plan: total_joint_disp=%.4f rad  direct_joint_disp=%.4f rad  ratio=%.3fx",
+      total_disp, direct_disp, direct_disp > 1e-6 ? total_disp / direct_disp : 0.0);
+
+    visualisePlan(&plan, "Executing");
     const auto exec_result = move_group_.execute(plan);
     if (exec_result == moveit::core::MoveItErrorCode::SUCCESS) {
       RCLCPP_INFO(LOGGER, "Motion executed successfully.");
@@ -563,8 +570,7 @@ bool WordleBotController::moveToTargetCartesian(const geometry_msgs::msg::Pose &
   moveit::planning_interface::MoveGroupInterface::Plan cart_plan;
   cart_plan.trajectory_ = trajectory;
 
-  visualisePlan(&cart_plan, "Executing Cartesian",
-    "Press 'Next' in the RvizVisualToolsGui window to execute");
+  visualisePlan(&cart_plan, "Executing Cartesian");
   move_group_.execute(cart_plan);
   RCLCPP_INFO(LOGGER, "Cartesian motion executed successfully.");
   return true;
@@ -696,14 +702,25 @@ geometry_msgs::msg::Pose WordleBotController::buildPose(
 }
 
 
-void WordleBotController::visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
-                                        const std::string & title,
-                                        const std::string & prompt)
+double WordleBotController::computeTotalJointDisplacement(
+  const moveit::planning_interface::MoveGroupInterface::Plan & plan)
 {
-  if (!prompt.empty()) {
-    visual_tools_.prompt(prompt);
+  const auto & points = plan.trajectory_.joint_trajectory.points;
+  double total = 0.0;
+  for (std::size_t i = 1; i < points.size(); ++i) {
+    const auto & prev = points[i - 1].positions;
+    const auto & curr = points[i].positions;
+    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
+      total += std::abs(curr[j] - prev[j]);
+    }
   }
+  return total;
+}
 
+
+void WordleBotController::visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
+                                        const std::string & title)
+{
   auto text_pose = Eigen::Isometry3d::Identity();
   text_pose.translation().z() = 1.0;
   visual_tools_.publishText(text_pose, title, rviz_visual_tools::WHITE,
