@@ -591,6 +591,8 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         # Move to safe start pose before obstacle is added
         # ------------------------------------------------------------------ #
+        TestKeyControlConcepts.mission_complete   = False
+        TestKeyControlConcepts.goal_reached_count = 0
         start_pose = _make_pose_stamped(-0.2, 0.3, 0.15, roll=math.pi)
         self._send_mission_and_wait([start_pose])
         self.node.get_logger().info("[TC1.5] Reached safe start pose.")

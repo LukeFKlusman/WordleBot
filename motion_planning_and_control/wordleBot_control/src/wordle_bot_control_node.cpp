@@ -92,6 +92,8 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
 
   controller_->clearCollisionScene();
   controller_->setupCollisionScene();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
 void WordleBotControlNode::collisionObjectCallback(
