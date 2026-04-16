@@ -31,15 +31,15 @@ USE_ROS2 = True   # False = direct pyrealsense2 SDK, True = ROS2 topics
 DETECTION_MODE = "CARD"   # switch to "BLOCK" when on the robot
 
 # ── Detection tuning ──────────────────────────────────────
-BLOCK_DEPTH_MIN_M   = 0.30   # re-tune for robot camera height (BLOCK mode only)
-BLOCK_DEPTH_MAX_M   = 0.55   # tight gate — only objects at block distance
+BLOCK_DEPTH_MIN_M   = 0.10   # EE-mounted camera — blocks are 10-30cm away
+BLOCK_DEPTH_MAX_M   = 0.30   # tight gate — only objects at block distance
 MIN_BLOCK_AREA      = 5000   # minimum contour area (pixels²)
 MAX_BLOCK_AREA      = 200000 # maximum contour area (pixels²)
 MAX_BLOCKS          = 5      # max blocks expected in workspace
-CNN_CONF_THRESHOLD  = 60.0   # min confidence % to publish a letter
+CNN_CONF_THRESHOLD  = 32.0   # min confidence % to publish a letter
 FRAMES_TO_AVERAGE   = 15     # temporal smoothing frames
 CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-255)
-CARD_MARGIN         = 0.20   # fraction to crop from each edge of card bounding box
+CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
 # ─────────────────────────────────────────────────────────
 
 import cv2
@@ -55,8 +55,53 @@ import torchvision.transforms as transforms
 # Model path — absolute, works from any working directory
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../outputs/letter_cnn.pt")
 
+# ── Camera intrinsics (D435i @ 640x480) ──────────────────
+# These are the factory defaults. Replace with values from
+# rs2_intrinsics after running: ros2 topic echo /camera/camera/color/camera_info
+# fx, fy = focal lengths in pixels
+# cx, cy = principal point (optical centre) in pixels
+CAM_FX = 615.0
+CAM_FY = 615.0
+CAM_CX = 320.0
+CAM_CY = 240.0
+# ─────────────────────────────────────────────────────────
+
+
+def pixel_to_camera_frame(px, py, depth_m):
+    """
+    Convert a pixel coordinate + depth to a 3D point in the camera frame (metres).
+    This is the raw camera frame — a separate EE-to-robot transform is applied
+    downstream by SS2 once camera extrinsics are calibrated.
+
+    Returns (x_m, y_m, z_m) or (None, None, None) if depth is invalid.
+    """
+    if depth_m <= 0:
+        return None, None, None
+    x_m = (px - CAM_CX) * depth_m / CAM_FX
+    y_m = (py - CAM_CY) * depth_m / CAM_FY
+    z_m = depth_m
+    return round(x_m, 4), round(y_m, 4), round(z_m, 4)
+
+
+def estimate_theta(contour):
+    """
+    Estimate block rotation (degrees) from the minimum area bounding rectangle.
+    Returns angle in range [-90, 90] degrees.
+
+    NOTE: This gives the orientation of the block face but does not yet use the
+    corner dot to disambiguate 180-degree ambiguity. Dot-based theta will be
+    implemented in a later iteration.
+    """
+    if contour is None or len(contour) < 5:
+        return 0.0
+    _, _, angle = cv2.minAreaRect(contour)
+    # cv2.minAreaRect returns angle in [-90, 0) — normalise to [-90, 90]
+    if angle < -45:
+        angle += 90
+    return round(float(angle), 2)
+
 # Must match LABEL_MAP in train_letter_cnn.py exactly
-LABEL_MAP = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+LABEL_MAP = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
 
 # ══════════════════════════════════════════════════════════
@@ -64,7 +109,7 @@ LABEL_MAP = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 # ══════════════════════════════════════════════════════════
 
 class LetterCNN(nn.Module):
-    def __init__(self, num_classes=26):
+    def __init__(self, num_classes=36):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
@@ -114,10 +159,12 @@ class CNNPredictor:
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval()
         print(f"[CNN] Loaded {model_path}  ({len(label_map)} classes)")
+        print(f"[CNN] LABEL_MAP: {''.join(label_map)}")
+        print(f"[CNN] NOTE: O/Q confusion detected in training — collect more varied O data if O blocks misread as Q")
 
         self.transform = transforms.Compose([
             transforms.ToPILImage(),
-            transforms.Grayscale(num_output_channels=1),
+            transforms.Grayscale(num_output_channels=1),  # handles both grey and BGR input
             transforms.Resize((64, 64)),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,)),
@@ -209,7 +256,7 @@ class BlockDetector:
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
             if 0.5 <= w / float(h) <= 2.0:
-                boxes.append((x, y, w, h))
+                boxes.append((x, y, w, h, cnt))   # include contour for theta
 
         boxes.sort(key=lambda b: b[0])
         return boxes[:MAX_BLOCKS]
@@ -222,22 +269,27 @@ class BlockDetector:
 def extract_roi(frame, x, y, w, h):
     """
     Crop the region fed to the CNN.
+    Must match preprocess() in collect_training_data.py exactly:
+      greyscale → crop → resize 64x64 → equalizeHist
 
-    CARD mode:  cuts CARD_MARGIN (20%) from each edge to remove white border,
-                leaving just the letter. Matches collect_training_data.py exactly.
-
-    BLOCK mode: uses full bounding box — depth gate already isolated the block face,
-                no border to remove. Letter fills the face.
+    CARD mode:  cuts CARD_MARGIN from each edge to remove white border.
+    BLOCK mode: uses full bounding box — depth gate already isolated block face.
     """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
     if DETECTION_MODE == "CARD":
         margin_x = int(w * CARD_MARGIN)
         margin_y = int(h * CARD_MARGIN)
-        roi = frame[y+margin_y : y+h-margin_y,
-                    x+margin_x : x+w-margin_x]
+        roi = gray[y+margin_y : y+h-margin_y,
+                   x+margin_x : x+w-margin_x]
     else:
-        roi = frame[y:y+h, x:x+w]
+        roi = gray[y:y+h, x:x+w]
 
-    return roi if roi.size > 0 else None
+    if roi.size == 0:
+        return None
+
+    resized = cv2.resize(roi, (64, 64))
+    return cv2.equalizeHist(resized)  # critical — must match collect_training_data.py
 
 
 # ══════════════════════════════════════════════════════════
@@ -256,7 +308,7 @@ class Perception:
         self.block_detector  = BlockDetector()
         self.cnn             = CNNPredictor(MODEL_PATH, LABEL_MAP)
         self.at_position     = False
-        self.last_detections = []   # (x, y, w, h, letter, conf)
+        self.last_detections = []   # (x, y, w, h, letter, conf, x_m, y_m, z_m, theta)
         self.human_detected  = False
 
     def process(self, color_bgr, depth_raw=None, depth_colormap=None):
@@ -287,7 +339,7 @@ class Perception:
         # ── Depth info per block ──────────────────────────
         depth_info = {}
         if depth_raw is not None:
-            for (x,y,w,h) in self.block_detector.find_blocks(frame, depth_raw):
+            for (x, y, w, h, cnt) in self.block_detector.find_blocks(frame, depth_raw):
                 roi_d = depth_raw[y:y+h, x:x+w].astype(np.float32) / 1000.0
                 valid = roi_d[roi_d > 0]
                 if valid.size:
@@ -297,24 +349,33 @@ class Perception:
         if self.at_position:
             boxes = self.block_detector.find_blocks(frame, depth_raw)
             detections = []
-            for (x, y, w, h) in boxes:
+            for (x, y, w, h, cnt) in boxes:
                 roi = extract_roi(frame, x, y, w, h)
                 if roi is None:
                     continue
                 letter, conf = self.cnn.predict(roi, x)
-                detections.append((x, y, w, h, letter, conf))
+
+                # 3D position — centre pixel of block face + median depth
+                cx_px = x + w // 2
+                cy_px = y + h // 2
+                depth_m = depth_info.get((x,y,w,h), 0.0)
+                x_m, y_m, z_m = pixel_to_camera_frame(cx_px, cy_px, depth_m)
+
+                # Rotation estimate from contour minAreaRect
+                theta = estimate_theta(cnt)
+
+                detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta))
             self.last_detections = detections
 
         # ── Draw detection boxes ──────────────────────────
-        for (x, y, w, h, letter, conf) in self.last_detections:
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.last_detections:
             box_color = (0, 200, 255) if self.at_position else (100, 100, 100)
-            d_key     = min(depth_info.keys(), key=lambda k: abs(k[0]-x), default=None)
-            depth_str = f" {depth_info[d_key]:.2f}m" if d_key else ""
+            depth_str = f" {z_m:.2f}m" if z_m else ""
 
             cv2.rectangle(frame, (x,y), (x+w,y+h), box_color, 2)
 
             if letter:
-                label = f"{letter} {conf:.0f}%{depth_str}"
+                label = f"{letter} {conf:.0f}%{depth_str} r{theta:.0f}deg"
                 (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
                 cv2.rectangle(frame, (x, y-th-bl-6), (x+tw+4, y), box_color, -1)
                 cv2.putText(frame, label, (x+2, y-bl-2),
@@ -357,21 +418,34 @@ class Perception:
         Returns current detections as a JSON string for ROS2 publishing.
 
         Format:
-            {"blocks": [{"letter": "A", "conf": 94.2, "x": 120, "y": 200, "w": 80, "h": 80}, ...]}
+            {
+              "blocks": [
+                {
+                  "letter":    "A",      // Detected letter (A-Z or 0-9)
+                  "conf":      94.2,     // CNN confidence (0-100%)
+                  "x_m":       0.0412,   // X position in camera frame (metres)
+                  "y_m":      -0.0231,   // Y position in camera frame (metres)
+                  "z_m":       0.3820,   // Z depth from camera (metres)
+                  "theta_deg": 12.5      // Block rotation around Z axis (degrees)
+                                         // From minAreaRect — dot-based refinement TBD
+                }
+              ]
+            }
 
-        x, y, w, h are pixel coordinates in the camera frame.
-        For 3D position, Connor's node should use these with the depth image + camera intrinsics.
+        NOTE: x_m, y_m, z_m are in the CAMERA frame, not the robot world frame.
+        SS2 (Connor) applies the EE-to-robot transform once extrinsics are calibrated.
+        If depth is unavailable for a block, x_m/y_m/z_m will be null.
         """
         blocks = []
-        for (x, y, w, h, letter, conf) in self.last_detections:
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.last_detections:
             if letter:
                 blocks.append({
-                    "letter": letter,
-                    "conf":   round(conf, 1),
-                    "x":      x,
-                    "y":      y,
-                    "w":      w,
-                    "h":      h
+                    "letter":    letter,
+                    "conf":      round(conf, 1),
+                    "x_m":       x_m,
+                    "y_m":       y_m,
+                    "z_m":       z_m,
+                    "theta_deg": theta,
                 })
         return json.dumps({"blocks": blocks})
 

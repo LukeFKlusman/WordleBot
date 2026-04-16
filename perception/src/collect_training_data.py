@@ -71,20 +71,22 @@ def preprocess(frame):
         x, y, w, h = cv2.boundingRect(largest)
 
         # Cut white border symmetrically — 15% from each edge
-        margin_x = int(w * 0.15)
-        margin_y = int(h * 0.15)
+        margin_x = int(w * 0.10)
+        margin_y = int(h * 0.10)
         roi = gray[y+margin_y : y+h-margin_y,
                    x+margin_x : x+w-margin_x]
 
         if roi.size > 0:
-            return cv2.resize(roi, (IMG_SIZE, IMG_SIZE))
+            resized = cv2.resize(roi, (IMG_SIZE, IMG_SIZE))
+            return cv2.equalizeHist(resized)  # normalise contrast — fixes overexposed lab lighting
 
     # Fallback — centre crop if no white card found
     h, w = gray.shape[:2]
     side = min(h, w)
     y0   = (h - side) // 2
     x0   = (w - side) // 2
-    return cv2.resize(gray[y0:y0+side, x0:x0+side], (IMG_SIZE, IMG_SIZE))
+    resized = cv2.resize(gray[y0:y0+side, x0:x0+side], (IMG_SIZE, IMG_SIZE))
+    return cv2.equalizeHist(resized)
 
 def count_existing(label):
     folder = os.path.join(SAVE_ROOT, label)

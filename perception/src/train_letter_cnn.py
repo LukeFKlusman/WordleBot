@@ -50,10 +50,12 @@ MODEL_OUT   = os.path.join(OUTPUTS_DIR, "letter_cnn.pt")
 # ── Hyperparameters ────────────────────────────────────────
 IMG_SIZE    = 64
 BATCH_SIZE  = 32
-EPOCHS      = 15
+EPOCHS      = 10
 LR          = 1e-3
 VAL_SPLIT   = 0.15
 TEST_SPLIT  = 0.10
+#LABEL_MAP = list("ABCDEFG")
+#LABEL_MAP = list("ABCDEFGHIJKLMNO456789")
 LABEL_MAP   = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 NUM_CLASSES = len(LABEL_MAP)
 # ──────────────────────────────────────────────────────────
