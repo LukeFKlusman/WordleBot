@@ -10,19 +10,23 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
+find_package(moveit_task_constructor_core REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
 
 set(DEPENDENCIES
   rclcpp
   moveit_ros_planning_interface
   moveit_visual_tools
+  moveit_task_constructor_core
   tf2
   geometry_msgs
   std_msgs
   moveit_msgs
+  shape_msgs
 )
 
 # --- Library: controller + node sources ---

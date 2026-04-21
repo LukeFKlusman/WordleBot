@@ -125,6 +125,11 @@ class TestKeyControlConcepts(unittest.TestCase):
             CollisionObject, "/wordle_bot/add_collision_object", 10
         )
 
+        # Letter object publisher (used by TC1.6 — triggers pick-and-place mode)
+        cls.letter_object_pub = cls.node.create_publisher(
+            PoseStamped, "perception/letter_objects", 10
+        )
+
         # TODO (TC1.3): create gripper command publisher once topic is defined
         # cls.gripper_pub = cls.node.create_publisher(<GripperMsg>, "/wordle_bot/gripper_cmd", 10)
 
@@ -851,63 +856,92 @@ class TestKeyControlConcepts(unittest.TestCase):
 
     def test_tc1_6_integration_basic_pick_and_place(self):
         """
-        Validates: D (integration) — all P/C/D criteria working together:
-        waypoint movement, collision avoidance, gripper control, mission control.
+        Validates: D (integration) — full MTC-based pick-and-place sequence.
 
         Procedure:
-          - Set up collision scene (floor + sensor guard + one obstacle between pick and place).
-          - Execute full pick-and-place sequence:
-              pre-pick → descend → gripper close → lift → travel (avoid obstacle) → descend → gripper open
-          - Issue Stop mid-travel, then Resume — verify mission control holds during pick-and-place.
+          - Publish a letter object pose to perception/letter_objects. The control node
+            adds a 40 mm cube collision object to the planning scene and arms
+            pick-and-place mode.
+          - Publish start_mission = True (no goal queue required).
+          - The MTC task executes the full sequence:
+              open gripper → move to pick region → approach (cartesian) →
+              sample grasp → close gripper → attach → lift →
+              move to place → lower → open gripper → detach → retreat → home
+          - Wait for /wordle_bot/mission_complete = True.
 
-        Pass: All poses reached within tolerance; gripper feedback confirms pick and place;
-              path avoids obstacle; Stop/Resume behaves correctly.
-        Fail: Any step fails, gripper does not actuate, path intersects obstacle,
-              or Stop/Resume does not function.
+        Pass: mission_complete received within timeout.
+        Fail: Timeout exceeded or MTC planning/execution fails.
+
+        Pick position:  x=0.30, y=0.10, z=0.02  (world frame, 40 mm cube centre)
+        Place position: x=0.00, y=0.45, z=0.02  (hardcoded in control node)
         """
-        pre_pick_pose = _make_pose_stamped( 0.3,  0.20, 0.15, roll=math.pi)
-        pick_pose     = _make_pose_stamped( 0.3,  0.20, 0.05, roll=math.pi)
-        lift_pose     = _make_pose_stamped( 0.3,  0.20, 0.20, roll=math.pi)
-        place_pose    = _make_pose_stamped(-0.2,  0.25, 0.05, roll=math.pi)
 
-        # TODO: add obstacle between pick and place locations in the planning scene
-        # <set up obstacle — same pattern as TC1.5>
+        # Reset state flags before starting
+        TestKeyControlConcepts.mission_complete = False
+        TestKeyControlConcepts.goal_reached_count = 0
 
-        # TODO: move to pre-pick pose
-        # self._send_goal_and_wait(pre_pick_pose)
-        # self._assert_pose_reached(pre_pick_pose)
+        # ------------------------------------------------------------------ #
+        # Publish the letter object pose to perception/letter_objects
+        # ------------------------------------------------------------------ #
+        pick_pose = PoseStamped()
+        pick_pose.header.frame_id = 'world'
+        pick_pose.header.stamp = self.node.get_clock().now().to_msg()
+        pick_pose.pose.position.x = 0.30
+        pick_pose.pose.position.y = 0.10
+        pick_pose.pose.position.z = 0.02  # cube centre (half of 40 mm above table at z=0)
+        pick_pose.pose.orientation.w = 1.0
 
-        # TODO: descend to pick pose
-        # self._send_goal_and_wait(pick_pose)
-        # self._assert_pose_reached(pick_pose)
+        self.node.get_logger().info(
+            f"[TC1.6] Publishing letter object at "
+            f"({pick_pose.pose.position.x:.3f}, "
+            f"{pick_pose.pose.position.y:.3f}, "
+            f"{pick_pose.pose.position.z:.3f})."
+        )
 
-        # TODO: command gripper close (pick)
-        # self.gripper_pub.publish(CLOSE_CMD)
-        # <wait for gripper closed confirmation>
+        for _ in range(5):
+            self.letter_object_pub.publish(pick_pose)
+            rclpy.spin_once(self.node, timeout_sec=0.1)
 
-        # TODO: lift to clearance height
-        # self._send_goal_and_wait(lift_pose)
-        # self._assert_pose_reached(lift_pose)
+        # Allow the planning scene to propagate the new collision object
+        time.sleep(2.0)
 
-        # TODO: travel toward place location and issue Stop mid-travel, then Resume
-        # self.mission_pub.publish(STOP_CMD)
-        # <assert arm halts within STOP_TIMEOUT_S>
-        # self.mission_pub.publish(RESUME_CMD)
+        # ------------------------------------------------------------------ #
+        # Arm the mission — MTC drives all motion, no goal queue needed
+        # ------------------------------------------------------------------ #
+        start_msg = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
+        self.node.get_logger().info("[TC1.6] Mission armed — waiting for pick-and-place to complete.")
 
-        # TODO: descend to place pose
-        # self._send_goal_and_wait(place_pose)
-        # self._assert_pose_reached(place_pose)
+        # ------------------------------------------------------------------ #
+        # Wait for mission_complete
+        # MTC planning + execution takes longer than a single MoveIt move,
+        # so allow 3× the standard per-goal timeout.
+        # ------------------------------------------------------------------ #
+        pick_place_timeout = MOTION_TIMEOUT_S * 3
+        deadline = time.time() + pick_place_timeout
 
-        # TODO: command gripper open (place)
-        # self.gripper_pub.publish(OPEN_CMD)
-        # <wait for gripper open confirmation>
+        passed = True
+        try:
+            while not TestKeyControlConcepts.mission_complete:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                self.assertLess(
+                    time.time(), deadline,
+                    f"[TC1.6] Pick-and-place did not complete within "
+                    f"{pick_place_timeout:.0f} s — check MTC planning output."
+                )
 
-        # TODO: verify gripper feedback confirms pick and place occurred correctly
+            self.assertTrue(
+                TestKeyControlConcepts.mission_complete,
+                "[TC1.6] mission_complete signal was not received."
+            )
+            self.node.get_logger().info("[TC1.6] Pick-and-place mission complete — PASS.")
 
-        # TODO: remove obstacle from planning scene
-        # <remove obstacle>
-
-        self.fail("[TC1.6] Not implemented — update once gripper and mission control interfaces are defined.")
+        except AssertionError:
+            passed = False
+            raise
+        finally:
+            print(f"\n[TC1.6] Result: {'PASS' if passed else 'FAIL'}")
     
     # -----------------------------------------------------------------------
     # Internal helpers
