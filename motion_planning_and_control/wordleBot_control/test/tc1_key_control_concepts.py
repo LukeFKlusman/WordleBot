@@ -54,12 +54,16 @@ from shape_msgs.msg import SolidPrimitive
 # ---------------------------------------------------------------------------
 # Tolerances (shared across all TC1 tests)
 # ---------------------------------------------------------------------------
-POSITION_TOLERANCE_M    = 0.005   # 5 mm
-ORIENTATION_TOLERANCE_DEG = 5.0   # degrees
-MOTION_TIMEOUT_S        = 60.0    # max wait per waypoint
-STOP_TIMEOUT_S          = 2.0     # arm must halt within this time of Stop cmd
-ABORT_TIMEOUT_S         = 30.0    # arm must reach home within this time of Abort cmd
-GRIPPER_TIMEOUT_S       = 2.0     # gripper must respond within this time
+POSITION_TOLERANCE_M      = 0.005   # 5 mm
+ORIENTATION_TOLERANCE_DEG = 5.0     # degrees
+MOTION_TIMEOUT_S          = 60.0    # max wait per waypoint
+STOP_TIMEOUT_S            = 2.0     # arm must halt within this time of Stop cmd
+ABORT_TIMEOUT_S           = 30.0    # arm must reach home within this time of Abort cmd
+GRIPPER_TIMEOUT_S         = 2.0     # gripper must respond within this time
+
+# End-effector TF frame used for all pose validation.
+# Must match the tip link of the active MoveIt planning group.
+EE_LINK = "gripper_tcp"
 
 
 class TestKeyControlConcepts(unittest.TestCase):
@@ -211,7 +215,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         bag_proc.wait()
         print(f"[TC1.1] Bag recorded to: {bag_path}")
 
-        # EE pose: read from bag using BufferCore (handles full world→tool0 chain
+        # EE pose: read from bag using BufferCore (handles full world→EE_LINK chain
         # by composing both /tf_static and /tf transforms offline).
         goal_reached_ts = _read_goal_reached_timestamps(bag_path)
         tf_result = _read_ee_pose_from_bag(bag_path, goal_reached_ts[0] if goal_reached_ts else 0)
@@ -954,7 +958,7 @@ class TestKeyControlConcepts(unittest.TestCase):
                 )
 
     def _get_ee_transform(self):
-        """Look up the current world → tool0 transform from /tf."""
+        """Look up the current world → EE_LINK transform from /tf."""
         deadline = time.time() + 5.0
         while time.time() < deadline:
             # Spin first to populate the TF buffer, then do an instant lookup.
@@ -963,12 +967,12 @@ class TestKeyControlConcepts(unittest.TestCase):
             rclpy.spin_once(self.node, timeout_sec=0.1)
             try:
                 return self.tf_buffer.lookup_transform(
-                    "world", "tool0",
+                    "world", EE_LINK,
                     rclpy.time.Time(),
                 )
             except TransformException:
                 pass
-        self.fail("Could not look up tool0 → ur_base_link transform within 5 s")
+        self.fail(f"Could not look up world → {EE_LINK} transform within 5 s")
 
     def _assert_pose_reached(self, goal: PoseStamped) -> None:
         """Validate EE transform matches the goal within defined tolerances."""
@@ -1129,11 +1133,11 @@ def _segment_trajectory_by_goals(traj_stamped: list, goal_reached_ts: list) -> l
 
 
 
-def _read_ee_pose_from_bag(bag_path: str, lookup_time_ns: int):
-    """Look up world→tool0 transform using offline bag TF data via BufferCore.
+def _read_ee_pose_from_bag(bag_path: str, lookup_time_ns: int, ee_link: str = EE_LINK):
+    """Look up world→ee_link transform using offline bag TF data via BufferCore.
 
     Loads all /tf_static messages and /tf messages up to lookup_time_ns into a
-    BufferCore, then queries world→tool0 at the latest available time. Filtering
+    BufferCore, then queries world→ee_link at the latest available time. Filtering
     /tf by lookup_time_ns ensures the returned pose reflects the robot state at
     the moment goal_reached was published, not the end of the recording.
     """
@@ -1153,14 +1157,14 @@ def _read_ee_pose_from_bag(bag_path: str, lookup_time_ns: int):
             msg = deserialize_message(data, TFMessage)
             for tf in msg.transforms:
                 buffer.set_transform(tf, 'bag')
-    return buffer.lookup_transform_core('world', 'tool0', rclpy.time.Time())
+    return buffer.lookup_transform_core('world', ee_link, rclpy.time.Time())
 
 
-def _read_ee_positions_from_bag(bag_path: str) -> list:
-    """Read /tf_static and /tf from a bag and compute world→tool0 positions via BufferCore.
+def _read_ee_positions_from_bag(bag_path: str, ee_link: str = EE_LINK) -> list:
+    """Read /tf_static and /tf from a bag and compute world→ee_link positions via BufferCore.
 
     Returns: list of (timestamp_ns, x, y, z) for each /tf message timestep where
-             world→tool0 is resolvable.
+             world→ee_link is resolvable.
     """
     buffer = tf2_ros.BufferCore(cache_time=rclpy.duration.Duration(seconds=600))
     tf_timestamps = []
@@ -1182,13 +1186,13 @@ def _read_ee_positions_from_bag(bag_path: str) -> list:
                     buffer.set_transform(tf, 'bag')
                 tf_timestamps.append(ts)
     except Exception as exc:
-        print(f"[TC1.5] Warning: _read_ee_positions_from_bag failed reading bag: {exc}")
+        print(f"Warning: _read_ee_positions_from_bag failed reading bag: {exc}")
         return []
 
     results = []
     for ts in tf_timestamps:
         try:
-            result = buffer.lookup_transform_core('world', 'tool0', rclpy.time.Time())
+            result = buffer.lookup_transform_core('world', ee_link, rclpy.time.Time())
             t = result.transform.translation
             results.append((ts, t.x, t.y, t.z))
         except Exception:
