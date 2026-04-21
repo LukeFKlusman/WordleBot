@@ -1,0 +1,509 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1024</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>1024</width>
+    <height>600</height>
+   </size>
+  </property>
+  <property name="font">
+   <font>
+    <family>Ubuntu</family>
+    <pointsize>10</pointsize>
+    <weight>50</weight>
+    <bold>false</bold>
+   </font>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">QMainWindow {
+    background-color: #0f1117;
+}</string>
+  </property>
+  <property name="windowTitle">
+   <string>WordleBot</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <property name="styleSheet">
+    <string notr="true">QWidget#centralwidget {
+    background-color: #1a1f2e;
+}</string>
+   </property>
+   <layout class="QHBoxLayout" name="horizontalLayout">
+    <property name="spacing">
+     <number>0</number>
+    </property>
+    <property name="leftMargin">
+     <number>0</number>
+    </property>
+    <property name="topMargin">
+     <number>0</number>
+    </property>
+    <property name="rightMargin">
+     <number>0</number>
+    </property>
+    <property name="bottomMargin">
+     <number>0</number>
+    </property>
+    <item>
+     <widget class="QTabWidget" name="mainTab">
+      <property name="minimumSize">
+       <size>
+        <width>680</width>
+        <height>0</height>
+       </size>
+      </property>
+      <property name="styleSheet">
+       <string notr="true">QTabWidget {
+    background-color: #1a1f2e;
+}
+QTabWidget::pane {
+    background-color: #1a1f2e;
+    border: none;
+    border-top: 8px solid #1a1f2e;
+    margin: 0px;
+    padding: 0px;
+    top: -8px;
+}
+QWidget#tab,
+QWidget#tab_2,
+QWidget#tab_3 {
+    background-color: #0d1018;
+}
+QTabWidget::tab-bar {
+    alignment: left;
+}
+QTabBar {
+    background-color: #1a1f2e;
+}
+QTabBar::tab {
+    background-color: transparent;
+    color: #64748b;
+    padding: 8px 20px;
+    font-size: 9pt;
+    font-weight: 600;
+    border-bottom: 2px solid transparent;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+    min-width: 80px;
+}
+QTabBar::tab:selected {
+    color: #a5b4fc;
+    border-bottom: 2px solid #6366f1;
+    background-color: transparent;
+}
+QTabBar::tab:hover:!selected {
+    color: #94a3b8;
+    background-color: rgba(255, 255, 255, 0.04);
+}</string>
+      </property>
+      <property name="currentIndex">
+       <number>0</number>
+      </property>
+      <widget class="QWidget" name="tab">
+       <attribute name="title">
+        <string>Sim View</string>
+       </attribute>
+      </widget>
+      <widget class="QWidget" name="tab_2">
+       <attribute name="title">
+        <string>Camera</string>
+       </attribute>
+      </widget>
+      <widget class="QWidget" name="tab_3">
+       <attribute name="title">
+        <string>Diagnostics</string>
+       </attribute>
+      </widget>
+     </widget>
+    </item>
+    <item>
+     <layout class="QVBoxLayout" name="wordleColumnLayout">
+      <property name="spacing">
+       <number>0</number>
+      </property>
+      <property name="leftMargin">
+       <number>0</number>
+      </property>
+      <property name="topMargin">
+       <number>0</number>
+      </property>
+      <property name="rightMargin">
+       <number>0</number>
+      </property>
+      <property name="bottomMargin">
+       <number>0</number>
+      </property>
+      <item>
+       <widget class="QWidget" name="wordle">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+          <horstretch>0</horstretch>
+          <verstretch>1</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>230</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QWidget#wordle {
+    background-color: #0f1117;
+    border: none;
+}</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QWidget" name="voiceControls">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>176</height>
+         </size>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>16777215</width>
+          <height>176</height>
+         </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QWidget#voiceControls {
+    background-color: #0f1117;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+QLabel#voiceLabel {
+    color: #38bdf8;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 2px;
+    background: transparent;
+}
+QFrame#voiceTranscriptFrame {
+    background-color: #111827;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+}
+QLabel#voiceTranscriptValue {
+    color: #f8fafc;
+    font-size: 15pt;
+    font-weight: 700;
+    background: transparent;
+}
+QPushButton#voiceRecordButton,
+QPushButton#voiceStopButton,
+QPushButton#voiceConfirmButton,
+QPushButton#voiceRetryButton {
+    border-radius: 6px;
+    font-size: 9pt;
+    font-weight: 700;
+    padding: 8px 0px;
+}
+QPushButton#voiceRecordButton {
+    background-color: #1f2937;
+    color: #f8fafc;
+    border: 1px solid rgba(248, 113, 113, 0.35);
+}
+QPushButton#voiceRecordButton:hover {
+    background-color: #273244;
+}
+QPushButton#voiceStopButton {
+    background-color: #111827;
+    color: #f8fafc;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+}
+QPushButton#voiceStopButton:hover {
+    background-color: #1b2432;
+}
+QPushButton#voiceConfirmButton {
+    background-color: #0f2f20;
+    color: #dcfce7;
+    border: 1px solid rgba(74, 222, 128, 0.28);
+}
+QPushButton#voiceConfirmButton:hover {
+    background-color: #16402d;
+}
+QPushButton#voiceRetryButton {
+    background-color: #1e293b;
+    color: #cbd5e1;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+QPushButton#voiceRetryButton:hover {
+    background-color: #273449;
+}</string>
+        </property>
+        <layout class="QVBoxLayout" name="voiceControlsLayout">
+         <property name="leftMargin">
+          <number>12</number>
+         </property>
+         <property name="topMargin">
+          <number>12</number>
+         </property>
+         <property name="rightMargin">
+          <number>12</number>
+         </property>
+         <property name="bottomMargin">
+          <number>12</number>
+         </property>
+         <property name="spacing">
+          <number>10</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="voiceLabel">
+           <property name="text">
+            <string>VOICE CONTROL</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QFrame" name="voiceTranscriptFrame">
+           <property name="frameShape">
+            <enum>QFrame::StyledPanel</enum>
+           </property>
+           <property name="frameShadow">
+            <enum>QFrame::Raised</enum>
+           </property>
+           <layout class="QVBoxLayout" name="voiceTranscriptLayout">
+            <property name="leftMargin">
+             <number>12</number>
+            </property>
+            <property name="topMargin">
+             <number>12</number>
+            </property>
+            <property name="rightMargin">
+             <number>12</number>
+            </property>
+            <property name="bottomMargin">
+             <number>12</number>
+            </property>
+            <item>
+             <widget class="QLabel" name="voiceTranscriptValue">
+              <property name="text">
+               <string>Awaiting input...</string>
+              </property>
+              <property name="alignment">
+               <set>Qt::AlignCenter</set>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </item>
+         <item>
+          <layout class="QGridLayout" name="voiceButtonsLayout">
+           <property name="horizontalSpacing">
+            <number>8</number>
+           </property>
+           <property name="verticalSpacing">
+            <number>8</number>
+           </property>
+           <item row="0" column="0">
+            <widget class="QPushButton" name="voiceRecordButton">
+             <property name="text">
+              <string>Record</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QPushButton" name="voiceStopButton">
+             <property name="text">
+              <string>Stop</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0">
+            <widget class="QPushButton" name="voiceConfirmButton">
+             <property name="text">
+              <string>Confirm</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="1">
+            <widget class="QPushButton" name="voiceRetryButton">
+             <property name="text">
+              <string>Retry</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QWidget" name="safetyControls">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>130</height>
+         </size>
+        </property>
+        <property name="maximumSize">
+         <size>
+           <width>16777215</width>
+          <height>130</height>
+         </size>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">QWidget#safetyControls {
+    background-color: #130d0d;
+    border-top: 2px solid rgba(220, 38, 38, 0.5);
+}
+QPushButton {
+    border-radius: 6px;
+    font-size: 9pt;
+    font-weight: 700;
+    padding: 8px 0px;
+}
+QPushButton#pushButton {
+    background-color: #6366f1;
+    color: white;
+    border: none;
+}
+QPushButton#pushButton:hover {
+    background-color: #4f52d4;
+}
+QPushButton#pushButton:pressed {
+    background-color: #4338ca;
+}
+QPushButton#pushButton_4 {
+    background-color: #dc2626;
+    color: white;
+    border: 1px solid #ef4444;
+}
+QPushButton#pushButton_4:hover {
+    background-color: #b91c1c;
+}
+QPushButton#pushButton_4:pressed {
+    background-color: #991b1b;
+}
+QPushButton#pushButton_2,
+QPushButton#pushButton_3 {
+    background-color: #1e293b;
+    color: #94a3b8;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+QPushButton#pushButton_2:hover,
+QPushButton#pushButton_3:hover {
+    background-color: #273449;
+}
+QPushButton#pushButton_2:pressed,
+QPushButton#pushButton_3:pressed {
+    background-color: #1a2438;
+}</string>
+        </property>
+        <layout class="QVBoxLayout" name="safetyControlsLayout">
+         <property name="leftMargin">
+          <number>12</number>
+         </property>
+         <property name="topMargin">
+          <number>10</number>
+         </property>
+         <property name="rightMargin">
+          <number>12</number>
+         </property>
+         <property name="bottomMargin">
+          <number>12</number>
+         </property>
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="safetyLabel">
+           <property name="text">
+            <string>SAFETY CONTROLS</string>
+           </property>
+           <property name="styleSheet">
+            <string notr="true">QLabel#safetyLabel {
+    color: #ef4444;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 2px;
+    background: transparent;
+    border: none;
+    padding: 0px;
+}</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <layout class="QGridLayout" name="gridLayout">
+           <property name="horizontalSpacing">
+            <number>8</number>
+           </property>
+           <property name="verticalSpacing">
+            <number>8</number>
+           </property>
+           <item row="0" column="0">
+            <widget class="QPushButton" name="pushButton">
+             <property name="text">
+              <string>START</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0">
+            <widget class="QPushButton" name="pushButton_2">
+             <property name="text">
+              <string>RESUME</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="1">
+            <widget class="QPushButton" name="pushButton_3">
+             <property name="text">
+              <string>HOME</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QPushButton" name="pushButton_4">
+             <property name="text">
+              <string>STOP</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </item>
+   </layout>
+   <zorder>mainTab</zorder>
+   <zorder>wordle</zorder>
+   <zorder>pushButton</zorder>
+   <zorder>pushButton_2</zorder>
+   <zorder>pushButton_3</zorder>
+   <zorder>pushButton_4</zorder>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
