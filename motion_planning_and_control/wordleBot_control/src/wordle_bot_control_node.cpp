@@ -3,6 +3,11 @@
 #include <chrono>
 #include <thread>
 
+// TODO: Functionalities to add:
+// - Scan area for obstacles and add to planning scene (TC1.3)
+// - Stop/Resume/Abort mission (TC1.4) — requires mission state management
+// - Pick and Place: staged movement based of target location
+
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
 WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)

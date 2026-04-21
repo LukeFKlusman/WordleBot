@@ -23,7 +23,7 @@ static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotController");
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
 : node_(node),
-  move_group_(node, "ur_manipulator"),
+  move_group_(node, "ur_onrobot_manipulator"),
   planning_scene_(),
   visual_tools_(node, "ur_base_link", rviz_visual_tools::RVIZ_MARKER_TOPIC,
     move_group_.getRobotModel())
@@ -50,7 +50,7 @@ WordleBotController::~WordleBotController()
 
 namespace 
 {
-constexpr char kPlanningGroup[] = "ur_manipulator";
+constexpr char kPlanningGroup[] = "ur_onrobot_manipulator";
 
 double jointDistance(const moveit::core::JointModel * joint_model, double from, double to)
 {
@@ -429,8 +429,10 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
     }
 
     // DEBUG: forward kinematics — does the computed EEF position match where the robot actually is?
-    const Eigen::Isometry3d & eef_tf = current_state->getGlobalLinkTransform("tool0");
-    RCLCPP_INFO(LOGGER, "Current EEF pose (FK): x=%.4f y=%.4f z=%.4f",
+    const Eigen::Isometry3d & eef_tf = current_state->getGlobalLinkTransform(
+      move_group_.getEndEffectorLink());
+    RCLCPP_INFO(LOGGER, "Current EEF pose (FK) [%s]: x=%.4f y=%.4f z=%.4f",
+      move_group_.getEndEffectorLink().c_str(),
       eef_tf.translation().x(), eef_tf.translation().y(), eef_tf.translation().z());
   } else {
     RCLCPP_ERROR(LOGGER, "getCurrentState returned null — state monitor has no data yet!");
@@ -665,9 +667,17 @@ void WordleBotController::attachSensorCollisionObject()
   attached_object.object.primitives.push_back(cylinder);
   attached_object.object.primitive_poses.push_back(pose);
 
-  // Only allow the links that physically surround tool0 to touch the cylinder.
+  // Allow all links that physically overlap with the sensor guard cylinder.
+  // Includes the full gripper chain beyond tool0 (onrobot RG2).
   attached_object.touch_links = {
-    "wrist_3_link", "flange", "tool0", "ft_frame"
+    "wrist_3_link", "flange", "tool0", "ft_frame",
+    "onrobot_base_link",
+    "cable_connector_0", "cable_connector_1",
+    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
+    "finger_width_mock_link",
+    "left_inner_knuckle", "right_inner_knuckle",
+    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
+    "gripper_tcp"
   };
 
   planning_scene_.applyAttachedCollisionObject(attached_object);
@@ -737,7 +747,7 @@ void WordleBotController::visualisePlan(const moveit::planning_interface::MoveGr
 
   if (plan != nullptr) {
     const auto * joint_model_group =
-      move_group_.getRobotModel()->getJointModelGroup("ur_manipulator");
+      move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
     visual_tools_.publishTrajectoryLine(plan->trajectory_, joint_model_group);
   }
 

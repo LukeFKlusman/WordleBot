@@ -26,6 +26,9 @@ Run with:
 
   Run TC1.2 in isolation:
   python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
+
+  Run TC1.5 in isolation:
+  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
 """
 
 import math
@@ -180,7 +183,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         Pass: EE within 5 mm / 5° of goal; mission_complete=true within 60 s.
         Fail: Tolerance exceeded, timeout, or planning/execution error.
         """
-        goal = _make_pose_stamped(0.3, 0.25, 0.25, roll=math.pi)
+        goal = _make_pose_stamped(0.2, 0.1, 0.05, roll=math.pi)
 
         # Start bag recording
         bag_dir = tempfile.mkdtemp(prefix='tc1_1_')
