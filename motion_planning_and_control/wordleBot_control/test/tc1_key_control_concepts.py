@@ -887,7 +887,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         pick_pose.header.frame_id = 'world'
         pick_pose.header.stamp = self.node.get_clock().now().to_msg()
         pick_pose.pose.position.x = 0.30
-        pick_pose.pose.position.y = 0.10
+        pick_pose.pose.position.y = 0.20
         pick_pose.pose.position.z = 0.02  # cube centre (half of 40 mm above table at z=0)
         pick_pose.pose.orientation.w = 1.0
 
@@ -903,7 +903,7 @@ class TestKeyControlConcepts(unittest.TestCase):
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
         # Allow the planning scene to propagate the new collision object
-        time.sleep(2.0)
+        time.sleep(10) 
 
         # ------------------------------------------------------------------ #
         # Arm the mission — MTC drives all motion, no goal queue needed

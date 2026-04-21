@@ -242,6 +242,14 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
   cartesian_planner->setStepSize(0.001);
   RCLCPP_DEBUG(LOGGER, "createTask: CartesianPath planner configured (vel=0.5, acc=0.5, step=0.001).");
 
+  // Dedicated planner for retreat: min_fraction=0 accepts whatever Cartesian
+  // distance the arm can actually achieve at the (low, far-reach) place pose.
+  auto retreat_planner = std::make_shared<mtc::solvers::CartesianPath>();
+  retreat_planner->setMaxVelocityScalingFactor(0.5);
+  retreat_planner->setMaxAccelerationScalingFactor(0.5);
+  retreat_planner->setStepSize(0.001);
+  retreat_planner->setMinFraction(0.0);
+
   // ── Stage 1: capture current state ────────────────────────────────────────
   mtc::Stage * current_state_ptr = nullptr;
   {
@@ -253,7 +261,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
   // ── Stage 2: open gripper ─────────────────────────────────────────────────
   {
-    RCLCPP_DEBUG(LOGGER, "createTask: adding stage 2 — open hand (goal='open').");
+    RCLCPP_DEBUG(LOGGER, "\ncreateTask: adding stage 2 — open hand (goal='open').");
     auto stage_open_hand = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
     stage_open_hand->setGroup(hand_group);
     stage_open_hand->setGoal("open");
@@ -262,7 +270,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
   // ── Stage 3: free-space move to pick region ───────────────────────────────
   {
-    RCLCPP_DEBUG(LOGGER, "createTask: adding stage 3 — Connect 'move to pick' (timeout=10 s).");
+    RCLCPP_DEBUG(LOGGER, "\ncreateTask: adding stage 3 — Connect 'move to pick' (timeout=10 s).");
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
@@ -277,7 +285,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
   // ── Stage 4: pick container ───────────────────────────────────────────────
   mtc::Stage * attach_object_stage = nullptr;
   {
-    RCLCPP_DEBUG(LOGGER, "createTask: building stage 4 — SerialContainer 'pick object'.");
+    RCLCPP_DEBUG(LOGGER, "\ncreateTask: building stage 4 — SerialContainer 'pick object'.");
     auto grasp = std::make_unique<mtc::SerialContainer>("pick object");
     task.properties().exposeTo(grasp->properties(), {"eef", "group", "ik_frame"});
     grasp->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
@@ -395,8 +403,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
     auto stage = std::make_unique<mtc::stages::Connect>(
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
-        {arm_group,  sampling_planner},
-        {hand_group, sampling_planner}});
+        {arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
     // Same shoulder/wrist path constraints as moveToTarget — uniform planning behaviour
@@ -413,7 +420,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
     // 6a. Generate place pose + solve IK (object must reach PLACE_X/Y/Z in world)
     {
-      RCLCPP_DEBUG(LOGGER, "createTask: 6a — GeneratePlacePose for '%s' "
+      RCLCPP_DEBUG(LOGGER, "\ncreateTask: 6a — GeneratePlacePose for '%s' "
         "target=(%.3f, %.3f, %.3f) world, IK solutions=4.",
         LETTER_OBJECT_ID, PLACE_X, PLACE_Y, PLACE_Z);
       auto stage =
@@ -480,9 +487,9 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
       RCLCPP_DEBUG(LOGGER, "createTask: 6e — MoveRelative 'retreat' "
         "(dist=[0.05, 0.15], dir=+z world).");
       auto stage =
-        std::make_unique<mtc::stages::MoveRelative>("retreat", cartesian_planner);
+        std::make_unique<mtc::stages::MoveRelative>("retreat", retreat_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
+      stage->setMinMaxDistance(0.03, 0.15);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "retreat");
 
