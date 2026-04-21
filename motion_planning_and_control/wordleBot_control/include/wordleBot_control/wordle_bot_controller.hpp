@@ -13,6 +13,8 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit_visual_tools/moveit_visual_tools.h>
+#include <moveit_msgs/msg/constraints.hpp>
+#include <moveit_msgs/msg/joint_constraint.hpp>
 
 
 class WordleBotController
@@ -50,6 +52,10 @@ public:
   // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
   static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
                                             double roll, double pitch, double yaw);
+
+  // Return the path constraints used by moveToTarget: shoulder_lift_joint and wrist_3_joint bounds.
+  // Pass the result to MTC Connect stages so pick-and-place planning is constrained identically.
+  static moveit_msgs::msg::Constraints buildPathConstraints();
 
   // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
   // This is the L1 path length in joint space — used to validate motion efficiency.

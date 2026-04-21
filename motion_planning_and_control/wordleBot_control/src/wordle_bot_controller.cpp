@@ -380,23 +380,17 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
   return best_plan;
 }
 
-bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
+moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 {
-  RCLCPP_INFO(LOGGER, "Target pose:\n  pos  x=%.3f y=%.3f z=%.3f\n  quat x=%.3f y=%.3f z=%.3f w=%.3f",
-    target.position.x, target.position.y, target.position.z,
-    target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
-
-  move_group_.setStartStateToCurrentState();
-
   moveit_msgs::msg::JointConstraint shoulder;
-  shoulder.joint_name        = "shoulder_lift_joint";
-  shoulder.position          = -M_PI / 2.0;
-  shoulder.tolerance_above   = M_PI / 180.0 * 110.0;
-  shoulder.tolerance_below   = M_PI / 180.0 * 110.0;
-  shoulder.weight            = 1.0;
+  shoulder.joint_name      = "shoulder_lift_joint";
+  shoulder.position        = -M_PI / 2.0;
+  shoulder.tolerance_above = M_PI / 180.0 * 110.0;
+  shoulder.tolerance_below = M_PI / 180.0 * 110.0;
+  shoulder.weight          = 1.0;
 
   // Keep wrist_3_joint within [-π, π] throughout the planned path.
-  // The UR RTDE interface reports wrist_3 in this range; going outside it causes
+  // The UR RTDE interface reports wrist_3 in this range; going outside causes
   // a PATH_TOLERANCE_VIOLATED (2π position error) on the trajectory controller.
   moveit_msgs::msg::JointConstraint wrist3;
   wrist3.joint_name      = "wrist_3_joint";
@@ -408,7 +402,19 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
   moveit_msgs::msg::Constraints constraints;
   constraints.joint_constraints.push_back(shoulder);
   constraints.joint_constraints.push_back(wrist3);
-  move_group_.setPathConstraints(constraints);
+  return constraints;
+}
+
+
+bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
+{
+  RCLCPP_INFO(LOGGER, "Target pose:\n  pos  x=%.3f y=%.3f z=%.3f\n  quat x=%.3f y=%.3f z=%.3f w=%.3f",
+    target.position.x, target.position.y, target.position.z,
+    target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
+
+  move_group_.setStartStateToCurrentState();
+
+  move_group_.setPathConstraints(buildPathConstraints());
 
   visualisePlan(nullptr, "Planning");
 

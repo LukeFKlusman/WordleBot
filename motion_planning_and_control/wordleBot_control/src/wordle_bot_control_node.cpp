@@ -223,17 +223,17 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
   const std::string arm_group  = "ur_onrobot_manipulator";
   const std::string hand_group = "ur_onrobot_gripper";
-  // SRDF <end_effector name="..."> — distinct from the planning group name
-  const std::string hand_eef   = "ur_onrobot_tcp";
   const std::string hand_frame = "gripper_tcp";
 
   task.setProperty("group",    arm_group);
-  task.setProperty("eef",      hand_eef);
+  task.setProperty("eef",      hand_group);
   task.setProperty("ik_frame", hand_frame);
-  RCLCPP_DEBUG(LOGGER, "createTask: arm='%s', eef='%s', hand_group='%s', ik_frame='%s'.",
-    arm_group.c_str(), hand_eef.c_str(), hand_group.c_str(), hand_frame.c_str());
+  RCLCPP_DEBUG(LOGGER, "createTask: arm='%s', hand_group='%s', ik_frame='%s'.",
+    arm_group.c_str(), hand_group.c_str(), hand_frame.c_str());
 
-  auto sampling_planner     = std::make_shared<mtc::solvers::PipelinePlanner>(node_);
+  // Explicitly name the OMPL pipeline so MTC never falls back to CHOMP.
+  // ompl_planning.yaml must be loaded into the node's parameters (see wordle_bot.launch.py).
+  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
@@ -268,6 +268,9 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(10.0);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
+    // Same shoulder/wrist path constraints as moveToTarget — uniform planning behaviour
+    stage_move_to_pick->properties().set("path_constraints",
+      controller_->buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -396,6 +399,8 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
         {hand_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
+    // Same shoulder/wrist path constraints as moveToTarget — uniform planning behaviour
+    stage->properties().set("path_constraints", controller_->buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -525,16 +530,15 @@ void WordleBotControlNode::doPickAndPlace()
   }
 
   RCLCPP_INFO(LOGGER, "doPickAndPlace: planning...");
-  bool plan_ok = false;
+  moveit::core::MoveItErrorCode plan_result;
   try {
-    task_.plan(5);
-    plan_ok = true;
+    plan_result = task_.plan(5);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER, "MTC task planning threw InitStageException: " << e);
     return;
   }
-  if (!plan_ok) {
-    RCLCPP_ERROR(LOGGER, "MTC task planning failed.");
+  if (!plan_result || task_.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "MTC task planning failed — no solutions found.");
     return;
   }
 
