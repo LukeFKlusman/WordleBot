@@ -37,6 +37,10 @@ ros2 run ur_client_library start_ursim.sh -m ur3e
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
 # Or if using real Hardware
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
+# or use gripper in simulation
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false
+# or use gripper with real hardware
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false robot_ip:={ENTER IP} 
 ```
 
 ### Terminal 4. Launch MoveIt + RViz (Terminal 1)
@@ -47,6 +51,10 @@ This starts the UR3e MoveIt stack and RViz. Keep this running throughout your se
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
 # Or if using real Hardware
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
+# Or if using gripper in simulation 
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2
+# Or if using gripper with real hardware
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:={ENTER IP} 
 ```
 
 ### Terminal 5. Launch the control node (Terminal 2)

@@ -23,7 +23,7 @@ static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotController");
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
 : node_(node),
-  move_group_(node, "ur_manipulator"),
+  move_group_(node, "ur_onrobot_manipulator"),
   planning_scene_(),
   visual_tools_(node, "ur_base_link", rviz_visual_tools::RVIZ_MARKER_TOPIC,
     move_group_.getRobotModel())
@@ -50,7 +50,7 @@ WordleBotController::~WordleBotController()
 
 namespace 
 {
-constexpr char kPlanningGroup[] = "ur_manipulator";
+constexpr char kPlanningGroup[] = "ur_onrobot_manipulator";
 
 double jointDistance(const moveit::core::JointModel * joint_model, double from, double to)
 {
@@ -135,7 +135,7 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     ik_state.setToRandomPositions(joint_model_group);
 
     if (!ik_state.setFromIK(joint_model_group, target_pose, 0.1)) {
-      RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
+      // RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d failed IK.", attempt);
       continue;
     }
 
@@ -165,9 +165,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
         }
       }
       if (std::abs(best_norm - raw) > 1e-6) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d normalised joint '%s': raw=%.4f -> norm=%.4f rad.",
-          attempt, active_joints[i]->getName().c_str(), raw, best_norm);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d normalised joint '%s': raw=%.4f -> norm=%.4f rad.",
+        //   attempt, active_joints[i]->getName().c_str(), raw, best_norm);
       }
       candidate_joint_values[i] = best_norm;
     }
@@ -185,9 +185,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
       while (w3 > M_PI)  w3 -= 2.0 * M_PI;
       while (w3 < -M_PI) w3 += 2.0 * M_PI;
       if (std::abs(w3 - raw_w3) > 1e-6) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d clamped wrist_3 to [-pi,pi]: %.4f -> %.4f rad.",
-          attempt, raw_w3, w3);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d clamped wrist_3 to [-pi,pi]: %.4f -> %.4f rad.",
+        //   attempt, raw_w3, w3);
       }
     }
 
@@ -195,9 +195,9 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     if (shoulder_idx >= 0 && shoulder_idx < static_cast<int>(candidate_joint_values.size())) {
       const double sh = candidate_joint_values[shoulder_idx];
       if (std::abs(sh - shoulder_center) > shoulder_tol) {
-        RCLCPP_INFO(LOGGER,
-          "computeBestIK: attempt %d rejected — shoulder %.4f rad outside constraint [%.4f, %.4f].",
-          attempt, sh, shoulder_center - shoulder_tol, shoulder_center + shoulder_tol);
+        // RCLCPP_INFO(LOGGER,
+        //   "computeBestIK: attempt %d rejected — shoulder %.4f rad outside constraint [%.4f, %.4f].",
+        //   attempt, sh, shoulder_center - shoulder_tol, shoulder_center + shoulder_tol);
         ++constraint_rejects;
         continue;
       }
@@ -217,8 +217,8 @@ std::vector<double> WordleBotController::computeBestIK(const moveit::core::Robot
     }
     const double candidate_cost = (2.0 * movement_cost) + (0.3 * functional_penalty);
 
-    RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
-      attempt, candidate_cost, best_cost);
+    // RCLCPP_INFO(LOGGER, "computeBestIK: attempt %d succeeded, cost=%.4f (best=%.4f).",
+    //   attempt, candidate_cost, best_cost);
 
     if (candidate_cost < best_cost) {
       best_cost = candidate_cost;
@@ -380,23 +380,17 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
   return best_plan;
 }
 
-bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
+moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 {
-  RCLCPP_INFO(LOGGER, "Target pose:\n  pos  x=%.3f y=%.3f z=%.3f\n  quat x=%.3f y=%.3f z=%.3f w=%.3f",
-    target.position.x, target.position.y, target.position.z,
-    target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
-
-  move_group_.setStartStateToCurrentState();
-
   moveit_msgs::msg::JointConstraint shoulder;
-  shoulder.joint_name        = "shoulder_lift_joint";
-  shoulder.position          = -M_PI / 2.0;
-  shoulder.tolerance_above   = M_PI / 180.0 * 110.0;
-  shoulder.tolerance_below   = M_PI / 180.0 * 110.0;
-  shoulder.weight            = 1.0;
+  shoulder.joint_name      = "shoulder_lift_joint";
+  shoulder.position        = -M_PI / 2.0;
+  shoulder.tolerance_above = M_PI / 180.0 * 110.0;
+  shoulder.tolerance_below = M_PI / 180.0 * 110.0;
+  shoulder.weight          = 1.0;
 
   // Keep wrist_3_joint within [-π, π] throughout the planned path.
-  // The UR RTDE interface reports wrist_3 in this range; going outside it causes
+  // The UR RTDE interface reports wrist_3 in this range; going outside causes
   // a PATH_TOLERANCE_VIOLATED (2π position error) on the trajectory controller.
   moveit_msgs::msg::JointConstraint wrist3;
   wrist3.joint_name      = "wrist_3_joint";
@@ -408,7 +402,19 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
   moveit_msgs::msg::Constraints constraints;
   constraints.joint_constraints.push_back(shoulder);
   constraints.joint_constraints.push_back(wrist3);
-  move_group_.setPathConstraints(constraints);
+  return constraints;
+}
+
+
+bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
+{
+  RCLCPP_INFO(LOGGER, "Target pose:\n  pos  x=%.3f y=%.3f z=%.3f\n  quat x=%.3f y=%.3f z=%.3f w=%.3f",
+    target.position.x, target.position.y, target.position.z,
+    target.orientation.x, target.orientation.y, target.orientation.z, target.orientation.w);
+
+  move_group_.setStartStateToCurrentState();
+
+  move_group_.setPathConstraints(buildPathConstraints());
 
   visualisePlan(nullptr, "Planning");
 
@@ -429,8 +435,10 @@ bool WordleBotController::moveToTarget(const geometry_msgs::msg::Pose & target)
     }
 
     // DEBUG: forward kinematics — does the computed EEF position match where the robot actually is?
-    const Eigen::Isometry3d & eef_tf = current_state->getGlobalLinkTransform("tool0");
-    RCLCPP_INFO(LOGGER, "Current EEF pose (FK): x=%.4f y=%.4f z=%.4f",
+    const Eigen::Isometry3d & eef_tf = current_state->getGlobalLinkTransform(
+      move_group_.getEndEffectorLink());
+    RCLCPP_INFO(LOGGER, "Current EEF pose (FK) [%s]: x=%.4f y=%.4f z=%.4f",
+      move_group_.getEndEffectorLink().c_str(),
       eef_tf.translation().x(), eef_tf.translation().y(), eef_tf.translation().z());
   } else {
     RCLCPP_ERROR(LOGGER, "getCurrentState returned null — state monitor has no data yet!");
@@ -635,6 +643,15 @@ void WordleBotController::clearCollisionScene()
 }
 
 
+void WordleBotController::addCollisionObject(const moveit_msgs::msg::CollisionObject & obj)
+{
+  planning_scene_.applyCollisionObject(obj);
+  rclcpp::sleep_for(std::chrono::milliseconds(300));
+  RCLCPP_INFO(LOGGER, "addCollisionObject: applied object '%s' (operation=%d).",
+    obj.id.c_str(), static_cast<int>(obj.operation));
+}
+
+
 void WordleBotController::attachSensorCollisionObject()
 {
   moveit_msgs::msg::AttachedCollisionObject attached_object;
@@ -656,9 +673,17 @@ void WordleBotController::attachSensorCollisionObject()
   attached_object.object.primitives.push_back(cylinder);
   attached_object.object.primitive_poses.push_back(pose);
 
-  // Only allow the links that physically surround tool0 to touch the cylinder.
+  // Allow all links that physically overlap with the sensor guard cylinder.
+  // Includes the full gripper chain beyond tool0 (onrobot RG2).
   attached_object.touch_links = {
-    "wrist_3_link", "flange", "tool0", "ft_frame"
+    "wrist_3_link", "flange", "tool0", "ft_frame",
+    "onrobot_base_link",
+    "cable_connector_0", "cable_connector_1",
+    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
+    "finger_width_mock_link",
+    "left_inner_knuckle", "right_inner_knuckle",
+    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
+    "gripper_tcp"
   };
 
   planning_scene_.applyAttachedCollisionObject(attached_object);
@@ -728,7 +753,7 @@ void WordleBotController::visualisePlan(const moveit::planning_interface::MoveGr
 
   if (plan != nullptr) {
     const auto * joint_model_group =
-      move_group_.getRobotModel()->getJointModelGroup("ur_manipulator");
+      move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
     visual_tools_.publishTrajectoryLine(plan->trajectory_, joint_model_group);
   }
 
