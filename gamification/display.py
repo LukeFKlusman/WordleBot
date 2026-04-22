@@ -27,7 +27,7 @@ def print_colour_legend():
 
 def print_title():
     print("\n  ┌─────────────────────┐")
-    print("  │    Wordle Solver     │")
+    print("  │    Wordle Solver    │")
     print("  └─────────────────────┘")
 
 def slow_print(text, delay=0.03):
