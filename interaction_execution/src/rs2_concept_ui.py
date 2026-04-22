@@ -23,8 +23,8 @@ class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1024, 600)
-        MainWindow.setMinimumSize(QSize(1024, 600))
+        MainWindow.resize(1126, 641)
+        MainWindow.setMinimumSize(QSize(1126, 641))
         font = QFont()
         font.setFamilies([u"Ubuntu"])
         font.setPointSize(10)

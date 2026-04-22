@@ -75,6 +75,23 @@ WordleView::WordleView(QWidget * parent)
     web_view_->setFocusPolicy(Qt::StrongFocus);
     setFocusProxy(web_view_);
     web_view_->load(QUrl::fromLocalFile(wordle_path));
+    connect(web_view_, &QWebEngineView::titleChanged, this, [this](const QString & title) {
+      if (!title.startsWith(QStringLiteral("feedback:"))) {
+        return;
+      }
+
+      const QString feedback = title.mid(9).trimmed().toUpper();
+      if (!feedback.isEmpty()) {
+        emit feedbackSubmitted(feedback);
+      }
+
+      if (web_view_ != nullptr) {
+        web_view_->page()->runJavaScript(
+          "if (typeof window.wordleResetQtTitle === 'function') {"
+          "  window.wordleResetQtTitle();"
+          "}");
+      }
+    });
     connect(web_view_, &QWebEngineView::loadFinished, this, [this](bool ok) {
       if (!ok || web_view_ == nullptr) {
         return;
@@ -111,6 +128,45 @@ WordleView::~WordleView()
   if (qApp != nullptr) {
     qApp->removeEventFilter(this);
   }
+}
+
+void WordleView::setActiveGuess(const QString & guess)
+{
+#ifdef HAS_QT_WEBENGINE
+  if (web_view_ == nullptr) {
+    return;
+  }
+
+  web_view_->page()->runJavaScript(
+    QStringLiteral(
+      "if (typeof window.wordleSetActiveGuess === 'function') {"
+      "  window.wordleSetActiveGuess('%1');"
+      "}").arg(guess.toUpper()));
+#else
+  (void)guess;
+#endif
+}
+
+void WordleView::setDiagnosticsJson(const QString & diagnostics_json)
+{
+#ifdef HAS_QT_WEBENGINE
+  if (web_view_ == nullptr) {
+    return;
+  }
+
+  QString escaped = diagnostics_json;
+  escaped.replace("\\", "\\\\");
+  escaped.replace("'", "\\'");
+  escaped.replace("\n", "\\n");
+
+  web_view_->page()->runJavaScript(
+    QStringLiteral(
+      "if (typeof window.wordleSetDiagnostics === 'function') {"
+      "  window.wordleSetDiagnostics('%1');"
+      "}").arg(escaped));
+#else
+  (void)diagnostics_json;
+#endif
 }
 
 void WordleView::previewGuess(const QString & guess)

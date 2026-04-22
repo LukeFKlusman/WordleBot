@@ -3,17 +3,42 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <sstream>
 
 namespace
 {
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
 constexpr const char * kMissionStateTopic = "/wordle_bot/mission_state";
+constexpr const char * kMissionProgressTopic = "/wordle_bot/mission_progress";
 constexpr const char * kPerceptionStateTopic = "/mission/state";
 constexpr const char * kPerceptionStatusTopic = "/perception/status";
 constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
-constexpr const char * kGoalPoseTopic = "/wordle_bot/goal_pose";
+constexpr const char * kSetMissionTopic = "/wordle_bot/set_mission";
+constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
 constexpr const char * kMotionCompleteTopic = "/wordle_bot/motion_complete";
+
+std::string jsonEscape(const std::string & value)
+{
+  std::ostringstream escaped;
+  for (const char c : value) {
+    switch (c) {
+      case '\\':
+        escaped << "\\\\";
+        break;
+      case '"':
+        escaped << "\\\"";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      default:
+        escaped << c;
+        break;
+    }
+  }
+  return escaped.str();
+}
 }  // namespace
 
 MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
@@ -42,7 +67,10 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
     kPerceptionStateTopic, rclcpp::QoS(1).reliable().transient_local());
   mission_state_pub_ = this->create_publisher<std_msgs::msg::String>(
     kMissionStateTopic, rclcpp::QoS(1).reliable().transient_local());
-  goal_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(kGoalPoseTopic, 10);
+  mission_progress_pub_ = this->create_publisher<std_msgs::msg::String>(
+    kMissionProgressTopic, rclcpp::QoS(1).reliable().transient_local());
+  set_mission_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(kSetMissionTopic, 10);
+  start_mission_pub_ = this->create_publisher<std_msgs::msg::Bool>(kStartMissionTopic, 10);
 
   mission_cmd_sub_ = this->create_subscription<std_msgs::msg::String>(
     kMissionCommandTopic, 10,
@@ -66,6 +94,7 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
 
   publishPerceptionState("IDLE");
   publishMissionState();
+  publishMissionProgress();
 
   RCLCPP_INFO(
     this->get_logger(),
@@ -152,6 +181,7 @@ void MissionCoordinator::handleHeartbeat()
 {
   tickTree();
   publishMissionState();
+  publishMissionProgress();
 }
 
 void MissionCoordinator::tickTree()
@@ -199,6 +229,8 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     motion_complete_received_ = false;
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::NONE;
+    last_dispatched_goal_request_ = GoalRequest::NONE;
+    last_completed_goal_request_ = GoalRequest::NONE;
     publishPerceptionState("SCANNING");
     transitionTo(MissionState::SCANNING, "Operator requested START");
     return NodeStatus::SUCCESS;
@@ -207,6 +239,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   if (command == "STOP") {
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::NONE;
+    last_dispatched_goal_request_ = GoalRequest::NONE;
     publishPerceptionState("IDLE");
     transitionTo(MissionState::STOPPED, "Operator requested STOP");
     return NodeStatus::SUCCESS;
@@ -215,6 +248,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   if (command == "RESUME") {
     motion_complete_received_ = false;
     awaiting_motion_completion_ = false;
+    last_completed_goal_request_ = GoalRequest::NONE;
     if (hasEnoughDetections()) {
       pending_goal_request_ = GoalRequest::TASK_GOAL;
       publishPerceptionState("IDLE");
@@ -231,6 +265,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   if (command == "HOME" || command == "ABORT") {
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::HOME_GOAL;
+    last_completed_goal_request_ = GoalRequest::NONE;
     publishPerceptionState("IDLE");
     transitionTo(MissionState::HOMING, "Operator requested HOME");
     return NodeStatus::SUCCESS;
@@ -253,6 +288,8 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickMotionBranch()
     awaiting_motion_completion_ = false;
     motion_goal_sent_ = false;
     pending_goal_request_ = GoalRequest::NONE;
+    last_completed_goal_request_ = last_dispatched_goal_request_;
+    last_dispatched_goal_request_ = GoalRequest::NONE;
     publishPerceptionState("IDLE");
     transitionTo(MissionState::IDLE, "Motion execution completed");
     return NodeStatus::SUCCESS;
@@ -297,6 +334,8 @@ std::string MissionCoordinator::normaliseCommand(const std::string & command) co
 
 void MissionCoordinator::transitionTo(MissionState new_state, const std::string & reason)
 {
+  last_transition_reason_ = reason;
+
   if (state_ == new_state) {
     RCLCPP_INFO_THROTTLE(
       this->get_logger(),
@@ -317,6 +356,7 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
     reason.c_str());
   state_ = new_state;
   publishMissionState();
+  publishMissionProgress();
 }
 
 void MissionCoordinator::publishPerceptionState(const std::string & state)
@@ -335,18 +375,151 @@ void MissionCoordinator::publishMissionState()
   mission_state_pub_->publish(msg);
 }
 
+std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissionSteps() const
+{
+  const int minimum_detected_blocks = this->get_parameter("minimum_detected_blocks").as_int();
+  const std::string detections_detail =
+    "Detected " + std::to_string(latest_detection_count_) + " block(s); minimum needed is " +
+    std::to_string(minimum_detected_blocks) + ".";
+
+  std::vector<MissionStepView> steps;
+  steps.push_back({
+    "operator",
+    "Await operator command",
+    state_ == MissionState::STOPPED ?
+      (human_detected_ ?
+        "Mission paused by safety. Clear the workspace, then choose RESUME or HOME." :
+        "Mission paused. Choose RESUME to continue or HOME to return to the safe pose.") :
+      (state_ == MissionState::IDLE ?
+        "Ready for START to begin a new scan cycle." :
+        "Operator command accepted. Mission is now running."),
+    (state_ == MissionState::IDLE || state_ == MissionState::STOPPED) ? "active" : "done"});
+
+  steps.push_back({
+    "safety",
+    "Monitor safety envelope",
+    human_detected_ ?
+      "Human detected. Robot motion is halted until the workspace is clear." :
+      (awaiting_motion_completion_ ?
+        "Safety monitoring remains active while the robot is moving." :
+        "Human monitoring is active and the workspace is currently clear."),
+    human_detected_ ? "blocked" : "active"});
+
+  steps.push_back({
+    "scan",
+    "Scan puzzle and detect blocks",
+    state_ == MissionState::SCANNING ?
+      (detections_detail + " Waiting for enough detections to continue.") :
+      (state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ?
+        (detections_detail + " Scan complete; motion target is available.") :
+        (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
+          "Previous scan completed and the last task motion finished successfully." :
+          "Perception is idle until the operator starts or resumes the mission.")),
+    state_ == MissionState::SCANNING ? "active" :
+      ((state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ||
+      last_completed_goal_request_ == GoalRequest::TASK_GOAL) ? "done" :
+      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+
+  steps.push_back({
+    "prepare",
+    "Prepare robot motion",
+    state_ == MissionState::READY_TO_MOVE ?
+      "Target detections are ready. Waiting to dispatch the configured robot motion." :
+      (state_ == MissionState::MOVING ?
+        "Motion plan has been dispatched to the controller." :
+        (state_ == MissionState::HOMING ?
+          "Task motion is bypassed while the robot returns home." :
+          "No motion plan is currently queued.")),
+    state_ == MissionState::READY_TO_MOVE ? "active" :
+      (state_ == MissionState::MOVING ? "done" :
+      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+
+  steps.push_back({
+    "execute",
+    "Execute robot motion",
+    state_ == MissionState::MOVING ?
+      "Robot motion is in progress. Continue safety checks until motion_complete is received." :
+      (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
+        "The last task motion completed successfully and control returned to IDLE." :
+        "Waiting for a task motion to begin."),
+    state_ == MissionState::MOVING ? "active" :
+      (last_completed_goal_request_ == GoalRequest::TASK_GOAL ? "done" :
+      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+
+  steps.push_back({
+    "home",
+    "Return to safe home pose",
+    state_ == MissionState::HOMING ?
+      "Home motion is running. Scanning stays idle until the robot reaches home." :
+      (last_completed_goal_request_ == GoalRequest::HOME_GOAL ?
+        "Home motion completed. The system is back in IDLE and ready for the next command." :
+        "Robot moves to a safe home pose upon full task completion or explicit HOME request."),
+    state_ == MissionState::HOMING ? "active" :
+      (last_completed_goal_request_ == GoalRequest::HOME_GOAL ? "done" :
+      (state_ == MissionState::STOPPED ? "pending" : "pending"))});
+
+  return steps;
+}
+
+std::string MissionCoordinator::buildMissionProgressJson() const
+{
+  const auto steps = buildMissionSteps();
+
+  std::ostringstream payload;
+  payload << '{'
+          << "\"title\":\"" << jsonEscape("Wordle Game Pick and Place") << "\","
+          << "\"summary\":\"" << jsonEscape(
+              "State: " + toString(state_) + " | " + last_transition_reason_) << "\","
+          << "\"state\":\"" << jsonEscape(toString(state_)) << "\","
+          << "\"steps\":[";
+
+  for (std::size_t index = 0; index < steps.size(); ++index) {
+    const auto & step = steps.at(index);
+    if (index > 0) {
+      payload << ',';
+    }
+
+    payload << '{'
+            << "\"id\":\"" << jsonEscape(step.id) << "\","
+            << "\"title\":\"" << jsonEscape(step.title) << "\","
+            << "\"detail\":\"" << jsonEscape(step.detail) << "\","
+            << "\"status\":\"" << jsonEscape(step.status) << "\""
+            << '}';
+  }
+
+  payload << "]}";
+  return payload.str();
+}
+
+void MissionCoordinator::publishMissionProgress()
+{
+  std_msgs::msg::String msg;
+  msg.data = buildMissionProgressJson();
+  mission_progress_pub_->publish(msg);
+}
+
 void MissionCoordinator::dispatchConfiguredGoal(bool home_goal)
 {
   const std::string frame_id = this->get_parameter(
     home_goal ? "home_frame_id" : "goal_frame_id").as_string();
 
   const auto goal = buildPoseFromParameters(home_goal ? "home" : "goal", frame_id);
-  goal_pose_pub_->publish(goal);
+
+  geometry_msgs::msg::PoseArray mission;
+  mission.header = goal.header;
+  mission.poses.push_back(goal.pose);
+  set_mission_pub_->publish(mission);
+
+  std_msgs::msg::Bool start_signal;
+  start_signal.data = true;
+  start_mission_pub_->publish(start_signal);
+
   motion_goal_sent_ = true;
   awaiting_motion_completion_ = true;
   pending_goal_request_ = GoalRequest::NONE;
+  last_dispatched_goal_request_ = home_goal ? GoalRequest::HOME_GOAL : GoalRequest::TASK_GOAL;
   transitionTo(home_goal ? MissionState::HOMING : MissionState::MOVING,
-    home_goal ? "Published configured home pose" : "Published configured motion goal");
+    home_goal ? "Published configured home mission" : "Published configured motion mission");
 }
 
 geometry_msgs::msg::PoseStamped MissionCoordinator::buildPoseFromParameters(
