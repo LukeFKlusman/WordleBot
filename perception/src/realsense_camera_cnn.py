@@ -2,10 +2,7 @@
 #
 # SETUP:
 # Terminal 1 (RealSense ROS2 driver):
-#   ros2 launch realsense2_camera rs_launch.py \
-#     enable_depth:=true align_depth.enable:=true \
-#     depth_module.depth_profile:=640x480x30 \
-#     rgb_camera.color_profile:=640x480x30
+#   ros2 launch realsense2_camera rs_launch.py enable_depth:=true align_depth.enable:=true
 # Terminal 2 (this node):
 #   python3 realsense_camera_cnn.py
 #
@@ -14,45 +11,35 @@
 #   Q         - Quit
 #
 # ROS2 TOPICS PUBLISHED:
-#   /perception/human_detected    std_msgs/Bool    — streams every frame (-> SS1 Elijah)
-#   /perception/status            std_msgs/String  — "SCANNING" or "IDLE", every frame (-> SS1)
-#   /perception/detections        std_msgs/String  — JSON block list with 4DoF pose (-> SS2 Connor, SS4 Kermit)
-#   /perception/block_poses       geometry_msgs/PoseArray — 3D block centres for motion planning (-> SS2 Connor)
-#   /perception/letters           std_msgs/String  — comma-separated letter list e.g. "A,B,C" (-> SS4 Kermit)
+#   /perception/human_detected    std_msgs/Bool    — streams every frame
+#   /perception/status            std_msgs/String  — "SCANNING" or "IDLE", every frame
+#   /perception/detections        std_msgs/String  — JSON block list, published each scan
 #
 # ROS2 TOPICS SUBSCRIBED:
-#   /mission/state                std_msgs/String  — "SCANNING" or "IDLE" from SS1 Elijah
-#
-# PERFORMANCE NOTES (EliteBook 640 / D435i):
-#   - MediaPipe runs every POSE_EVERY_N frames (default 10) to save CPU
-#   - Display is resized to DISPLAY_W x DISPLAY_H before imshow
-#   - CNN runs every CNN_EVERY_N frames when scanning (default 2)
-#   - QoS set to BEST_EFFORT to match RealSense driver defaults
+#   /mission/state                std_msgs/String  — "SCANNING" enables CNN scan
+#                                                    "IDLE" disables scan
+#                                                    (replaces spacebar for robot operation)
 
 # ── Mode switch ───────────────────────────────────────────
 USE_ROS2 = True   # False = direct pyrealsense2 SDK, True = ROS2 topics
 
 # ── Detection mode ────────────────────────────────────────
 # CARD  = paper cards on black foam mat (current setup)
+#         uses white brightness threshold, crops inner 60% to remove white border
 # BLOCK = wooden blocks on table (robot setup)
-DETECTION_MODE = "CARD"
+#         uses depth gate + adaptive threshold, full bounding box ROI
+DETECTION_MODE = "CARD"   # switch to "BLOCK" when on the robot
 
 # ── Detection tuning ──────────────────────────────────────
-BLOCK_DEPTH_MIN_M   = 0.10
-BLOCK_DEPTH_MAX_M   = 0.30
-MIN_BLOCK_AREA      = 5000
-MAX_BLOCK_AREA      = 200000
-MAX_BLOCKS          = 5
-CNN_CONF_THRESHOLD  = 32.0
-FRAMES_TO_AVERAGE   = 15
-CARD_BRIGHTNESS     = 180
-CARD_MARGIN         = 0.10
-
-# ── Performance tuning ────────────────────────────────────
-POSE_EVERY_N  = 10    # only run MediaPipe every N frames — saves ~60% CPU
-CNN_EVERY_N   = 2     # only run CNN every N frames when scanning
-DISPLAY_W     = 640   # resize display before imshow
-DISPLAY_H     = 360
+BLOCK_DEPTH_MIN_M   = 0.10   # EE-mounted camera — blocks are 10-30cm away
+BLOCK_DEPTH_MAX_M   = 0.30   # tight gate — only objects at block distance
+MIN_BLOCK_AREA      = 5000   # minimum contour area (pixels²)
+MAX_BLOCK_AREA      = 200000 # maximum contour area (pixels²)
+MAX_BLOCKS          = 5      # max blocks expected in workspace
+CNN_CONF_THRESHOLD  = 32.0   # min confidence % to publish a letter
+FRAMES_TO_AVERAGE   = 15     # temporal smoothing frames
+CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-255)
+CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
 # ─────────────────────────────────────────────────────────
 
 import cv2
@@ -69,6 +56,10 @@ import torchvision.transforms as transforms
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../outputs/letter_cnn.pt")
 
 # ── Camera intrinsics (D435i @ 640x480) ──────────────────
+# These are the factory defaults. Replace with values from
+# rs2_intrinsics after running: ros2 topic echo /camera/camera/color/camera_info
+# fx, fy = focal lengths in pixels
+# cx, cy = principal point (optical centre) in pixels
 CAM_FX = 615.0
 CAM_FY = 615.0
 CAM_CX = 320.0
@@ -77,6 +68,13 @@ CAM_CY = 240.0
 
 
 def pixel_to_camera_frame(px, py, depth_m):
+    """
+    Convert a pixel coordinate + depth to a 3D point in the camera frame (metres).
+    This is the raw camera frame — a separate EE-to-robot transform is applied
+    downstream by SS2 once camera extrinsics are calibrated.
+
+    Returns (x_m, y_m, z_m) or (None, None, None) if depth is invalid.
+    """
     if depth_m <= 0:
         return None, None, None
     x_m = (px - CAM_CX) * depth_m / CAM_FX
@@ -86,13 +84,21 @@ def pixel_to_camera_frame(px, py, depth_m):
 
 
 def estimate_theta(contour):
+    """
+    Estimate block rotation (degrees) from the minimum area bounding rectangle.
+    Returns angle in range [-90, 90] degrees.
+
+    NOTE: This gives the orientation of the block face but does not yet use the
+    corner dot to disambiguate 180-degree ambiguity. Dot-based theta will be
+    implemented in a later iteration.
+    """
     if contour is None or len(contour) < 5:
         return 0.0
     _, _, angle = cv2.minAreaRect(contour)
+    # cv2.minAreaRect returns angle in [-90, 0) — normalise to [-90, 90]
     if angle < -45:
         angle += 90
     return round(float(angle), 2)
-
 
 # Must match LABEL_MAP in train_letter_cnn.py exactly
 LABEL_MAP = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -109,17 +115,17 @@ class LetterCNN(nn.Module):
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2),           # 32x32
 
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2),           # 16x16
 
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
+            nn.MaxPool2d(2),           # 8x8
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
@@ -142,10 +148,11 @@ class CNNPredictor:
         self.label_map    = label_map
         self.device       = torch.device("cpu")
         self.model        = None
-        self.vote_buffers = {}
+        self.vote_buffers = {}   # always initialised so fallback mode doesn't crash
 
         if not os.path.exists(model_path):
             print(f"[CNN] WARNING: {model_path} not found — running in fallback mode (shows ?)")
+            print(f"      Run train_letter_cnn.py first to generate it.")
             return
 
         self.model = LetterCNN(num_classes=len(label_map)).to(self.device)
@@ -153,11 +160,11 @@ class CNNPredictor:
         self.model.eval()
         print(f"[CNN] Loaded {model_path}  ({len(label_map)} classes)")
         print(f"[CNN] LABEL_MAP: {''.join(label_map)}")
-        print(f"[CNN] NOTE: O/Q confusion — collect more varied O data if O blocks misread as Q")
+        print(f"[CNN] NOTE: O/Q confusion detected in training — collect more varied O data if O blocks misread as Q")
 
         self.transform = transforms.Compose([
             transforms.ToPILImage(),
-            transforms.Grayscale(num_output_channels=1),
+            transforms.Grayscale(num_output_channels=1),  # handles both grey and BGR input
             transforms.Resize((64, 64)),
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,)),
@@ -167,8 +174,10 @@ class CNNPredictor:
         return x // 64
 
     def predict(self, roi_bgr, x):
+        """Returns (letter, confidence_pct) or (None, conf) if below threshold."""
         if self.model is None or roi_bgr is None or roi_bgr.size == 0:
             return None, 0.0
+
         try:
             img = self.transform(roi_bgr).unsqueeze(0).to(self.device)
         except Exception:
@@ -182,6 +191,7 @@ class CNNPredictor:
         letter   = self.label_map[pred.item()]
         conf_pct = float(conf.item()) * 100.0
 
+        # Temporal majority vote — smooths out single-frame misreads
         bucket = self._bucket(x)
         if bucket not in self.vote_buffers:
             self.vote_buffers[bucket] = collections.deque(maxlen=FRAMES_TO_AVERAGE)
@@ -206,8 +216,15 @@ class BlockDetector:
         gray = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2GRAY)
 
         if DETECTION_MODE == "CARD":
+            # ── CARD MODE ─────────────────────────────────
+            # White brightness threshold — finds white paper cards on black mat
+            # Black mat/background gets rejected regardless of depth
             _, thresh = cv2.threshold(gray, CARD_BRIGHTNESS, 255, cv2.THRESH_BINARY)
+
         else:
+            # ── BLOCK MODE (robot setup) ───────────────────
+            # Adaptive threshold + depth gate isolates block faces at known distance
+            # Re-tune BLOCK_DEPTH_MIN/MAX_M for your robot camera height
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
             thresh  = cv2.adaptiveThreshold(
                 blurred, 255,
@@ -227,6 +244,11 @@ class BlockDetector:
         contours, _ = cv2.findContours(
             closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # DEBUG — log top contour areas to help tune MIN/MAX_BLOCK_AREA
+        areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)[:5]
+        #if areas:
+            #rint(f"[Debug] Top contour areas: {[int(a) for a in areas]}")
+
         boxes = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -234,17 +256,25 @@ class BlockDetector:
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
             if 0.5 <= w / float(h) <= 2.0:
-                boxes.append((x, y, w, h, cnt))
+                boxes.append((x, y, w, h, cnt))   # include contour for theta
 
         boxes.sort(key=lambda b: b[0])
         return boxes[:MAX_BLOCKS]
 
 
 # ══════════════════════════════════════════════════════════
-# ROI CROP
+# ROI CROP — matched to collect_training_data.py pipeline
 # ══════════════════════════════════════════════════════════
 
 def extract_roi(frame, x, y, w, h):
+    """
+    Crop the region fed to the CNN.
+    Must match preprocess() in collect_training_data.py exactly:
+      greyscale → crop → resize 64x64 → equalizeHist
+
+    CARD mode:  cuts CARD_MARGIN from each edge to remove white border.
+    BLOCK mode: uses full bounding box — depth gate already isolated block face.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     if DETECTION_MODE == "CARD":
@@ -259,7 +289,7 @@ def extract_roi(frame, x, y, w, h):
         return None
 
     resized = cv2.resize(roi, (64, 64))
-    return cv2.equalizeHist(resized)
+    return cv2.equalizeHist(resized)  # critical — must match collect_training_data.py
 
 
 # ══════════════════════════════════════════════════════════
@@ -268,10 +298,9 @@ def extract_roi(frame, x, y, w, h):
 
 class Perception:
     def __init__(self):
-        # MediaPipe — initialised once, only called every POSE_EVERY_N frames
         self.mp_holistic = mp.solutions.holistic
         self.holistic    = self.mp_holistic.Holistic(
-            model_complexity=0,              # lightest model
+            model_complexity=0,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
@@ -282,38 +311,26 @@ class Perception:
         self.last_detections = []   # (x, y, w, h, letter, conf, x_m, y_m, z_m, theta)
         self.human_detected  = False
 
-        # Frame counters for throttling
-        self.frame_count     = 0
-        self.last_pose_result = None   # cached MediaPipe result between runs
-
     def process(self, color_bgr, depth_raw=None, depth_colormap=None):
         frame = color_bgr.copy()
-        self.frame_count += 1
+        rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # ── Pose / human detection — throttled ────────────
-        # Only run MediaPipe every POSE_EVERY_N frames to save CPU.
-        # Cached result is used for drawing in between.
-        if self.frame_count % POSE_EVERY_N == 0:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            self.last_pose_result = self.holistic.process(rgb)
-            self.human_detected = (
-                self.last_pose_result.pose_landmarks is not None
-            )
+        # ── Pose / human detection (runs every frame) ─────
+        results = self.holistic.process(rgb)
+        self.human_detected = results.pose_landmarks is not None
 
-        results = self.last_pose_result
-        if results is not None:
-            self.mp_draw.draw_landmarks(
-                frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
-                self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
-                self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
-            self.mp_draw.draw_landmarks(
-                frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-                self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
-                self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
-            self.mp_draw.draw_landmarks(
-                frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-                self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
-                self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
+        self.mp_draw.draw_landmarks(
+            frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
+            self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
+            self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
+        self.mp_draw.draw_landmarks(
+            frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+            self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
+            self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
+        self.mp_draw.draw_landmarks(
+            frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+            self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
+            self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
 
         if self.human_detected:
             cv2.putText(frame, "HUMAN DETECTED", (10, frame.shape[0]-15),
@@ -328,10 +345,8 @@ class Perception:
                 if valid.size:
                     depth_info[(x,y,w,h)] = float(np.median(valid))
 
-        # ── CNN detection — throttled when scanning ────────
-        # Only re-run CNN every CNN_EVERY_N frames.
-        # last_detections holds the most recent result in between.
-        if self.at_position and self.frame_count % CNN_EVERY_N == 0:
+        # ── CNN detection (only when at position) ─────────
+        if self.at_position:
             boxes = self.block_detector.find_blocks(frame, depth_raw)
             detections = []
             for (x, y, w, h, cnt) in boxes:
@@ -340,10 +355,13 @@ class Perception:
                     continue
                 letter, conf = self.cnn.predict(roi, x)
 
+                # 3D position — centre pixel of block face + median depth
                 cx_px = x + w // 2
                 cy_px = y + h // 2
                 depth_m = depth_info.get((x,y,w,h), 0.0)
                 x_m, y_m, z_m = pixel_to_camera_frame(cx_px, cy_px, depth_m)
+
+                # Rotation estimate from contour minAreaRect
                 theta = estimate_theta(cnt)
 
                 detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta))
@@ -393,12 +411,31 @@ class Perception:
         else:
             display = frame
 
-        # ── Resize display to reduce GPU/render load ──────
-        display = cv2.resize(display, (DISPLAY_W, DISPLAY_H))
-
         return display
 
     def get_detections_json(self):
+        """
+        Returns current detections as a JSON string for ROS2 publishing.
+
+        Format:
+            {
+              "blocks": [
+                {
+                  "letter":    "A",      // Detected letter (A-Z or 0-9)
+                  "conf":      94.2,     // CNN confidence (0-100%)
+                  "x_m":       0.0412,   // X position in camera frame (metres)
+                  "y_m":      -0.0231,   // Y position in camera frame (metres)
+                  "z_m":       0.3820,   // Z depth from camera (metres)
+                  "theta_deg": 12.5      // Block rotation around Z axis (degrees)
+                                         // From minAreaRect — dot-based refinement TBD
+                }
+              ]
+            }
+
+        NOTE: x_m, y_m, z_m are in the CAMERA frame, not the robot world frame.
+        SS2 (Connor) applies the EE-to-robot transform once extrinsics are calibrated.
+        If depth is unavailable for a block, x_m/y_m/z_m will be null.
+        """
         blocks = []
         for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.last_detections:
             if letter:
@@ -468,21 +505,10 @@ def run_sdk():
 def run_ros2():
     import rclpy
     from rclpy.node import Node
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
     from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
-    from geometry_msgs.msg import PoseArray, Pose
     from cv_bridge import CvBridge
     from message_filters import ApproximateTimeSynchronizer, Subscriber
-
-    # BEST_EFFORT matches the RealSense driver's default QoS.
-    # Without this the synchroniser never receives depth frames,
-    # causing the "sequence size exceeds remaining buffer" error.
-    sensor_qos = QoSProfile(
-        reliability=ReliabilityPolicy.BEST_EFFORT,
-        history=HistoryPolicy.KEEP_LAST,
-        depth=1
-    )
 
     class RealSenseCNNNode(Node):
         def __init__(self):
@@ -490,20 +516,16 @@ def run_ros2():
             self.bridge     = CvBridge()
             self.perception = Perception()
 
-            # ── Camera subscribers (BEST_EFFORT QoS) ──────
-            color_sub = Subscriber(
-                self, Image,
-                '/camera/camera/color/image_raw',
-                qos_profile=sensor_qos)
-            depth_sub = Subscriber(
-                self, Image,
-                '/camera/camera/aligned_depth_to_color/image_raw',
-                qos_profile=sensor_qos)
+            # ── Camera subscribers ────────────────────────
+            color_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
+            depth_sub = Subscriber(self, Image, '/camera/camera/aligned_depth_to_color/image_raw')
             self.sync = ApproximateTimeSynchronizer(
-                [color_sub, depth_sub], queue_size=5, slop=0.05)
+                [color_sub, depth_sub], queue_size=10, slop=0.05)
             self.sync.registerCallback(self.camera_callback)
 
             # ── Mission state subscriber ──────────────────
+            # Elijah's behaviour tree sends "SCANNING" or "IDLE"
+            # This replaces the spacebar trigger for robot operation
             self.create_subscription(
                 String,
                 '/mission/state',
@@ -512,42 +534,43 @@ def run_ros2():
             )
 
             # ── Publishers ────────────────────────────────
+            # Human detected — Bool, every frame, for Elijah's safety monitor
             self.pub_human = self.create_publisher(
                 Bool, '/perception/human_detected', 10)
+
+            # Node status — String, every frame
             self.pub_status = self.create_publisher(
                 String, '/perception/status', 10)
+
+            # Block detections — JSON String, published each scan frame
+            # Kermit's word solver subscribes to get the letter set
+            # Connor's motion planner subscribes to get pixel positions for 3D conversion
+            # Format: {"blocks": [{"letter":"A","conf":94.2,"x":120,"y":200,"w":80,"h":80}]}
             self.pub_detections = self.create_publisher(
                 String, '/perception/detections', 10)
-            self.pub_poses = self.create_publisher(
-                PoseArray, '/perception/block_poses', 10)
-            self.pub_letters = self.create_publisher(
-                String, '/perception/letters', 10)
 
             self.get_logger().info(
                 '\nCNN perception node ready.'
                 '\n  Subscribing: /camera/camera/color/image_raw'
                 '\n               /camera/camera/aligned_depth_to_color/image_raw'
-                '\n               /mission/state          (from SS1 Elijah)'
-                '\n  Publishing:  /perception/human_detected  (Bool, every frame -> SS1)'
-                '\n               /perception/status          (String, every frame -> SS1)'
-                '\n               /perception/detections      (JSON, when scanning -> SS2 + SS4)'
-                '\n               /perception/block_poses     (PoseArray, when scanning -> SS2)'
-                '\n               /perception/letters         (String, when scanning -> SS4)'
-                f'\n  Perf: MediaPipe every {POSE_EVERY_N} frames | '
-                f'CNN every {CNN_EVERY_N} frames | display {DISPLAY_W}x{DISPLAY_H}'
+                '\n               /mission/state'
+                '\n  Publishing:  /perception/human_detected  (Bool, every frame)'
+                '\n               /perception/status          (String, every frame)'
+                '\n               /perception/detections      (String JSON, when scanning)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
 
         def mission_callback(self, msg):
+            """Receive scan trigger from Elijah's behaviour tree."""
             state = msg.data.upper().strip()
             if state == "SCANNING" and not self.perception.at_position:
                 self.perception.at_position = True
                 self.perception.cnn.clear_votes()
-                self.get_logger().info('[Mission] SCANNING -> AT POSITION')
+                self.get_logger().info('[Mission] SCANNING → AT POSITION')
             elif state == "IDLE" and self.perception.at_position:
                 self.perception.at_position = False
                 self.perception.last_detections = []
-                self.get_logger().info('[Mission] IDLE -> MOVING')
+                self.get_logger().info('[Mission] IDLE → MOVING')
 
         def camera_callback(self, color_msg, depth_msg):
             try:
@@ -575,29 +598,6 @@ def run_ros2():
                     self.pub_detections.publish(det_msg)
                     self.get_logger().info(f'[Detections] {det_msg.data}')
 
-                    # ── Block poses for Connor (SS2) ───────
-                    pose_array = PoseArray()
-                    pose_array.header.stamp    = self.get_clock().now().to_msg()
-                    pose_array.header.frame_id = 'camera_color_optical_frame'
-                    for (_, _, _, _, letter, conf, x_m, y_m, z_m, _theta) in self.perception.last_detections:
-                        if letter is None or x_m is None:
-                            continue
-                        p = Pose()
-                        p.position.x    = x_m
-                        p.position.y    = y_m
-                        p.position.z    = z_m + 0.04  # top face -> block centre
-                        p.orientation.w = 1.0
-                        pose_array.poses.append(p)
-                    self.pub_poses.publish(pose_array)
-
-                    # ── Letters for Kermit (SS4) ───────────
-                    letters = [d[4] for d in self.perception.last_detections if d[4]]
-                    if letters:
-                        letters_msg      = String()
-                        letters_msg.data = ','.join(letters)
-                        self.pub_letters.publish(letters_msg)
-                        self.get_logger().info(f'[Letters] {letters_msg.data}')
-
                 # ── Display ───────────────────────────────
                 cv2.imshow("RealSense CNN Vision", display)
                 key = cv2.waitKey(1) & 0xFF
@@ -622,12 +622,7 @@ def run_ros2():
         pass
     finally:
         node.destroy_node()
-        # Guard against double-shutdown (rclpy.shutdown() inside Q handler
-        # already calls this before KeyboardInterrupt reaches here)
-        try:
-            rclpy.shutdown()
-        except Exception:
-            pass
+        rclpy.shutdown()
 
 
 # ══════════════════════════════════════════════════════════
