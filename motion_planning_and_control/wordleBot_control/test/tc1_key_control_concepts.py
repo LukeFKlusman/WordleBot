@@ -872,7 +872,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         Pass: mission_complete received within timeout.
         Fail: Timeout exceeded or MTC planning/execution fails.
 
-        Pick position:  x=0.30, y=0.10, z=0.02  (world frame, 40 mm cube centre)
+        Pick position:  x=0.30, y=0.20, z=0.02  (world frame, 40 mm cube centre)
         Place position: x=0.00, y=0.45, z=0.02  (hardcoded in control node)
         """
 
@@ -881,21 +881,127 @@ class TestKeyControlConcepts(unittest.TestCase):
         TestKeyControlConcepts.goal_reached_count = 0
 
         # ------------------------------------------------------------------ #
+        # Object / geometry constants (must match control node header)
+        # ------------------------------------------------------------------ #
+        PICK_X, PICK_Y, PICK_Z = 0.30, 0.20, 0.02
+        PLACE_X, PLACE_Y, PLACE_Z = 0.00, 0.45, 0.02
+        GRASP_Z_OFFSET = 0.08       # grasp_frame_transform z in createTask
+        APPROACH_MIN   = 0.10       # setMinMaxDistance lower bound
+        APPROACH_MAX   = 0.15       # setMinMaxDistance upper bound
+        expected_grasp_z       = PICK_Z + GRASP_Z_OFFSET
+        expected_approach_z_min = expected_grasp_z + APPROACH_MIN
+        expected_approach_z_max = expected_grasp_z + APPROACH_MAX
+        # Warn if the EE never descended within 50 mm of the expected grasp height
+        GRASP_REACH_TOLERANCE = 0.05
+
+        # ------------------------------------------------------------------ #
+        # Initial diagnostics: current EE pose and frame reference check
+        # ------------------------------------------------------------------ #
+        self.node.get_logger().info("[TC1.6] === Diagnostic pre-flight ===")
+        self.node.get_logger().info(
+            f"[TC1.6] Object to publish: frame=world  "
+            f"x={PICK_X:.3f}  y={PICK_Y:.3f}  z={PICK_Z:.3f}"
+        )
+        self.node.get_logger().info(
+            f"[TC1.6] Grasp geometry:  grasp_z_offset={GRASP_Z_OFFSET:.3f} m  "
+            f"=> expected gripper_tcp z AT GRASP = {expected_grasp_z:.4f} m"
+        )
+        self.node.get_logger().info(
+            f"[TC1.6] Pre-approach z range: [{expected_approach_z_min:.4f}, "
+            f"{expected_approach_z_max:.4f}] m  (world frame)"
+        )
+        self.node.get_logger().info(
+            f"[TC1.6] Place target: frame=world  "
+            f"x={PLACE_X:.3f}  y={PLACE_Y:.3f}  z={PLACE_Z:.3f}"
+        )
+
+        # Frame mismatch check: world → base_link should be (near) identity.
+        # A non-zero offset here means the robot URDF root is shifted from world,
+        # which would cause MTC to compute grasp poses in the wrong reference frame.
+        world_to_base = None
+        offset_mag = 0.0
+        try:
+            for _ in range(20):
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+            world_to_base = self.tf_buffer.lookup_transform(
+                'world', 'base_link', rclpy.time.Time()
+            )
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[TC1.6] FRAME CHECK: could not look up world→base_link: {exc}. "
+                "If the robot is not broadcasting its root TF, MTC may use a wrong "
+                "reference frame for IK."
+            )
+
+        if world_to_base is not None:
+            bt = world_to_base.transform.translation
+            br = world_to_base.transform.rotation
+            offset_mag = math.sqrt(bt.x**2 + bt.y**2 + bt.z**2)
+            angle_from_identity = math.degrees(
+                2.0 * math.acos(min(abs(br.w), 1.0))
+            )
+            self.node.get_logger().info(
+                f"[TC1.6] FRAME CHECK world→base_link: "
+                f"tx={bt.x:.4f}  ty={bt.y:.4f}  tz={bt.z:.4f}  "
+                f"qx={br.x:.4f}  qy={br.y:.4f}  qz={br.z:.4f}  qw={br.w:.4f}  "
+                f"| offset_mag={offset_mag*1000:.1f} mm  "
+                f"angle_from_identity={angle_from_identity:.2f}°"
+            )
+            if offset_mag > 0.001 or angle_from_identity > 0.1:
+                self.node.get_logger().warn(
+                    f"[TC1.6] FRAME MISMATCH DETECTED: world→base_link is NOT identity "
+                    f"(offset={offset_mag*1000:.1f} mm, rot={angle_from_identity:.2f}°). "
+                    "MTC plans in 'world' but IK solves in base_link — grasp height "
+                    f"will be off by tz={bt.z:.4f} m in z."
+                )
+            else:
+                self.node.get_logger().info(
+                    "[TC1.6] FRAME CHECK: world→base_link is near-identity — no frame offset."
+                )
+
+        # Current EE position before the task
+        initial_ee = None
+        try:
+            initial_ee = self.tf_buffer.lookup_transform(
+                'world', EE_LINK, rclpy.time.Time()
+            )
+            ie = initial_ee.transform.translation
+            self.node.get_logger().info(
+                f"[TC1.6] Initial EE pose (world): "
+                f"x={ie.x:.4f}  y={ie.y:.4f}  z={ie.z:.4f}"
+            )
+        except Exception as exc:
+            self.node.get_logger().warn(
+                f"[TC1.6] Could not look up initial EE pose: {exc}"
+            )
+
+        # ------------------------------------------------------------------ #
+        # Bag recording — captures full TF chain and joint states during task
+        # ------------------------------------------------------------------ #
+        bag_dir  = tempfile.mkdtemp(prefix='tc1_6_')
+        bag_path = os.path.join(bag_dir, 'tc1_6')
+        bag_proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', bag_path,
+             '/joint_states', '/tf', '/tf_static',
+             '/wordle_bot/mission_complete'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)  # allow the recorder to initialise
+
+        # ------------------------------------------------------------------ #
         # Publish the letter object pose to perception/letter_objects
         # ------------------------------------------------------------------ #
         pick_pose = PoseStamped()
         pick_pose.header.frame_id = 'world'
         pick_pose.header.stamp = self.node.get_clock().now().to_msg()
-        pick_pose.pose.position.x = 0.30
-        pick_pose.pose.position.y = 0.20
-        pick_pose.pose.position.z = 0.02  # cube centre (half of 40 mm above table at z=0)
+        pick_pose.pose.position.x = PICK_X
+        pick_pose.pose.position.y = PICK_Y
+        pick_pose.pose.position.z = PICK_Z  # cube centre (half of 40 mm above table at z=0)
         pick_pose.pose.orientation.w = 1.0
 
         self.node.get_logger().info(
             f"[TC1.6] Publishing letter object at "
-            f"({pick_pose.pose.position.x:.3f}, "
-            f"{pick_pose.pose.position.y:.3f}, "
-            f"{pick_pose.pose.position.z:.3f})."
+            f"(frame=world  x={PICK_X:.3f}  y={PICK_Y:.3f}  z={PICK_Z:.3f})."
         )
 
         for _ in range(5):
@@ -903,7 +1009,7 @@ class TestKeyControlConcepts(unittest.TestCase):
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
         # Allow the planning scene to propagate the new collision object
-        time.sleep(10) 
+        time.sleep(10)
 
         # ------------------------------------------------------------------ #
         # Arm the mission — MTC drives all motion, no goal queue needed
@@ -921,6 +1027,8 @@ class TestKeyControlConcepts(unittest.TestCase):
         pick_place_timeout = MOTION_TIMEOUT_S * 3
         deadline = time.time() + pick_place_timeout
 
+        min_ee_z = float('inf')
+        final_ee_pos = None
         passed = True
         try:
             while not TestKeyControlConcepts.mission_complete:
@@ -941,7 +1049,77 @@ class TestKeyControlConcepts(unittest.TestCase):
             passed = False
             raise
         finally:
-            print(f"\n[TC1.6] Result: {'PASS' if passed else 'FAIL'}")
+            # Stop bag recording and analyse EE trajectory
+            bag_proc.terminate()
+            bag_proc.wait()
+            self.node.get_logger().info(f"[TC1.6] Bag recorded to: {bag_path}")
+
+            # Read all EE positions from the bag
+            ee_positions = _read_ee_positions_from_bag(bag_path)
+            if ee_positions:
+                min_ee_z = min(z for _, _, _, z in ee_positions)
+                last_entry = ee_positions[-1]
+                final_ee_pos = (last_entry[1], last_entry[2], last_entry[3])
+                grasp_reach_delta = min_ee_z - expected_grasp_z
+            else:
+                grasp_reach_delta = None
+                self.node.get_logger().warn(
+                    "[TC1.6] No EE positions read from bag — "
+                    "cannot validate grasp reach depth."
+                )
+
+            # ------------------------------------------------------------------ #
+            # Summary block (always printed)
+            # ------------------------------------------------------------------ #
+            print(f"\n[TC1.6] === Pick-and-Place Diagnostic Summary ===")
+            print(
+                f"[TC1.6] Object published at:     frame=world  "
+                f"x={PICK_X:.3f}  y={PICK_Y:.3f}  z={PICK_Z:.3f}"
+            )
+            if world_to_base is not None:
+                bt = world_to_base.transform.translation
+                print(
+                    f"[TC1.6] world→base_link:         "
+                    f"tx={bt.x:.4f}  ty={bt.y:.4f}  tz={bt.z:.4f}  "
+                    f"({'OK — near-identity' if offset_mag <= 0.001 else 'WARNING — FRAME OFFSET DETECTED'})"
+                )
+            else:
+                print("[TC1.6] world→base_link:         (lookup failed — frame unknown)")
+            print(
+                f"[TC1.6] Expected grasp z:        {expected_grasp_z:.4f} m  "
+                f"(object_z={PICK_Z:.3f} + grasp_offset={GRASP_Z_OFFSET:.3f})"
+            )
+            print(
+                f"[TC1.6] Expected pre-approach z: [{expected_approach_z_min:.4f}, "
+                f"{expected_approach_z_max:.4f}] m"
+            )
+            if ee_positions:
+                reach_flag = (
+                    "OK — robot reached grasp height"
+                    if grasp_reach_delta <= GRASP_REACH_TOLERANCE
+                    else f"WARNING — robot stopped {grasp_reach_delta*1000:.1f} mm ABOVE expected grasp z"
+                )
+                print(
+                    f"[TC1.6] Minimum EE z seen:       {min_ee_z:.4f} m  "
+                    f"(delta from expected grasp z = {grasp_reach_delta*1000:+.1f} mm)  "
+                    f"[{reach_flag}]"
+                )
+                if final_ee_pos:
+                    print(
+                        f"[TC1.6] Final EE pose (world):   "
+                        f"x={final_ee_pos[0]:.4f}  y={final_ee_pos[1]:.4f}  "
+                        f"z={final_ee_pos[2]:.4f}"
+                    )
+            else:
+                print("[TC1.6] Minimum EE z seen:       (not available)")
+            if initial_ee is not None:
+                ie = initial_ee.transform.translation
+                print(
+                    f"[TC1.6] Initial EE pose (world): "
+                    f"x={ie.x:.4f}  y={ie.y:.4f}  z={ie.z:.4f}"
+                )
+            print(f"[TC1.6] Result: {'PASS' if passed else 'FAIL'}")
+            print(f"[TC1.6] ================================================\n")
     
     # -----------------------------------------------------------------------
     # Internal helpers

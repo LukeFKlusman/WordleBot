@@ -128,14 +128,23 @@ void WordleBotControlNode::collisionObjectCallback(
 void WordleBotControlNode::letterObjectCallback(
   const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
+  const std::string incoming_frame = msg->header.frame_id.empty() ? "world" : msg->header.frame_id;
   RCLCPP_INFO(LOGGER,
-    "letterObjectCallback: received object at (%.3f, %.3f, %.3f).",
-    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+    "letterObjectCallback: received object at (%.3f, %.3f, %.3f) in frame '%s'.",
+    msg->pose.position.x, msg->pose.position.y, msg->pose.position.z,
+    incoming_frame.c_str());
+  if (incoming_frame != "world") {
+    RCLCPP_WARN(LOGGER,
+      "letterObjectCallback: incoming frame is '%s', not 'world'. "
+      "MTC planning scene assumes 'world' — this may cause a frame mismatch and "
+      "incorrect grasp height. Verify that the publisher transforms poses into 'world'.",
+      incoming_frame.c_str());
+  }
 
   // Build a 40 mm cube collision object at the received pose
   moveit_msgs::msg::CollisionObject co;
   co.id = LETTER_OBJECT_ID;
-  co.header.frame_id = msg->header.frame_id.empty() ? "world" : msg->header.frame_id;
+  co.header.frame_id = incoming_frame;
   co.header.stamp = node_->get_clock()->now();
   co.operation = moveit_msgs::msg::CollisionObject::ADD;
 
@@ -214,7 +223,7 @@ void WordleBotControlNode::missionLoop()
 // Pick-and-place: MTC task creation, planning, execution
 // ---------------------------------------------------------------------------
 
-mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*object_pose*/)
+mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & object_pose)
 {
   RCLCPP_DEBUG(LOGGER, "createTask: initialising MTC task.");
   mtc::Task task;
@@ -270,15 +279,15 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
   // ── Stage 3: free-space move to pick region ───────────────────────────────
   {
-    RCLCPP_DEBUG(LOGGER, "\ncreateTask: adding stage 3 — Connect 'move to pick' (timeout=10 s).");
+    RCLCPP_INFO(LOGGER, "createTask: adding stage 3 — Connect 'move to pick' (timeout=10 s, no path constraints).");
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(10.0);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    // Same shoulder/wrist path constraints as moveToTarget — uniform planning behaviour
-    stage_move_to_pick->properties().set("path_constraints",
-      controller_->buildPathConstraints());
+    // Path constraints are intentionally NOT applied here. buildPathConstraints() uses raw
+    // joint values that MoveIt doesn't normalise (±2π), causing the start state to appear
+    // invalid and triggering 10-second timeouts before falling back to unconstrained planning.
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -300,7 +309,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
       stage->properties().set("marker_ns", "approach_object");
       stage->properties().set("link", hand_frame);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.10);
+      stage->setMinMaxDistance(0.1, 0.15);
 
       geometry_msgs::msg::Vector3Stamped vec;
       vec.header.frame_id = hand_frame;
@@ -323,13 +332,25 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
       stage->setAngleDelta(M_PI / 12);
       stage->setMonitoredStage(current_state_ptr);
 
-      // Transform from gripper_tcp to the object centre when grasping top-down
+      // Transform from gripper_tcp to the object centre when grasping top-down.
+      // z=0.08 means gripper_tcp sits 80 mm above the object centre at grasp time.
+      constexpr double GRASP_Z_OFFSET = 0.01;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitZ());
       grasp_frame_transform.linear() = q.matrix();
-      grasp_frame_transform.translation() .z() = 0.08;
+      grasp_frame_transform.translation().z() = GRASP_Z_OFFSET;
+
+      const double expected_grasp_z   = object_pose.position.z + GRASP_Z_OFFSET;
+      const double expected_approach_z_min = expected_grasp_z + 0.10;
+      const double expected_approach_z_max = expected_grasp_z + 0.15;
+      RCLCPP_INFO(LOGGER,
+        "createTask [grasp geometry]: object_z=%.4f m  grasp_z_offset=%.3f m  "
+        "=> expected gripper_tcp z AT GRASP = %.4f m  "
+        "| pre-approach z range = [%.4f, %.4f] m (world frame, top-down).",
+        object_pose.position.z, GRASP_Z_OFFSET,
+        expected_grasp_z, expected_approach_z_min, expected_approach_z_max);
 
       auto wrapper =
         std::make_unique<mtc::stages::ComputeIK>("grasp pose IK", std::move(stage));
@@ -382,7 +403,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
       auto stage =
         std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
+      stage->setMinMaxDistance(0.1, 0.15);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "lift_object");
 
@@ -399,15 +420,14 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & /*ob
 
   // ── Stage 5: free-space move to place region ──────────────────────────────
   {
-    RCLCPP_DEBUG(LOGGER, "createTask: adding stage 5 — Connect 'move to place' (timeout=10 s).");
+    RCLCPP_INFO(LOGGER, "createTask: adding stage 5 — Connect 'move to place' (timeout=10 s, no path constraints).");
     auto stage = std::make_unique<mtc::stages::Connect>(
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
         {arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // Same shoulder/wrist path constraints as moveToTarget — uniform planning behaviour
-    stage->properties().set("path_constraints", controller_->buildPathConstraints());
+    // Path constraints intentionally omitted — see stage 3 comment.
     task.add(std::move(stage));
   }
 
@@ -527,6 +547,14 @@ void WordleBotControlNode::doPickAndPlace()
     object_pose = letter_object_pose_;
   }
 
+  RCLCPP_INFO(LOGGER,
+    "doPickAndPlace: object pose = (%.4f, %.4f, %.4f)  "
+    "orient=(%.4f, %.4f, %.4f, %.4f). "
+    "MTC planning scene frame: 'world'.",
+    object_pose.position.x, object_pose.position.y, object_pose.position.z,
+    object_pose.orientation.x, object_pose.orientation.y,
+    object_pose.orientation.z, object_pose.orientation.w);
+
   task_ = createTask(object_pose);
 
   try {
@@ -548,6 +576,12 @@ void WordleBotControlNode::doPickAndPlace()
     RCLCPP_ERROR(LOGGER, "MTC task planning failed — no solutions found.");
     return;
   }
+
+  RCLCPP_INFO(LOGGER,
+    "doPickAndPlace: planning succeeded — %zu solution(s) found. "
+    "Executing best solution (cost=%.3f).",
+    task_.solutions().size(),
+    task_.solutions().front()->cost());
 
   task_.introspection().publishSolution(*task_.solutions().front());
 
