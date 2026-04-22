@@ -1,0 +1,22 @@
+# Intel RealSense RGB-D Camera - Smart Perception Node
+# With block letter detection, depth gating, and spacebar position trigger
+#
+# SETUP:
+# Terminal 1 (RealSense ROS2 driver - if USE_ROS2=True):
+#   ros2 launch realsense2_camera rs_launch.py enable_depth:=true align_depth.enable:=true
+#
+# Terminal 2 (this node):
+#   python3 realsense_camera_cnn.py
+#
+# CONTROLS:
+#   SPACEBAR  - Toggle "at position" trigger (enables/disables letter detection)
+#   Q         - Quit
+#
+# DEPENDENCIES:
+#   pip install pyrealsense2 mediapipe pytesseract opencv-python numpy
+#   sudo apt install tesseract-ocr
+
+
+#python3 src/collect_training_data.py 
+
+#python3 src/train_letter_cnn.py 

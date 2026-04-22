@@ -2,13 +2,26 @@
 
 #include "interaction_execution/camera_view.hpp"
 #include "interaction_execution/rviz_sim_view.hpp"
+#include "interaction_execution/wordle_view.hpp"
 #include "ui_rs2_concept.h"
 
+#include <algorithm>
+#include <QFrame>
+#include <QIcon>
+#include <QLabel>
+#include <QMoveEvent>
+#include <QPainter>
+#include <QPixmap>
+#include <QPushButton>
+#include <QRandomGenerator>
+#include <QResizeEvent>
+#include <QScrollArea>
+#include <QStyle>
+#include <QTabBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
-<<<<<<< Updated upstream
-=======
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -17,7 +30,6 @@ namespace
 constexpr const char * kMissionStateTopic = "/mission/state";
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
-
 const QStringList kWordleDemoWords{
   "apple", "baker", "chair", "droid", "eagle", "flame", "grape", "house",
   "input", "jolly", "kneel", "laser", "mango", "noble", "ocean", "piano",
@@ -76,18 +88,17 @@ QString randomWordleWord()
 }
 }  // namespace
 
->>>>>>> Stashed changes
 MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
 : QMainWindow(parent), ui_(std::make_unique<Ui::MainWindow>()), node_(std::move(node))
 {
   ui_->setupUi(this);
   setupTabs();
-<<<<<<< Updated upstream
-=======
   setupVoiceControls();
   setupSafetyControls();
   setupMissionOverlay();
->>>>>>> Stashed changes
+  setupVoiceControls();
+  setupSafetyControls();
+  setupMissionOverlay();
 }
 
 MainWindow::~MainWindow() = default;
@@ -101,10 +112,8 @@ void MainWindow::setupTabs()
 
   auto * camera_layout = new QVBoxLayout(ui_->tab_2);
   camera_layout->setContentsMargins(0, 0, 0, 0);
-  camera_view_ = new CameraView(ui_->tab_2);
+  camera_view_ = new CameraView(node_, ui_->tab_2);
   camera_layout->addWidget(camera_view_);
-<<<<<<< Updated upstream
-=======
 
   auto * wordle_layout = new QVBoxLayout(ui_->wordle);
   wordle_layout->setContentsMargins(0, 0, 0, 0);
@@ -494,5 +503,4 @@ void MainWindow::moveEvent(QMoveEvent * event)
   QTimer::singleShot(0, this, [this]() {
     syncMissionOverlayGeometry();
   });
->>>>>>> Stashed changes
 }

@@ -1,14 +1,18 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QStringList>
 #include <memory>
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
+class QResizeEvent;
+class QMoveEvent;
 class CameraView;
 class RvizSimView;
+class WordleView;
 
 namespace Ui
 {
@@ -25,8 +29,6 @@ public:
 
 private:
   void setupTabs();
-<<<<<<< Updated upstream
-=======
   void setupVoiceControls();
   void setupSafetyControls();
   void updateVoiceControlsState();
@@ -40,14 +42,11 @@ private:
   void updateMissionTabAppearance();
   void resizeEvent(QResizeEvent * event) override;
   void moveEvent(QMoveEvent * event) override;
->>>>>>> Stashed changes
 
   std::unique_ptr<Ui::MainWindow> ui_;
   rclcpp::Node::SharedPtr node_;
   CameraView * camera_view_{nullptr};
   RvizSimView * rviz_view_{nullptr};
-<<<<<<< Updated upstream
-=======
   WordleView * wordle_view_{nullptr};
   QWidget * mission_overlay_{nullptr};
   QWidget * mission_tab_page_{nullptr};
@@ -60,5 +59,4 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_cmd_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr human_detected_sub_;
->>>>>>> Stashed changes
 };
