@@ -3,6 +3,11 @@ project(interaction_execution)
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+<<<<<<< Updated upstream
+=======
+find_package(cv_bridge REQUIRED)
+find_package(geometry_msgs REQUIRED)
+>>>>>>> Stashed changes
 find_package(rclcpp REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -44,7 +49,29 @@ target_link_libraries(interaction_execution_node
   ${OpenCV_LIBRARIES}
 )
 
+<<<<<<< Updated upstream
 install(TARGETS interaction_execution_node
+=======
+if(Qt5WebEngineWidgets_FOUND)
+  target_compile_definitions(interaction_execution_node PRIVATE HAS_QT_WEBENGINE)
+  target_link_libraries(interaction_execution_node Qt5::WebEngineWidgets)
+endif()
+
+add_executable(mission_coordinator_node
+  include/interaction_execution/mission_coordinator.hpp
+  src/mission_coordinator.cpp
+  src/mission_coordinator_main.cpp
+)
+target_include_directories(mission_coordinator_node PRIVATE include)
+
+ament_target_dependencies(mission_coordinator_node
+  geometry_msgs
+  rclcpp
+  std_msgs
+)
+
+install(TARGETS interaction_execution_node mission_coordinator_node
+>>>>>>> Stashed changes
   DESTINATION lib/${PROJECT_NAME}
 )
 
