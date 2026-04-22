@@ -2,17 +2,14 @@
 # ─────────────────────────────────────────────────────────────────
 #  perception_test.py
 #
-#  Standalone test of gamification letter collection logic.
-#  NO ROS2 required — runs directly in PowerShell/terminal.
+#  ROS2 version — subscribes to Luke's /perception/detections
+#  and runs the gamification letter collection logic.
 #
-#  Simulates Luke's perception node by letting you type letters
-#  as if the camera detected them, one at a time.
-#
-#  HOW TO RUN:
-#    python perception_test.py
+#  HOW TO RUN (on the ROS2 laptop in WSL):
+#    Terminal 1: Luke runs his perception node
+#    Terminal 2: python3 gamification/perception_test.py
 #
 #  CONTROLS:
-#    [letter]  — simulate camera detecting that letter
 #    Enter     — submit G/B/I feedback after confirmed guess
 #    show      — show current status
 #    reset     — reset letter buffer
@@ -21,8 +18,11 @@
 
 import os
 import sys
-import time
+import json
 import threading
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -42,7 +42,8 @@ class GameState:
         self.attempt          = 1
         self.current_guess    = None
         self.required_letters = []
-        self.letter_buffer    = {}
+        self.letter_buffer    = {}   # letter -> block data from perception
+        self.prev_seen        = set()
         self.confirmed        = False
         self.wait_count       = 0
         self.running          = True
@@ -60,6 +61,7 @@ class GameState:
 
         self.required_letters = list(self.current_guess.upper())
         self.letter_buffer    = {}
+        self.prev_seen        = set()
         self.confirmed        = False
         self.wait_count       = 0
 
@@ -68,36 +70,50 @@ class GameState:
         print(f"  Target word : {self.current_guess.upper()}")
         print(f"  Place these letters under the camera:")
         print(f"    {' '.join(self.required_letters)}")
-        print(f"  {'=' * 50}")
-        print(f"  (type a letter to simulate camera detection)\n")
+        print(f"  {'=' * 50}\n")
 
-    def detect_letter(self, letter):
-        """Simulate camera detecting a letter."""
-        letter = letter.upper()
+    def process_detections(self, blocks):
+        """
+        Called every time perception publishes a detection frame.
+        Stores new letters as they appear — persistent buffer.
+        Letters that disappear from frame stay stored.
+        """
+        # Build current frame letter set
+        current_seen = {}
+        for block in blocks:
+            letter = block.get('letter', '').upper()
+            conf   = block.get('conf', 0)
+            if letter and letter.isalpha():
+                if letter not in current_seen or conf > current_seen[letter].get('conf', 0):
+                    current_seen[letter] = {
+                        'letter'   : letter,
+                        'conf'     : conf,
+                        'x_m'      : block.get('x_m'),
+                        'y_m'      : block.get('y_m'),
+                        'z_m'      : block.get('z_m'),
+                        'theta_deg': block.get('theta_deg', 0.0),
+                    }
 
-        if not letter.isalpha() or len(letter) != 1:
-            print("  Invalid input — type a single letter.\n")
-            return
+        current_set = set(current_seen.keys())
+        new_letters = current_set - self.prev_seen
 
-        if letter in self.letter_buffer:
-            print(f"  {letter} already in buffer — skipping.\n")
-            return
+        for letter in new_letters:
+            if letter not in self.letter_buffer:
+                self.letter_buffer[letter] = current_seen[letter]
+                self.wait_count = 0
+                print(f"\n  + New letter detected: {letter}"
+                      f"  (conf={current_seen[letter]['conf']:.1f}%"
+                      f"  pos=({current_seen[letter].get('x_m')}, "
+                      f"{current_seen[letter].get('y_m')}, "
+                      f"{current_seen[letter].get('z_m')}))")
+            else:
+                # Update position with latest reading
+                self.letter_buffer[letter] = current_seen[letter]
 
-        self.letter_buffer[letter] = {
-            'letter'   : letter,
-            'conf'     : 95.0,
-            'x_m'      : round(len(self.letter_buffer) * 0.05, 3),
-            'y_m'      : 0.0,
-            'z_m'      : 0.25,
-            'theta_deg': 0.0,
-        }
-        self.wait_count = 0
+        self.prev_seen = current_set
 
-        print(f"  + Letter detected: {letter}"
-              f"  (conf=95.0%"
-              f"  pos=({self.letter_buffer[letter]['x_m']}, 0.0, 0.25))")
-
-        self.check_match()
+        if self.required_letters:
+            self.check_match()
 
     def check_match(self):
         """Check collected letters against required. Flag issues."""
@@ -129,7 +145,7 @@ class GameState:
             print(f"  Type 'reset' to clear buffer, 'quit' to exit.\n")
 
     def _print_live_status(self, matched, missing, extra):
-        """Prints the three section status — matched/missing/extra are separate."""
+        """Prints the three section status."""
         needed_collected = [l for l in matched if l not in extra]
         print(f"  Waiting for  : {' '.join(missing) if missing else 'none'}")
         print(f"  Collected    : {' '.join(needed_collected) if needed_collected else 'none'}")
@@ -166,12 +182,13 @@ class GameState:
             tag    = "[NEEDED]" if needed else "[EXTRA]"
             print(f"    {tag} {letter}"
                   f"  conf={data['conf']:.1f}%"
-                  f"  pos=({data['x_m']}, {data['y_m']}, {data['z_m']})")
+                  f"  pos=({data.get('x_m')}, {data.get('y_m')}, {data.get('z_m')})")
         print(f"  {'─' * 50}\n")
 
     def reset_buffer(self):
-        """Clear buffer and restart collection."""
+        """Clear buffer and restart collection for current guess."""
         self.letter_buffer = {}
+        self.prev_seen     = set()
         self.confirmed     = False
         self.wait_count    = 0
         print(f"\n  Buffer cleared. Place letters again.")
@@ -205,11 +222,47 @@ class GameState:
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Waiting countdown — runs in background thread
+#  ROS2 Node
+# ─────────────────────────────────────────────────────────────────
+
+class PerceptionTestNode(Node):
+
+    def __init__(self, game_state):
+        super().__init__('gamification_perception_test')
+        self.game_state = game_state
+
+        self.create_subscription(
+            String,
+            '/perception/detections',
+            self.detections_callback,
+            10
+        )
+
+        self.get_logger().info(
+            'Subscribed to /perception/detections — waiting for letters...')
+
+    def detections_callback(self, msg):
+        """Receive detection frame from Luke's perception node."""
+        try:
+            data   = json.loads(msg.data)
+            blocks = data.get('blocks', [])
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f'Failed to parse detections JSON: {e}')
+            return
+
+        if not blocks:
+            return
+
+        self.game_state.process_detections(blocks)
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Waiting countdown — background thread
 # ─────────────────────────────────────────────────────────────────
 
 def waiting_countdown(state):
     """Prints waiting status every 3 seconds while letters are missing."""
+    import time
     while state.running:
         time.sleep(3)
         if state.confirmed:
@@ -247,12 +300,11 @@ def waiting_countdown(state):
 
 def main():
     print(f"\n  {'=' * 50}")
-    print(f"  Gamification <-> Perception Test")
+    print(f"  Gamification <-> Perception Test (ROS2)")
     print(f"  {'=' * 50}")
-    print(f"  Simulating perception — type letters as if")
-    print(f"  the camera detected them one at a time.\n")
+    print(f"  Subscribing to /perception/detections")
+    print(f"  Place letters under the camera one at a time.\n")
     print(f"  Commands:")
-    print(f"    [letter]  = simulate camera detecting that letter")
     print(f"    Enter     = submit G/B/I feedback after confirmed guess")
     print(f"    show      = show current status")
     print(f"    reset     = reset letter buffer")
@@ -263,14 +315,24 @@ def main():
     words     = load_dictionary(dict_path)
 
     state = GameState(words)
+
+    rclpy.init()
+    node = PerceptionTestNode(state)
+
+    # Pick first guess
     state.next_guess()
 
+    # Spin ROS2 in background thread so keyboard input works in main thread
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+
+    # Waiting countdown in background thread
     countdown_thread = threading.Thread(
         target=waiting_countdown, args=(state,), daemon=True)
     countdown_thread.start()
 
     try:
-        while True:
+        while rclpy.ok():
             user_input = input().strip().lower()
 
             if user_input == 'quit':
@@ -296,16 +358,15 @@ def main():
                     if done:
                         break
 
-            elif len(user_input) == 1 and user_input.isalpha():
-                state.detect_letter(user_input)
-
             else:
-                print(f"  Commands: [letter]=detect  Enter=feedback  show=status  reset=clear  quit=exit\n")
+                print(f"  Commands: Enter=feedback  show=status  reset=clear  quit=exit\n")
 
     except KeyboardInterrupt:
         pass
     finally:
         state.running = False
+        node.destroy_node()
+        rclpy.shutdown()
         print(f"\n  Session ended.\n")
 
 
