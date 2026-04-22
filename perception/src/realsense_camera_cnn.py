@@ -11,14 +11,14 @@
 #   Q         - Quit
 #
 # ROS2 TOPICS PUBLISHED:
-#   /perception/human_detected    std_msgs/Bool    — streams every frame
-#   /perception/status            std_msgs/String  — "SCANNING" or "IDLE", every frame
-#   /perception/detections        std_msgs/String  — JSON block list, published each scan
+#   /perception/human_detected    std_msgs/Bool    — streams every frame (→ SS1 Elijah)
+#   /perception/status            std_msgs/String  — "SCANNING" or "IDLE", every frame (→ SS1)
+#   /perception/detections        std_msgs/String  — JSON block list with 4DoF pose (→ SS2 Connor, SS4 Kermit)
+#   /perception/block_poses       geometry_msgs/PoseArray — 3D block centres for motion planning (→ SS2 Connor)
+#   /perception/letters           std_msgs/String  — comma-separated letter list e.g. "A,B,C" (→ SS4 Kermit)
 #
 # ROS2 TOPICS SUBSCRIBED:
-#   /mission/state                std_msgs/String  — "SCANNING" enables CNN scan
-#                                                    "IDLE" disables scan
-#                                                    (replaces spacebar for robot operation)
+#   /mission/state                std_msgs/String  — "SCANNING" or "IDLE" from SS1 Elijah
 
 # ── Mode switch ───────────────────────────────────────────
 USE_ROS2 = True   # False = direct pyrealsense2 SDK, True = ROS2 topics
@@ -246,8 +246,8 @@ class BlockDetector:
 
         # DEBUG — log top contour areas to help tune MIN/MAX_BLOCK_AREA
         areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)[:5]
-        if areas:
-            print(f"[Debug] Top contour areas: {[int(a) for a in areas]}")
+        #if areas:
+            #print(f"[Debug] Top contour areas: {[int(a) for a in areas]}")
 
         boxes = []
         for cnt in contours:
@@ -507,6 +507,7 @@ def run_ros2():
     from rclpy.node import Node
     from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
+    from geometry_msgs.msg import PoseArray, Pose
     from cv_bridge import CvBridge
     from message_filters import ApproximateTimeSynchronizer, Subscriber
 
@@ -516,6 +517,11 @@ def run_ros2():
             self.bridge     = CvBridge()
             self.perception = Perception()
 
+
+
+            # ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+            #                                                     SUBSCRIBERS
+            #─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
             # ── Camera subscribers ────────────────────────
             color_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
             depth_sub = Subscriber(self, Image, '/camera/camera/aligned_depth_to_color/image_raw')
@@ -533,7 +539,9 @@ def run_ros2():
                 10
             )
 
-            # ── Publishers ────────────────────────────────
+            # ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+            #                                                     PUBLISHERS
+            #─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
             # Human detected — Bool, every frame, for Elijah's safety monitor
             self.pub_human = self.create_publisher(
                 Bool, '/perception/human_detected', 10)
@@ -548,15 +556,28 @@ def run_ros2():
             # Format: {"blocks": [{"letter":"A","conf":94.2,"x":120,"y":200,"w":80,"h":80}]}
             self.pub_detections = self.create_publisher(
                 String, '/perception/detections', 10)
+            
+            # Block poses — PoseArray, published when scanning
+            # 3D centre of each block in camera frame (metres), for Connor's motion planner
+            # z_m already accounts for half block height (4cm) so this is the cube centre
+            self.pub_poses = self.create_publisher(
+                PoseArray, '/perception/block_poses', 10)
+
+            # Letters — clean comma-separated string, published when scanning
+            # e.g. "A,B,C" — for Kermit's word solver
+            self.pub_letters = self.create_publisher(
+                String, '/perception/letters', 10)
 
             self.get_logger().info(
                 '\nCNN perception node ready.'
                 '\n  Subscribing: /camera/camera/color/image_raw'
                 '\n               /camera/camera/aligned_depth_to_color/image_raw'
-                '\n               /mission/state'
-                '\n  Publishing:  /perception/human_detected  (Bool, every frame)'
-                '\n               /perception/status          (String, every frame)'
-                '\n               /perception/detections      (String JSON, when scanning)'
+                '\n               /mission/state          (from SS1 Elijah)'
+                '\n  Publishing:  /perception/human_detected  (Bool, every frame -> SS1)'
+                '\n               /perception/status          (String, every frame -> SS1)'
+                '\n               /perception/detections      (JSON, when scanning -> SS2 + SS4)'
+                '\n               /perception/block_poses     (PoseArray, when scanning -> SS2)'
+                '\n               /perception/letters         (String, when scanning -> SS4)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
 
@@ -592,11 +613,37 @@ def run_ros2():
                 self.pub_status.publish(status_msg)
 
                 # ── Publish detections (when scanning) ─────
+                # ── Publish detections (when scanning) ─────
                 if self.perception.at_position:
                     det_msg      = String()
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
                     self.get_logger().info(f'[Detections] {det_msg.data}')
+
+                    # ── Publish block poses for Connor (SS2) ──
+                    # PoseArray in camera frame — Connor applies EE-to-robot transform
+                    # z_m in detections is depth to top face; add 4cm for block centre
+                    pose_array = PoseArray()
+                    pose_array.header.stamp    = self.get_clock().now().to_msg()
+                    pose_array.header.frame_id = 'camera_color_optical_frame'
+                    for (_, _, _, _, letter, conf, x_m, y_m, z_m, _theta) in self.perception.last_detections:
+                        if letter is None or x_m is None:
+                            continue
+                        p = Pose()
+                        p.position.x    = x_m
+                        p.position.y    = y_m
+                        p.position.z    = z_m + 0.04  # shift from top face to block centre
+                        p.orientation.w = 1.0
+                        pose_array.poses.append(p)
+                    self.pub_poses.publish(pose_array)
+
+                    # ── Publish letters for Kermit (SS4) ──────
+                    letters = [d[4] for d in self.perception.last_detections if d[4]]
+                    if letters:
+                        letters_msg      = String()
+                        letters_msg.data = ','.join(letters)
+                        self.pub_letters.publish(letters_msg)
+                        self.get_logger().info(f'[Letters] {letters_msg.data}')
 
                 # ── Display ───────────────────────────────
                 cv2.imshow("RealSense CNN Vision", display)
