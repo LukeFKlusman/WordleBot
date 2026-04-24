@@ -40,7 +40,9 @@ ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:={ENTER 
 # or use gripper in simulation
 ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false
 # or use gripper with real hardware
-ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false robot_ip:={ENTER IP} 
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false robot_ip:=192.168.0.197
+
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false
 ```
 
 ### Terminal 4. Launch MoveIt + RViz (Terminal 1)
@@ -54,7 +56,9 @@ ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:={ENTER 
 # Or if using gripper in simulation 
 ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2
 # Or if using gripper with real hardware
-ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:={ENTER IP} 
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false robot_ip:=192.168.0.197
+
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false
 ```
 
 ### Terminal 5. Launch the control node (Terminal 2)
@@ -62,6 +66,10 @@ ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e o
 Only ran after the previous terminals are running
 
 ```bash
+
+ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
+
+
 ros2 launch wordleBot_control wordle_bot.launch.py
 ```
 

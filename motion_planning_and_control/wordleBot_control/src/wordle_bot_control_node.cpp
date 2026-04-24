@@ -5,6 +5,7 @@
 
 #include <Eigen/Geometry>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
+#include <controller_manager_msgs/srv/list_controllers.hpp>
 
 // TODO: Functionalities to add:
 // - Scan area for obstacles and add to planning scene (TC1.3)
@@ -279,15 +280,13 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & obje
 
   // ── Stage 3: free-space move to pick region ───────────────────────────────
   {
-    RCLCPP_INFO(LOGGER, "createTask: adding stage 3 — Connect 'move to pick' (timeout=10 s, no path constraints).");
+    RCLCPP_INFO(LOGGER, "createTask: adding stage 3 — Connect 'move to pick' (timeout=10 s).");
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(10.0);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    // Path constraints are intentionally NOT applied here. buildPathConstraints() uses raw
-    // joint values that MoveIt doesn't normalise (±2π), causing the start state to appear
-    // invalid and triggering 10-second timeouts before falling back to unconstrained planning.
+    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -420,14 +419,14 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & obje
 
   // ── Stage 5: free-space move to place region ──────────────────────────────
   {
-    RCLCPP_INFO(LOGGER, "createTask: adding stage 5 — Connect 'move to place' (timeout=10 s, no path constraints).");
+    RCLCPP_INFO(LOGGER, "createTask: adding stage 5 — Connect 'move to place' (timeout=10 s).");
     auto stage = std::make_unique<mtc::stages::Connect>(
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
         {arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // Path constraints intentionally omitted — see stage 3 comment.
+    stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -453,7 +452,7 @@ mtc::Task WordleBotControlNode::createTask(const geometry_msgs::msg::Pose & obje
       target_pose.header.frame_id = "world";
       target_pose.pose.position.x = PLACE_X;
       target_pose.pose.position.y = PLACE_Y;
-      target_pose.pose.position.z = PLACE_Z;
+      target_pose.pose.position.z = 0.05;
       target_pose.pose.orientation.w = 1.0;
       stage->setPose(target_pose);
       stage->setMonitoredStage(attach_object_stage);
@@ -578,12 +577,16 @@ void WordleBotControlNode::doPickAndPlace()
   }
 
   RCLCPP_INFO(LOGGER,
-    "doPickAndPlace: planning succeeded — %zu solution(s) found. "
-    "Executing best solution (cost=%.3f).",
-    task_.solutions().size(),
-    task_.solutions().front()->cost());
+    "doPickAndPlace: planning succeeded — %zu solution(s) found. " "Executing best solution (cost=%.3f).", task_.solutions().size(),
+                                                                                                           task_.solutions().front()->cost());
+   
+  RCLCPP_DEBUG(LOGGER, "doPickAndPlace: publishing planned solution for visualization.");
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   task_.introspection().publishSolution(*task_.solutions().front());
+
+  RCLCPP_INFO(LOGGER, "doPickAndPlace: controller states OK. Executing trajectory...");
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
   RCLCPP_INFO(LOGGER, "doPickAndPlace: executing...");
   auto result = task_.execute(*task_.solutions().front());

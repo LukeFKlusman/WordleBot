@@ -883,8 +883,8 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         # Object / geometry constants (must match control node header)
         # ------------------------------------------------------------------ #
-        PICK_X, PICK_Y, PICK_Z = 0.30, 0.20, 0.02
-        PLACE_X, PLACE_Y, PLACE_Z = 0.00, 0.45, 0.02
+        PICK_X, PICK_Y, PICK_Z = 0.30, 0.20, 0.05
+        PLACE_X, PLACE_Y, PLACE_Z = 0.00, 0.45, 0.05
         GRASP_Z_OFFSET = 0.08       # grasp_frame_transform z in createTask
         APPROACH_MIN   = 0.10       # setMinMaxDistance lower bound
         APPROACH_MAX   = 0.15       # setMinMaxDistance upper bound

@@ -95,4 +95,8 @@ private:
 
   // Init, plan, and execute the MTC task; publishes mission_complete on success
   void doPickAndPlace();
+
+  // Returns true if the trajectory controllers required for execution are active.
+  // Logs a clear error and returns false if either is inactive or unreachable.
+  bool controllersAreActive() const;
 };
