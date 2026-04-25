@@ -41,12 +41,3 @@ EASTER_EGG_INSULTS = [
     "Scientists studying poor decision-making will want to hear about {word}. For all the wrong reasons.",
 ]
 
-# Terminal colour codeS (currently EMPTY i dont think they work)
-class C:
-    GREEN  = ""
-    YELLOW = ""
-    RED    = ""
-    CYAN   = ""
-    BOLD   = ""
-    DIM    = ""
-    RESET  = ""
