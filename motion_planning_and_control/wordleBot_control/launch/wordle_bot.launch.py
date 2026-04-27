@@ -1,3 +1,5 @@
+# Not the used launch file - see wordle_bot_mtc.launch.py for the MTC version.  This is left here for reference and comparison.
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory

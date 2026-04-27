@@ -16,6 +16,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(shape_msgs REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
 
 set(DEPENDENCIES
   rclcpp
@@ -27,6 +28,7 @@ set(DEPENDENCIES
   std_msgs
   moveit_msgs
   shape_msgs
+  controller_manager_msgs
 )
 
 # --- Library: controller + node sources ---

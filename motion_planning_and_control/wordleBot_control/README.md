@@ -2,11 +2,17 @@
 
 Main control package for the WordleBot UR3e robotic arm.
 
+Once the program is running it will sit in idle until an object is requested to be picked up, or a goal is requested.
+
 ## Prerequisites
 
 - ROS 2 (Humble or later)
 - MoveIt 2
-- UR ROS 2 driver and MoveIt config (`ur_moveit_config`)
+- UR Driver
+- UR ROS 2 driver MoveIt config (`ur_moveit_config`)
+- On Robot Driver
+
+Follow canvas steps on what packages to install
 
 ---
 
@@ -21,83 +27,138 @@ colcon build --packages-select wordleBot_control
 source install/setup.bash
 ```
 
-### Terminal 2. Start URSim (UR3e) 
-
-if not simulation and real hardware ignore this step
-
-In a new terminal:
+### Terminal 2. Launch Robot driver
 
 ```bash
-ros2 run ur_client_library start_ursim.sh -m ur3e
-```
-
-### Terminal 3. Launch Robot driver
-
-```bash
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
-# Or if using real Hardware
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
-# or use gripper in simulation
 ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false
-# or use gripper with real hardware
-ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false robot_ip:={ENTER IP} 
+# or use real hardware
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:=192.168.0.197 launch_rviz:=false 
+# using the id of the ur3e
 ```
 
-### Terminal 4. Launch MoveIt + RViz (Terminal 1)
+### Terminal 3. Launch MoveIt 
 
-This starts the UR3e MoveIt stack and RViz. Keep this running throughout your session.
+This starts the UR3e MoveIt stack. Keep this running throughout your session.
 
 ```bash
-ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:=192.168.56.101 launch_rviz:=true
-# Or if using real Hardware
-ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e robot_ip:={ENTER IP} launch_rviz:=true
-# Or if using gripper in simulation 
-ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2
-# Or if using gripper with real hardware
-ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:={ENTER IP} 
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false
+# or use real hardware
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false robot_ip:=192.168.0.197
+# using the id of the ur3e
 ```
+
+### Terminal 4. Launch Rviz
+
+This starts Rviz
+
+```bash
+ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
+```
+
 
 ### Terminal 5. Launch the control node (Terminal 2)
 
 Only ran after the previous terminals are running
 
 ```bash
+ros2 launch wordleBot_control wordle_bot_mtc.launch.py
+```
+
+### Other Terminal.
+
+Only ran after the previous terminals are running
+
+```bash
+
+ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
+
 ros2 launch wordleBot_control wordle_bot.launch.py
 ```
 
-The node will:
-1. Add a collision box to the planning scene
-2. Prompt you to press **Next** in the `RvizVisualToolsGui` panel to plan
-3. Visualise the planned trajectory in RViz
-4. Prompt you to press **Next** again to execute
-5. Move the arm to the target pose
+## Manual Terminal Control
 
-> Make sure the **RvizVisualToolsGui** panel is open in RViz, otherwise the prompts will block indefinitely.
+Use these commands to control the robot from the terminal without an integration layer. Run each in a separate terminal after the control node is up.
+
+### Start the mission
+
+First load a goal (or set of goals), then send the start signal.
+
+```bash
+# Send a single goal pose (legacy interface — auto-starts the mission)
+ros2 topic pub --once /wordle_bot/goal_pose geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'world'}, pose: {position: {x: 0.4, y: 0.0, z: 0.3}, orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}}}"
+
+# Or: load a multi-goal mission then start it in two steps
+ros2 topic pub --once /wordle_bot/set_mission geometry_msgs/msg/PoseArray \
+  "{header: {frame_id: 'world'}, poses: [{position: {x: 0.4, y: 0.0, z: 0.3}, orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}}]}"
+
+ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
+```
+
+### Stop (pause) the mission
+
+```bash
+ros2 topic pub --once /wordle_bot/stop_mission std_msgs/msg/Bool "{data: true}"
+```
+
+### Resume after a stop
+
+```bash
+ros2 topic pub --once /wordle_bot/resume_mission std_msgs/msg/Bool "{data: true}"
+```
+
+### Abort the mission
+
+Cancels execution and sends the robot back to home.
+
+```bash
+ros2 topic pub --once /wordle_bot/abort_mission std_msgs/msg/Bool "{data: true}"
+```
+
+### Add a collision object to the planning scene
+
+```bash
+ros2 topic pub --once /wordle_bot/add_collision_object moveit_msgs/msg/CollisionObject \
+  "{id: 'my_box', header: {frame_id: 'world'}, \
+    primitives: [{type: 1, dimensions: [0.05, 0.05, 0.05]}], \
+    primitive_poses: [{position: {x: 0.3, y: 0.2, z: 0.1}, orientation: {w: 1.0}}], \
+    operation: 0}"
+```
+
+`operation: 0` = ADD, `operation: 2` = REMOVE.
+
+### Send a letter/wordle object for pick-and-place
+
+This triggers the pick-and-place sequence. The pose must be in the `world` frame.
+
+```bash
+ros2 topic pub --once perception/letter_objects geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'world'}, pose: {position: {x: 0.35, y: 0.2, z: 0.025}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+```
+
+### Monitor robot state
+
+```bash
+ros2 topic echo /wordle_bot/robot_state
+```
 
 ---
 
-## Package Structure
+## How to Test (without intergration)
 
+```bash
+# All Tests 
+python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -s -v
+
+# Run TC1.1 in isolation: Move to 1 Goal
+python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
+
+# Run TC1.2 in isolation: Movge to 3 Goal
+python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
+
+# Run TC1.5 in isolation: Collision Avoidance
+python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
+
+# Run TC1.6 in isolation: Pick and Place 
+python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_6 -s -v
 ```
-wordleBot_control/
-├── include/wordleBot_control/
-│   ├── wordle_bot_controller.hpp   # Motion planning wrapper (MoveIt, collision, tf2 quaternions)
-│   └── wordle_bot_control_node.hpp # ROS 2 node class
-├── launch/
-│   └── wordle_bot.launch.py        # Node launch (MoveIt runs separately)
-├── main/
-│   └── main.cpp                    # Entry point — executor + spin thread
-├── src/
-│   ├── wordle_bot_controller.cpp   # MoveGroupInterface, collision scene, buildPose()
-│   └── wordle_bot_control_node.cpp # Goal sequence, future perception hook
-├── CMakeLists.txt
-└── package.xml
-```
-
----
-
-## Development Notes
-
-- Goals are set in `WordleBotControlNode::run()` inside [src/wordle_bot_control_node.cpp](src/wordle_bot_control_node.cpp)
-- To add more goals, call `controller_->moveToTarget(pose)` with a pose built via `WordleBotController::buildPose(x, y, z, roll, pitch, yaw)`
-- The perception subscription stub is in [include/wordleBot_control/wordle_bot_control_node.hpp](include/wordleBot_control/wordle_bot_control_node.hpp) — this is where future perception integration will be wired in
