@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -54,6 +56,25 @@ public:
   // Detach the sensor guard cylinder from tool0.
   void detachSensorCollisionObject();
 
+  // Cancel the in-progress trajectory. Sets stop_requested_ and calls move_group_.stop().
+  // Any blocking execute() or task.execute() call will return a non-SUCCESS error code.
+  void stop();
+
+  // Clear the stop flag before issuing a new motion so the motion is not immediately rejected.
+  void clearStopFlag();
+
+  // Move to the named "home" joint state. Does NOT apply path constraints so abort always succeeds.
+  bool moveToHome();
+
+  // Execute MTC stages 1-4: open gripper → move to pick → grasp → lift.
+  // Returns true on success; false if stopped, planning failed, or execution failed.
+  bool doPickPhase(const geometry_msgs::msg::Pose & object_pose);
+
+  // Execute MTC stages 5-7: move to place → place → retreat → return home.
+  // Must be called after a successful doPickPhase() so the object is attached in the planning scene.
+  // Returns true on success; false if stopped, planning failed, or execution failed.
+  bool doPlacePhase();
+
   // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
   static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
                                             double roll, double pitch, double yaw);
@@ -67,8 +88,7 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
-  // Plan and execute a full MTC pick-and-place for the given object pose.
-  // Returns true on successful execution.
+  // Plan and execute a full MTC pick-and-place for the given object pose (legacy, single-shot).
   bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose);
 
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
@@ -81,7 +101,7 @@ private:
                                     const geometry_msgs::msg::Pose & target_pose);
 
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> generateCandidatePlans(int num_attempts);
-  
+
   moveit::planning_interface::MoveGroupInterface::Plan selectBestPlan(const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans,
                                                                       const std::vector<double> & q_start,
                                                                       const std::vector<double> & q_goal);
@@ -89,7 +109,12 @@ private:
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
                      const std::string & title);
 
+  // Original monolithic task (used by legacy doPickAndPlace).
   moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose);
+
+  // Phase-split task builders for stop/resume-aware pick-and-place.
+  moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);
+  moveit::task_constructor::Task createPlaceTask();
 
   rclcpp::Node::SharedPtr node_;
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters
@@ -97,4 +122,6 @@ private:
   moveit::planning_interface::PlanningSceneInterface planning_scene_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
   moveit::core::RobotStatePtr current_state;
+
+  std::atomic<bool> stop_requested_{false};
 };

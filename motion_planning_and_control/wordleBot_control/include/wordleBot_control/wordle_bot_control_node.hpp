@@ -12,6 +12,7 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
@@ -41,6 +42,14 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr goal_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mission_complete_pub_;
 
+  // Stop / Resume / Abort control
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stop_mission_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_mission_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr abort_mission_sub_;
+
+  // Live state publisher
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr robot_state_pub_;
+
   // Collision object injection interface
   rclcpp::Subscription<moveit_msgs::msg::CollisionObject>::SharedPtr add_collision_object_sub_;
 
@@ -49,38 +58,45 @@ private:
   geometry_msgs::msg::Pose letter_object_pose_;
   bool letter_object_received_{false};
 
-  // Mission state
-  enum class MissionState { IDLE, RUNNING };
+  // Hierarchical state machine
+  enum class RobotState { IDLE, RUNNING, STOPPED, ABORTING };
+  enum class ExecutionMode { NONE, WAYPOINTS, PICK_PLACE };
+  enum class PickPlacePhase { NONE, PRE_PICK, POST_PICK };
+
+  RobotState robot_state_{RobotState::IDLE};           // guarded by queue_mutex_
+  ExecutionMode execution_mode_{ExecutionMode::NONE};  // guarded by queue_mutex_
+  PickPlacePhase pick_place_phase_{PickPlacePhase::NONE}; // guarded by queue_mutex_
+  std::size_t current_waypoint_idx_{0};                // guarded by queue_mutex_
+  std::vector<geometry_msgs::msg::Pose> current_mission_; // guarded by queue_mutex_
+
+  std::atomic<bool> stop_requested_{false};  // written by callbacks, read by mission thread
+  bool resume_requested_{false};  // guarded by queue_mutex_
+  bool abort_requested_{false};   // guarded by queue_mutex_
 
   std::vector<geometry_msgs::msg::Pose> goal_queue_;
   bool mission_armed_{false};
   std::mutex queue_mutex_;
   std::condition_variable cv_;
-  std::atomic<MissionState> mission_state_{MissionState::IDLE};
   std::thread mission_thread_;
 
-  // Enqueue incoming goal and immediately arm (backward compat with /wordle_bot/goal_pose)
+  // Subscriber callbacks
   void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-
-  // Atomically replace goal queue with poses from msg; does NOT arm the mission
   void setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg);
-
-  // Arm the mission so missionLoop can begin
   void startMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
-
-  // Runs on mission_thread_: waits until armed, then dispatches to doPickAndPlace or goal loop
-  void missionLoop();
-
-  // Forward an incoming CollisionObject to the controller's planning scene
+  void stopMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void resumeMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void abortMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
-
-  // Receive a letter object pose, add a 40 mm cube to the planning scene, arm pick-and-place
   void letterObjectCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
-  // Capture pose, delegate to controller, publish result, reset flag
-  void doPickAndPlace();
+  // Mission loop and execution helpers (all run on mission_thread_)
+  void missionLoop();
+  void runWaypointMission();
+  void runPickAndPlaceMission();
+  void doAbort();
 
-  // Returns true if the trajectory controllers required for execution are active.
-  // Logs a clear error and returns false if either is inactive or unreachable.
-  bool controllersAreActive() const;
+  // State helpers
+  void resetMissionState();      // called under queue_mutex_
+  void publishRobotState();      // called from mission thread
+  static std::string robotStateToString(RobotState s);
 };
