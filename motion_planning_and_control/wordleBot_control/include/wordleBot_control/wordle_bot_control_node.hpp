@@ -42,7 +42,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr goal_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr mission_complete_pub_;
 
-  // Stop / Resume / Abort control
+  // Stop / Resume / Abort control (resume and abort not yet implemented)
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stop_mission_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr resume_mission_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr abort_mission_sub_;
@@ -58,20 +58,8 @@ private:
   geometry_msgs::msg::Pose letter_object_pose_;
   bool letter_object_received_{false};
 
-  // Hierarchical state machine
-  enum class RobotState { IDLE, RUNNING, STOPPED, ABORTING };
-  enum class ExecutionMode { NONE, WAYPOINTS, PICK_PLACE };
-  enum class PickPlacePhase { NONE, PRE_PICK, POST_PICK };
-
-  RobotState robot_state_{RobotState::IDLE};           // guarded by queue_mutex_
-  ExecutionMode execution_mode_{ExecutionMode::NONE};  // guarded by queue_mutex_
-  PickPlacePhase pick_place_phase_{PickPlacePhase::NONE}; // guarded by queue_mutex_
-  std::size_t current_waypoint_idx_{0};                // guarded by queue_mutex_
-  std::vector<geometry_msgs::msg::Pose> current_mission_; // guarded by queue_mutex_
-
-  std::atomic<bool> stop_requested_{false};  // written by callbacks, read by mission thread
-  bool resume_requested_{false};  // guarded by queue_mutex_
-  bool abort_requested_{false};   // guarded by queue_mutex_
+  std::atomic<bool> stop_requested_{false};
+  bool mission_running_{false};  // guarded by queue_mutex_
 
   std::vector<geometry_msgs::msg::Pose> goal_queue_;
   bool mission_armed_{false};
@@ -89,14 +77,7 @@ private:
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
   void letterObjectCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
-  // Mission loop and execution helpers (all run on mission_thread_)
+  // Mission loop and helpers (all run on mission_thread_)
   void missionLoop();
-  void runWaypointMission();
-  void runPickAndPlaceMission();
-  void doAbort();
-
-  // State helpers
-  void resetMissionState();      // called under queue_mutex_
-  void publishRobotState();      // called from mission thread
-  static std::string robotStateToString(RobotState s);
+  void doPickAndPlace();
 };
