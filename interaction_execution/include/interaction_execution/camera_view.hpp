@@ -22,12 +22,12 @@ protected:
   void resizeEvent(QResizeEvent * event) override;
 
 private:
-  void handleImage(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+  void handleImage(const sensor_msgs::msg::Image::SharedPtr msg);
   void updatePixmap();
   void showStatusMessage(const QString & message);
 
   rclcpp::Node::SharedPtr node_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_subscription_;
   QLabel * image_label_{nullptr};
   QPixmap current_pixmap_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
 };

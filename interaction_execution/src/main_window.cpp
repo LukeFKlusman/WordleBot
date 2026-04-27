@@ -22,8 +22,14 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
+
 namespace
 {
+constexpr const char * kMissionStateTopic = "/mission/state";
+constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
+constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 const QStringList kWordleDemoWords{
   "apple", "baker", "chair", "droid", "eagle", "flame", "grape", "house",
   "input", "jolly", "kneel", "laser", "mango", "noble", "ocean", "piano",
@@ -88,6 +94,10 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
   ui_->setupUi(this);
   setupTabs();
   setupVoiceControls();
+  setupSafetyControls();
+  setupMissionOverlay();
+  setupVoiceControls();
+  setupSafetyControls();
   setupMissionOverlay();
 }
 
@@ -179,6 +189,109 @@ void MainWindow::updateVoiceControlsState()
   ui_->voiceStopButton->setEnabled(voice_recording_);
   ui_->voiceConfirmButton->setEnabled(has_pending_guess);
   ui_->voiceRetryButton->setEnabled(has_pending_guess);
+}
+
+void MainWindow::setupSafetyControls()
+{
+  mission_state_pub_ = node_->create_publisher<std_msgs::msg::String>(kMissionStateTopic, 10);
+  mission_cmd_pub_ = node_->create_publisher<std_msgs::msg::String>(kMissionCommandTopic, 10);
+
+  human_detected_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    kHumanDetectedTopic,
+    rclcpp::SensorDataQoS(),
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      if (msg == nullptr) {
+        return;
+      }
+
+      const bool was_human_detected = human_detected_;
+      human_detected_ = msg->data;
+
+      if (!human_detected_ || was_human_detected) {
+        return;
+      }
+
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Human detected on %s. Publishing IDLE + STOP safety commands.",
+        kHumanDetectedTopic);
+      publishMissionState("IDLE");
+      publishMissionCommand("STOP");
+      updateSafetyBanner("SAFETY CONTROLS | HUMAN DETECTED", "#ef4444");
+    });
+
+  connect(ui_->pushButton, &QPushButton::clicked, this, [this]() {
+    if (human_detected_) {
+      RCLCPP_WARN(node_->get_logger(), "START blocked because a human is currently detected.");
+      publishMissionState("IDLE");
+      publishMissionCommand("STOP");
+      updateSafetyBanner("SAFETY CONTROLS | HUMAN DETECTED", "#ef4444");
+      return;
+    }
+
+    publishMissionState("SCANNING");
+    publishMissionCommand("START");
+    updateSafetyBanner("SAFETY CONTROLS | SCANNING", "#22c55e");
+  });
+
+  connect(ui_->pushButton_4, &QPushButton::clicked, this, [this]() {
+    publishMissionState("IDLE");
+    publishMissionCommand("STOP");
+    updateSafetyBanner("SAFETY CONTROLS | STOPPED", "#ef4444");
+  });
+
+  connect(ui_->pushButton_2, &QPushButton::clicked, this, [this]() {
+    if (human_detected_) {
+      RCLCPP_WARN(node_->get_logger(), "RESUME blocked because a human is currently detected.");
+      publishMissionState("IDLE");
+      publishMissionCommand("STOP");
+      updateSafetyBanner("SAFETY CONTROLS | HUMAN DETECTED", "#ef4444");
+      return;
+    }
+
+    publishMissionState("SCANNING");
+    publishMissionCommand("RESUME");
+    updateSafetyBanner("SAFETY CONTROLS | RESUMED", "#22c55e");
+  });
+
+  connect(ui_->pushButton_3, &QPushButton::clicked, this, [this]() {
+    publishMissionState("IDLE");
+    publishMissionCommand("HOME");
+    updateSafetyBanner("SAFETY CONTROLS | RETURN HOME", "#f59e0b");
+  });
+
+  updateSafetyBanner("SAFETY CONTROLS | IDLE", "#f59e0b");
+}
+
+void MainWindow::publishMissionState(const std::string & state)
+{
+  std_msgs::msg::String msg;
+  msg.data = state;
+  mission_state_pub_->publish(msg);
+  RCLCPP_INFO(node_->get_logger(), "Published %s='%s'.", kMissionStateTopic, state.c_str());
+}
+
+void MainWindow::publishMissionCommand(const std::string & command)
+{
+  std_msgs::msg::String msg;
+  msg.data = command;
+  mission_cmd_pub_->publish(msg);
+  RCLCPP_INFO(node_->get_logger(), "Published %s='%s'.", kMissionCommandTopic, command.c_str());
+}
+
+void MainWindow::updateSafetyBanner(const QString & text, const QString & color_hex)
+{
+  ui_->safetyLabel->setText(text);
+  ui_->safetyLabel->setStyleSheet(QString(
+    "QLabel#safetyLabel {"
+    "  color: %1;"
+    "  font-size: 8pt;"
+    "  font-weight: 700;"
+    "  letter-spacing: 2px;"
+    "  background: transparent;"
+    "  border: none;"
+    "  padding: 0px;"
+    "}").arg(color_hex));
 }
 
 void MainWindow::setupMissionOverlay()

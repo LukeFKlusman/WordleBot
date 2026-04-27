@@ -246,8 +246,8 @@ class BlockDetector:
 
         # DEBUG — log top contour areas to help tune MIN/MAX_BLOCK_AREA
         areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)[:5]
-        if areas:
-            print(f"[Debug] Top contour areas: {[int(a) for a in areas]}")
+        #if areas:
+            #rint(f"[Debug] Top contour areas: {[int(a) for a in areas]}")
 
         boxes = []
         for cnt in contours:

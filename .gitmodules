@@ -1,0 +1,3 @@
+[submodule "interaction_execution/src/wordle-clone"]
+	path = interaction_execution/src/wordle-clone
+	url = git@github.com:ianlenehan/wordle-clone.git
