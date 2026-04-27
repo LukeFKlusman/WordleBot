@@ -15,6 +15,11 @@
 #include <moveit_visual_tools/moveit_visual_tools.h>
 #include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/joint_constraint.hpp>
+#include <moveit_msgs/msg/move_it_error_codes.hpp>
+
+#include <moveit/task_constructor/task.h>
+#include <moveit/task_constructor/stages.h>
+#include <moveit/task_constructor/solvers.h>
 
 
 class WordleBotController
@@ -62,6 +67,15 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
+  // Plan and execute a full MTC pick-and-place for the given object pose.
+  // Returns true on successful execution.
+  bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose);
+
+  static constexpr const char * LETTER_OBJECT_ID = "letter_object";
+  static constexpr double PLACE_X = 0.0;
+  static constexpr double PLACE_Y = 0.45;
+  static constexpr double PLACE_Z = 0.02;
+
 private:
   std::vector<double> computeBestIK(const moveit::core::RobotStatePtr & current_state,
                                     const geometry_msgs::msg::Pose & target_pose);
@@ -74,6 +88,8 @@ private:
 
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
                      const std::string & title);
+
+  moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose);
 
   rclcpp::Node::SharedPtr node_;
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters

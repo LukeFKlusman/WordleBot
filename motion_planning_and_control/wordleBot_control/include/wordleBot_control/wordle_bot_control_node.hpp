@@ -15,13 +15,7 @@
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
-#include <moveit/task_constructor/task.h>
-#include <moveit/task_constructor/stages.h>
-#include <moveit/task_constructor/solvers.h>
-
 #include "wordleBot_control/wordle_bot_controller.hpp"
-
-namespace mtc = moveit::task_constructor;
 
 class WordleBotControlNode
 {
@@ -36,7 +30,6 @@ public:
 private:
   rclcpp::Node::SharedPtr node_;
   std::shared_ptr<WordleBotController> controller_;
-  mtc::Task task_;
 
   // Legacy single-goal interface (backward compat)
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
@@ -55,12 +48,6 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr letter_object_sub_;
   geometry_msgs::msg::Pose letter_object_pose_;
   bool letter_object_received_{false};
-  static constexpr const char * LETTER_OBJECT_ID = "letter_object";
-
-  // Hardcoded place destination (world frame) — update once perception provides it
-  static constexpr double PLACE_X = 0.0;
-  static constexpr double PLACE_Y = 0.45;
-  static constexpr double PLACE_Z = 0.02;
 
   // Mission state
   enum class MissionState { IDLE, RUNNING };
@@ -90,10 +77,7 @@ private:
   // Receive a letter object pose, add a 40 mm cube to the planning scene, arm pick-and-place
   void letterObjectCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
 
-  // Build the full MTC pick-and-place task for the given object pose
-  mtc::Task createTask(const geometry_msgs::msg::Pose & object_pose);
-
-  // Init, plan, and execute the MTC task; publishes mission_complete on success
+  // Capture pose, delegate to controller, publish result, reset flag
   void doPickAndPlace();
 
   // Returns true if the trajectory controllers required for execution are active.
