@@ -48,7 +48,7 @@ def generate_launch_description():
 
     wordlebot_control = Node(
         package="wordlebot_control",
-        executable="wordlebot_control",
+        executable="wordlebot_control_node",
         output="screen",
         parameters=[
             kin_params,

@@ -96,14 +96,14 @@ public:
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
   // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).
-  // All slots share y=0.2 m and z=0.015 m; columns are 75 mm apart.
+  // All slots share y=0.3 m and z=0.015 m; columns are 75 mm apart.
   struct PlaceSlot { double x, y, z; };
   static constexpr std::array<PlaceSlot, 5> PLACE_SLOTS = {{
-    {-0.150, 0.2, 0.015},
-    {-0.075, 0.2, 0.015},
-    { 0.000, 0.2, 0.015},
-    { 0.075, 0.2, 0.015},
-    { 0.150, 0.2, 0.015},
+    {-0.150, 0.3, 0.015},
+    {-0.075, 0.3, 0.015},
+    { 0.000, 0.3, 0.015},
+    { 0.075, 0.3, 0.015},
+    { 0.150, 0.3, 0.015},
   }};
 
 private:

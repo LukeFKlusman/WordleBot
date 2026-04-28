@@ -38,7 +38,7 @@ def generate_launch_description():
     # WordleBot control node
     control_node = launch_ros.actions.Node(
         package="wordlebot_control",
-        executable="wordlebot_control",
+        executable="wordlebot_control_node",
         name="wordle_bot_control_node",
         output="screen",
         parameters=[kin_params],
