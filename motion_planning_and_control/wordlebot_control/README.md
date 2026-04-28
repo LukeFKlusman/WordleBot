@@ -55,6 +55,12 @@ This starts Rviz
 ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
 ```
 
+Alternatively, launch RViz with the wordlebot-specific config:
+
+```bash
+ros2 launch wordlebot_control wordlebot_rviz.launch.py
+```
+
 
 ### Terminal 5. Launch the control node (Terminal 2)
 

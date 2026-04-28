@@ -1405,8 +1405,8 @@ mtc::Task WordleBotController::createPlaceTask()
 
       geometry_msgs::msg::PoseStamped target_pose;
       target_pose.header.frame_id = "world";
-      target_pose.pose.position.x = PLACE_X;
-      target_pose.pose.position.y = PLACE_Y;
+      // target_pose.pose.position.x = PLACE_X;
+      // target_pose.pose.position.y = PLACE_Y;
       target_pose.pose.position.z = 0.05;
       target_pose.pose.orientation.w = 1.0;
       stage->setPose(target_pose);

@@ -52,16 +52,19 @@ rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_t
 target_link_libraries(wordle_bot_lib "${cpp_typesupport_target}")
 
 # --- Executable ---
-add_executable(wordlebot_control main/main.cpp)
-target_include_directories(wordlebot_control PUBLIC
+add_executable(wordlebot_control_node main/main.cpp)
+target_include_directories(wordlebot_control_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(wordlebot_control PUBLIC cxx_std_17)
-target_link_libraries(wordlebot_control wordle_bot_lib)
+target_compile_features(wordlebot_control_node PUBLIC cxx_std_17)
+target_link_libraries(wordlebot_control_node wordle_bot_lib)
 
 # --- Install ---
-install(TARGETS wordle_bot_lib wordlebot_control
+install(TARGETS wordle_bot_lib
+  DESTINATION lib
+)
+install(TARGETS wordlebot_control_node
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/
@@ -72,6 +75,9 @@ install(DIRECTORY launch/
 )
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
+)
+install(DIRECTORY rviz/
+  DESTINATION share/${PROJECT_NAME}/rviz
 )
 
 if(BUILD_TESTING)
