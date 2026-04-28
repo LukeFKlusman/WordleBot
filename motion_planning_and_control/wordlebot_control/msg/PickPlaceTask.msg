@@ -1,0 +1,2 @@
+geometry_msgs/PoseStamped pick_pose
+int32 place_slot

@@ -21,7 +21,7 @@ ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur3e robot_ip:=<IP> ..
 ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur3e ...
 
 # 3. WordleBot control node
-ros2 launch wordleBot_control wordle_bot.launch.py
+ros2 launch wordlebot_control wordle_bot.launch.py
 ```
 
 **Tolerances (shared across all TC1 tests):**
@@ -38,12 +38,12 @@ ros2 launch wordleBot_control wordle_bot.launch.py
 
 ```bash
 # Run all TC1 tests
-colcon test --packages-select wordleBot_control --pytest-args -k tc1
+colcon test --packages-select wordlebot_control --pytest-args -k tc1
 colcon test-result --verbose
 
 # Run specific sub-tests
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
 ```
 
 ---

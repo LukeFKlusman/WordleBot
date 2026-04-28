@@ -8,9 +8,9 @@ Assumptions:
     - MoveIt stack:     ros2 launch ur_moveit_config ur_moveit.launch.py ...
 
 Usage:
-  ros2 launch wordleBot_control tc3_advanced_collision_avoidance.launch.py
+  ros2 launch wordlebot_control tc3_advanced_collision_avoidance.launch.py
   # then in a separate terminal:
-  colcon test --packages-select wordleBot_control --pytest-args -k tc3
+  colcon test --packages-select wordlebot_control --pytest-args -k tc3
 """
 
 import os
@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    pkg_share = get_package_share_directory("wordleBot_control")
+    pkg_share = get_package_share_directory("wordlebot_control")
     kinematics_yaml_path = os.path.join(pkg_share, "config", "kinematics.yaml")
 
     with open(kinematics_yaml_path, "r") as f:
@@ -37,8 +37,8 @@ def generate_launch_description():
 
     # WordleBot control node
     control_node = launch_ros.actions.Node(
-        package="wordleBot_control",
-        executable="wordleBot_control",
+        package="wordlebot_control",
+        executable="wordlebot_control",
         name="wordle_bot_control_node",
         output="screen",
         parameters=[kin_params],

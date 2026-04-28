@@ -14,7 +14,7 @@ def load_yaml(package_name, relative_path):
 
 
 def generate_launch_description():
-    pkg_share = get_package_share_directory("wordleBot_control")
+    pkg_share = get_package_share_directory("wordlebot_control")
     kinematics_yaml_path = os.path.join(pkg_share, "config", "kinematics.yaml")
 
     with open(kinematics_yaml_path, "r") as f:
@@ -46,9 +46,9 @@ def generate_launch_description():
         "ur_onrobot_moveit_config", "config/joint_limits.yaml"
     )
 
-    wordleBot_control = Node(
-        package="wordleBot_control",
-        executable="wordleBot_control",
+    wordlebot_control = Node(
+        package="wordlebot_control",
+        executable="wordlebot_control",
         output="screen",
         parameters=[
             kin_params,
@@ -57,4 +57,4 @@ def generate_launch_description():
         ],
     )
 
-    return LaunchDescription([wordleBot_control])
+    return LaunchDescription([wordlebot_control])
