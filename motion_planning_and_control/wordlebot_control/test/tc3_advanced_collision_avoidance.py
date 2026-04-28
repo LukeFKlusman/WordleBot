@@ -13,7 +13,7 @@ Prerequisites (must be running before colcon test):
   - Control node launched via tc3_advanced_collision_avoidance.launch.py
 
 Run with:
-  colcon test --packages-select wordleBot_control --pytest-args -k tc3
+  colcon test --packages-select wordlebot_control --pytest-args -k tc3
   colcon test-result --verbose
 """
 

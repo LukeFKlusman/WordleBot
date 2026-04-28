@@ -1,4 +1,4 @@
-# wordleBot_control
+# wordlebot_control
 
 Main control package for the WordleBot UR3e robotic arm.
 
@@ -23,7 +23,7 @@ Follow canvas steps on what packages to install
 From the workspace root:
 
 ```bash
-colcon build --packages-select wordleBot_control
+colcon build --packages-select wordlebot_control
 source install/setup.bash
 ```
 
@@ -61,7 +61,7 @@ ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
 Only ran after the previous terminals are running
 
 ```bash
-ros2 launch wordleBot_control wordle_bot_mtc.launch.py
+ros2 launch wordlebot_control wordle_bot_mtc.launch.py
 ```
 
 ### Other Terminal.
@@ -72,7 +72,7 @@ Only ran after the previous terminals are running
 
 ros2 launch ur_onrobot_hello_moveit tutorials_rviz.launch.py
 
-ros2 launch wordleBot_control wordle_bot.launch.py
+ros2 launch wordlebot_control wordle_bot.launch.py
 ```
 
 ## Manual Terminal Control
@@ -148,17 +148,17 @@ ros2 topic echo /wordle_bot/robot_state
 
 ```bash
 # All Tests 
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -s -v
 
 # Run TC1.1 in isolation: Move to 1 Goal
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
 
 # Run TC1.2 in isolation: Movge to 3 Goal
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
 
 # Run TC1.5 in isolation: Collision Avoidance
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
 
 # Run TC1.6 in isolation: Pick and Place 
-python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_6 -s -v
+python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_6 -s -v
 ```

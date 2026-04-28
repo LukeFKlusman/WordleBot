@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(wordleBot_control)
+project(wordlebot_control)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -7,6 +7,7 @@ endif()
 
 # Dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
@@ -17,6 +18,11 @@ find_package(std_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(controller_manager_msgs REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/PickPlaceTask.msg"
+  DEPENDENCIES geometry_msgs
+)
 
 set(DEPENDENCIES
   rclcpp
@@ -42,18 +48,20 @@ target_include_directories(wordle_bot_lib PUBLIC
 )
 target_compile_features(wordle_bot_lib PUBLIC cxx_std_17)
 ament_target_dependencies(wordle_bot_lib ${DEPENDENCIES})
+rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
+target_link_libraries(wordle_bot_lib "${cpp_typesupport_target}")
 
 # --- Executable ---
-add_executable(wordleBot_control main/main.cpp)
-target_include_directories(wordleBot_control PUBLIC
+add_executable(wordlebot_control main/main.cpp)
+target_include_directories(wordlebot_control PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_compile_features(wordleBot_control PUBLIC cxx_std_17)
-target_link_libraries(wordleBot_control wordle_bot_lib)
+target_compile_features(wordlebot_control PUBLIC cxx_std_17)
+target_link_libraries(wordlebot_control wordle_bot_lib)
 
 # --- Install ---
-install(TARGETS wordle_bot_lib wordleBot_control
+install(TARGETS wordle_bot_lib wordlebot_control
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/

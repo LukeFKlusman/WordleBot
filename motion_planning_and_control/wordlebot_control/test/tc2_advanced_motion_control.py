@@ -13,7 +13,7 @@ Prerequisites (must be running before colcon test):
   - Control node launched via tc2_advanced_motion_control.launch.py
 
 Run with:
-  colcon test --packages-select wordleBot_control --pytest-args -k tc2
+  colcon test --packages-select wordlebot_control --pytest-args -k tc2
   colcon test-result --verbose
 """
 

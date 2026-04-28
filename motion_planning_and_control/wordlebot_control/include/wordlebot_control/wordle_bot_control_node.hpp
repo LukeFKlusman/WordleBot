@@ -16,7 +16,8 @@
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
-#include "wordleBot_control/wordle_bot_controller.hpp"
+#include "wordlebot_control/wordle_bot_controller.hpp"
+#include "wordlebot_control/msg/pick_place_task.hpp"
 
 class WordleBotControlNode
 {
@@ -54,9 +55,15 @@ private:
   rclcpp::Subscription<moveit_msgs::msg::CollisionObject>::SharedPtr add_collision_object_sub_;
 
   // Letter object interface — triggers pick-and-place mode
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr letter_object_sub_;
-  geometry_msgs::msg::Pose letter_object_pose_;
-  bool letter_object_received_{false};
+  rclcpp::Subscription<wordlebot_control::msg::PickPlaceTask>::SharedPtr letter_object_sub_;
+
+  // One entry per queued pick-and-place task
+  struct PickPlaceEntry {
+    geometry_msgs::msg::Pose pick_pose;
+    geometry_msgs::msg::Pose place_pose;
+    moveit_msgs::msg::CollisionObject collision_object;
+  };
+  std::vector<PickPlaceEntry> pick_place_queue_;
 
   std::atomic<bool> stop_requested_{false};
   bool mission_running_{false};  // guarded by queue_mutex_
@@ -75,9 +82,8 @@ private:
   void resumeMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void abortMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
-  void letterObjectCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg);
 
-  // Mission loop and helpers (all run on mission_thread_)
+  // Mission loop (runs on mission_thread_)
   void missionLoop();
-  void doPickAndPlace();
 };

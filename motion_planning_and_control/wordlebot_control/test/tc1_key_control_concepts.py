@@ -16,19 +16,19 @@ Prerequisites (must be running before colcon test):
   - Control node launched via tc1_key_control_concepts.launch.py
 
 Run with:
-  colcon test --packages-select wordleBot_control --pytest-args -k tc1
+  colcon test --packages-select wordlebot_control --pytest-args -k tc1
   colcon test-result --verbose
 
-  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -s -v
+  python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -s -v
 
   Run TC1.1 in isolation:
-  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
+  python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_1 -s -v
 
   Run TC1.2 in isolation:
-  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
+  python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_2 -s -v
 
   Run TC1.5 in isolation:
-  python3 -m pytest src/wordleBot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
+  python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_5 -s -v
 """
 
 import math
@@ -49,6 +49,7 @@ from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformException, sleep
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
+from wordlebot_control.msg import PickPlaceTask
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +126,9 @@ class TestKeyControlConcepts(unittest.TestCase):
             CollisionObject, "/wordle_bot/add_collision_object", 10
         )
 
-        # Letter object publisher (used by TC1.6 — triggers pick-and-place mode)
+        # Letter object publisher (used by TC1.6/TC1.7 — triggers pick-and-place mode)
         cls.letter_object_pub = cls.node.create_publisher(
-            PoseStamped, "perception/letter_objects", 10
+            PickPlaceTask, "perception/letter_objects", 10
         )
 
         # TODO (TC1.3): create gripper command publisher once topic is defined
@@ -884,7 +885,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         # Object / geometry constants (must match control node header)
         # ------------------------------------------------------------------ #
         PICK_X, PICK_Y, PICK_Z = 0.30, 0.20, 0.05
-        PLACE_X, PLACE_Y, PLACE_Z = 0.00, 0.45, 0.05
+        PLACE_X, PLACE_Y, PLACE_Z = 0.00, 0.20, 0.015  # P3 centre slot
         GRASP_Z_OFFSET = 0.08       # grasp_frame_transform z in createTask
         APPROACH_MIN   = 0.10       # setMinMaxDistance lower bound
         APPROACH_MAX   = 0.15       # setMinMaxDistance upper bound
@@ -989,23 +990,25 @@ class TestKeyControlConcepts(unittest.TestCase):
         time.sleep(1.0)  # allow the recorder to initialise
 
         # ------------------------------------------------------------------ #
-        # Publish the letter object pose to perception/letter_objects
+        # Publish the letter object as PickPlaceTask (slot P3 = centre column)
         # ------------------------------------------------------------------ #
-        pick_pose = PoseStamped()
-        pick_pose.header.frame_id = 'world'
-        pick_pose.header.stamp = self.node.get_clock().now().to_msg()
-        pick_pose.pose.position.x = PICK_X
-        pick_pose.pose.position.y = PICK_Y
-        pick_pose.pose.position.z = PICK_Z  # cube centre (half of 40 mm above table at z=0)
-        pick_pose.pose.orientation.w = 1.0
+        task_msg = PickPlaceTask()
+        task_msg.pick_pose.header.frame_id = 'world'
+        task_msg.pick_pose.header.stamp = self.node.get_clock().now().to_msg()
+        task_msg.pick_pose.pose.position.x = PICK_X
+        task_msg.pick_pose.pose.position.y = PICK_Y
+        task_msg.pick_pose.pose.position.z = PICK_Z
+        task_msg.pick_pose.pose.orientation.w = 1.0
+        task_msg.place_slot = 3  # P3 — centre column (x=0.0)
 
         self.node.get_logger().info(
-            f"[TC1.6] Publishing letter object at "
-            f"(frame=world  x={PICK_X:.3f}  y={PICK_Y:.3f}  z={PICK_Z:.3f})."
+            f"[TC1.6] Publishing PickPlaceTask: "
+            f"pick=(frame=world  x={PICK_X:.3f}  y={PICK_Y:.3f}  z={PICK_Z:.3f})  "
+            f"place_slot=P3."
         )
 
         for _ in range(5):
-            self.letter_object_pub.publish(pick_pose)
+            self.letter_object_pub.publish(task_msg)
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
         # Allow the planning scene to propagate the new collision object
@@ -1121,6 +1124,146 @@ class TestKeyControlConcepts(unittest.TestCase):
             print(f"[TC1.6] Result: {'PASS' if passed else 'FAIL'}")
             print(f"[TC1.6] ================================================\n")
     
+    def test_tc1_7_multi_pick_and_place(self):
+        """
+        Validates: D (integration) — 3-task pick-and-place queue using PickPlaceTask messages.
+
+        Procedure:
+          - Publish 3 PickPlaceTask messages to perception/letter_objects.
+            Pick poses are scattered in the positive-y region; destination slots are P2, P3, P4.
+          - Wait for all 3 tasks to register in the control node (short sleep).
+          - Publish start_mission = True.
+          - Wait for 3 goal_reached signals and final mission_complete.
+
+        Pass: mission_complete received; all 3 goal_reached signals fired; EE x-position at each
+              goal_reached matches the expected slot x-value within 50 mm.
+        Fail: Timeout, missing goal_reached signals, or EE position out of tolerance.
+
+        Place slots (from PLACE_SLOTS in wordle_bot_controller.hpp):
+          P2: x=-0.075  P3: x=0.000  P4: x=+0.075  (all y=0.2, z=0.015)
+        """
+
+        TestKeyControlConcepts.mission_complete = False
+        TestKeyControlConcepts.goal_reached_count = 0
+
+        # ------------------------------------------------------------------ #
+        # Task definitions: (pick_x, pick_y, pick_z, slot, expected_place_x)
+        # ------------------------------------------------------------------ #
+        TASKS = [
+            (0.20, 0.30, 0.05, 2, -0.075),   # P2
+            (0.00, 0.25, 0.05, 3,  0.000),   # P3
+            (-0.20, 0.30, 0.05, 4,  0.075),  # P4
+        ]
+        PLACE_REACH_TOLERANCE = 0.05  # 50 mm
+
+        # ------------------------------------------------------------------ #
+        # Bag recording
+        # ------------------------------------------------------------------ #
+        bag_dir  = tempfile.mkdtemp(prefix='tc1_7_')
+        bag_path = os.path.join(bag_dir, 'tc1_7')
+        bag_proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', bag_path,
+             '/joint_states', '/tf', '/tf_static',
+             '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+        # ------------------------------------------------------------------ #
+        # Publish 3 PickPlaceTask messages with a short gap between each
+        # ------------------------------------------------------------------ #
+        self.node.get_logger().info("[TC1.7] Publishing 3 pick-and-place tasks.")
+        for pick_x, pick_y, pick_z, slot, _ in TASKS:
+            task_msg = PickPlaceTask()
+            task_msg.pick_pose.header.frame_id = 'world'
+            task_msg.pick_pose.header.stamp = self.node.get_clock().now().to_msg()
+            task_msg.pick_pose.pose.position.x = pick_x
+            task_msg.pick_pose.pose.position.y = pick_y
+            task_msg.pick_pose.pose.position.z = pick_z
+            task_msg.pick_pose.pose.orientation.w = 1.0
+            task_msg.place_slot = slot
+
+            for _ in range(3):
+                self.letter_object_pub.publish(task_msg)
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+
+            self.node.get_logger().info(
+                f"[TC1.7]   queued pick=({pick_x:.3f}, {pick_y:.3f}, {pick_z:.3f})  "
+                f"place_slot=P{slot}"
+            )
+            time.sleep(1.0)  # allow each callback to register before the next arrives
+
+        # Wait for all 3 tasks to be registered before arming
+        time.sleep(5.0)
+
+        # ------------------------------------------------------------------ #
+        # Arm the mission
+        # ------------------------------------------------------------------ #
+        start_msg = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
+        self.node.get_logger().info(
+            "[TC1.7] Mission armed — waiting for 3 pick-and-place tasks to complete."
+        )
+
+        # ------------------------------------------------------------------ #
+        # Wait for mission_complete (3× the per-task timeout)
+        # ------------------------------------------------------------------ #
+        pick_place_timeout = MOTION_TIMEOUT_S * 3 * len(TASKS)
+        deadline = time.time() + pick_place_timeout
+        passed = True
+
+        try:
+            while not TestKeyControlConcepts.mission_complete:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                self.assertLess(
+                    time.time(), deadline,
+                    f"[TC1.7] 3-task pick-and-place did not complete within "
+                    f"{pick_place_timeout:.0f} s."
+                )
+
+            self.assertTrue(
+                TestKeyControlConcepts.mission_complete,
+                "[TC1.7] mission_complete signal was not received."
+            )
+            self.assertEqual(
+                TestKeyControlConcepts.goal_reached_count, len(TASKS),
+                f"[TC1.7] Expected {len(TASKS)} goal_reached signals, "
+                f"got {TestKeyControlConcepts.goal_reached_count}."
+            )
+            self.node.get_logger().info("[TC1.7] All 3 tasks complete — PASS.")
+
+        except AssertionError:
+            passed = False
+            raise
+        finally:
+            bag_proc.terminate()
+            bag_proc.wait()
+            self.node.get_logger().info(f"[TC1.7] Bag recorded to: {bag_path}")
+
+            # Read goal_reached timestamps and check EE x-position at each
+            goal_ts_list = _read_goal_reached_timestamps(bag_path)
+            print(f"\n[TC1.7] === Multi-Pick-and-Place Diagnostic Summary ===")
+            for i, (_, _, _, slot, expected_x) in enumerate(TASKS):
+                if i < len(goal_ts_list):
+                    try:
+                        tf = _read_ee_pose_from_bag(bag_path, goal_ts_list[i])
+                        t  = tf.transform.translation
+                        x_err = abs(t.x - expected_x)
+                        ok_flag = "OK" if x_err <= PLACE_REACH_TOLERANCE else "WARNING — outside tolerance"
+                        print(
+                            f"[TC1.7] Task {i+1} (P{slot}): "
+                            f"EE x={t.x:.4f}  expected x={expected_x:.4f}  "
+                            f"err={x_err*1000:.1f} mm  [{ok_flag}]"
+                        )
+                    except Exception as exc:
+                        print(f"[TC1.7] Task {i+1} (P{slot}): EE lookup failed — {exc}")
+                else:
+                    print(f"[TC1.7] Task {i+1} (P{slot}): no goal_reached timestamp recorded")
+            print(f"[TC1.7] goal_reached count: {TestKeyControlConcepts.goal_reached_count} / {len(TASKS)}")
+            print(f"[TC1.7] Result: {'PASS' if passed else 'FAIL'}")
+            print(f"[TC1.7] ================================================\n")
+
     # -----------------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """
-Launch file for Test Case 1 — Key Control Concepts.
-Validates: P (Pass), C (Credit), D (Distinction) criteria.
+Launch file for Test Case 2 — Advanced Motion Control.
+Validates: HD (High Distinction) criteria.
 
 Assumptions:
   The following must already be running before invoking this launch file:
@@ -8,9 +8,9 @@ Assumptions:
     - MoveIt stack:     ros2 launch ur_moveit_config ur_moveit.launch.py ...
 
 Usage:
-  ros2 launch wordleBot_control tc1_key_control_concepts.launch.py
+  ros2 launch wordlebot_control tc2_advanced_motion_control.launch.py
   # then in a separate terminal:
-  colcon test --packages-select wordleBot_control --pytest-args -k tc1
+  colcon test --packages-select wordlebot_control --pytest-args -k tc2
 """
 
 import os
@@ -24,7 +24,7 @@ from ament_index_python.packages import get_package_share_directory
 
 
 def generate_launch_description():
-    pkg_share = get_package_share_directory("wordleBot_control")
+    pkg_share = get_package_share_directory("wordlebot_control")
     kinematics_yaml_path = os.path.join(pkg_share, "config", "kinematics.yaml")
 
     with open(kinematics_yaml_path, "r") as f:
@@ -37,14 +37,22 @@ def generate_launch_description():
 
     # WordleBot control node
     control_node = launch_ros.actions.Node(
-        package="wordleBot_control",
-        executable="wordleBot_control",
+        package="wordlebot_control",
+        executable="wordlebot_control",
         name="wordle_bot_control_node",
         output="screen",
         parameters=[kin_params],
     )
 
-    # TODO (TC1.3): add gripper driver / bridge node here once interface is defined
+    # TODO (TC2.1): add goal ordering / design matrix node here if it runs as a separate node
+    # design_matrix_node = launch_ros.actions.Node(
+    #     package="<design_matrix_package>",
+    #     executable="<design_matrix_executable>",
+    #     name="design_matrix_node",
+    #     output="screen",
+    # )
+
+    # TODO (TC2.3): add gripper driver / bridge node here once interface is defined
     # gripper_node = launch_ros.actions.Node(
     #     package="<gripper_package>",
     #     executable="<gripper_executable>",
@@ -52,18 +60,10 @@ def generate_launch_description():
     #     output="screen",
     # )
 
-    # TODO (TC1.4): add mission control node here once interface is defined
-    # mission_control_node = launch_ros.actions.Node(
-    #     package="<mission_control_package>",
-    #     executable="<mission_control_executable>",
-    #     name="mission_control_node",
-    #     output="screen",
-    # )
-
     return launch.LaunchDescription([
         control_node,
-        # TODO: uncomment when gripper_node and mission_control_node are implemented
+        # TODO: uncomment when design_matrix_node and gripper_node are implemented
+        # design_matrix_node,
         # gripper_node,
-        # mission_control_node,
         launch_testing.actions.ReadyToTest(),
     ])

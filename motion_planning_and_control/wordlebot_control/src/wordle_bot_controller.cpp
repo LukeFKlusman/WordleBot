@@ -1,4 +1,4 @@
-#include "wordleBot_control/wordle_bot_controller.hpp"
+#include "wordlebot_control/wordle_bot_controller.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -824,7 +824,8 @@ bool WordleBotController::moveToHome()
 // Pick-and-place: MTC task creation, planning, execution
 // ---------------------------------------------------------------------------
 
-mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose)
+mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
+                                          const geometry_msgs::msg::Pose & place_pose)
 {
   RCLCPP_DEBUG(LOGGER, "createTask: initialising MTC task.");
   mtc::Task task;
@@ -1037,11 +1038,12 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     task.properties().exposeTo(place->properties(), {"eef", "group", "ik_frame"});
     place->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
 
-    // 6a. Generate place pose + solve IK (object must reach PLACE_X/Y/Z in world)
+    // 6a. Generate place pose + solve IK (object must reach the requested slot in world)
     {
       RCLCPP_DEBUG(LOGGER, "\ncreateTask: 6a — GeneratePlacePose for '%s' "
         "target=(%.3f, %.3f, %.3f) world, IK solutions=4.",
-        LETTER_OBJECT_ID, PLACE_X, PLACE_Y, PLACE_Z);
+        LETTER_OBJECT_ID,
+        place_pose.position.x, place_pose.position.y, place_pose.position.z);
       auto stage =
         std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
@@ -1050,9 +1052,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       geometry_msgs::msg::PoseStamped target_pose;
       target_pose.header.frame_id = "world";
-      target_pose.pose.position.x = PLACE_X;
-      target_pose.pose.position.y = PLACE_Y;
-      target_pose.pose.position.z = 0.05;
+      target_pose.pose.position.x = place_pose.position.x;
+      target_pose.pose.position.y = place_pose.position.y;
+      target_pose.pose.position.z = place_pose.position.z;
       target_pose.pose.orientation.w = 1.0;
       stage->setPose(target_pose);
       stage->setMonitoredStage(attach_object_stage);
@@ -1136,19 +1138,22 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   return task;
 }
 
-bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object_pose)
+bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
+                                         const geometry_msgs::msg::Pose & place_pose)
 {
   RCLCPP_INFO(LOGGER, "doPickAndPlace: building MTC task.");
 
   RCLCPP_INFO(LOGGER,
     "doPickAndPlace: object pose = (%.4f, %.4f, %.4f)  "
-    "orient=(%.4f, %.4f, %.4f, %.4f). "
+    "orient=(%.4f, %.4f, %.4f, %.4f)  "
+    "place target = (%.4f, %.4f, %.4f). "
     "MTC planning scene frame: 'world'.",
     object_pose.position.x, object_pose.position.y, object_pose.position.z,
     object_pose.orientation.x, object_pose.orientation.y,
-    object_pose.orientation.z, object_pose.orientation.w);
+    object_pose.orientation.z, object_pose.orientation.w,
+    place_pose.position.x, place_pose.position.y, place_pose.position.z);
 
-  mtc::Task task = createTask(object_pose);
+  mtc::Task task = createTask(object_pose, place_pose);
 
   try {
     task.init();

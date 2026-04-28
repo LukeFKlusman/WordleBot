@@ -145,8 +145,8 @@ def launch_setup(context, *args, **kwargs):
     ]
 
     mtc_demo_node = Node(
-        package="wordleBot_control",
-        executable="wordleBot_control",
+        package="wordlebot_control",
+        executable="wordlebot_control",
         name="wordle_bot_control_node",
         output="screen",
         parameters=common_parameters,

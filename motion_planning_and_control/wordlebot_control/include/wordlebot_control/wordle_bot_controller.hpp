@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <optional>
@@ -88,13 +89,22 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
-  // Plan and execute a full MTC pick-and-place for the given object pose (legacy, single-shot).
-  bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose);
+  // Plan and execute a full MTC pick-and-place for the given object and place poses.
+  bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
+                      const geometry_msgs::msg::Pose & place_pose);
 
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
-  static constexpr double PLACE_X = 0.0;
-  static constexpr double PLACE_Y = 0.45;
-  static constexpr double PLACE_Z = 0.02;
+
+  // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).
+  // All slots share y=0.2 m and z=0.015 m; columns are 75 mm apart.
+  struct PlaceSlot { double x, y, z; };
+  static constexpr std::array<PlaceSlot, 5> PLACE_SLOTS = {{
+    {-0.150, 0.2, 0.015},
+    {-0.075, 0.2, 0.015},
+    { 0.000, 0.2, 0.015},
+    { 0.075, 0.2, 0.015},
+    { 0.150, 0.2, 0.015},
+  }};
 
 private:
   std::vector<double> computeBestIK(const moveit::core::RobotStatePtr & current_state,
@@ -109,8 +119,9 @@ private:
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
                      const std::string & title);
 
-  // Original monolithic task (used by legacy doPickAndPlace).
-  moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose);
+  // Monolithic MTC task used by doPickAndPlace.
+  moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose,
+                                            const geometry_msgs::msg::Pose & place_pose);
 
   // Phase-split task builders for stop/resume-aware pick-and-place.
   moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);
