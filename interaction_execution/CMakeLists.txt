@@ -90,6 +90,11 @@ install(DIRECTORY src/wordle-clone
 )
 
 install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/../voice_control/gui_bridge.py
+  DESTINATION share/${PROJECT_NAME}/voice_control
+)
+
+install(FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/../gamification/dictionary.txt
   DESTINATION share/${PROJECT_NAME}/gamification
 )

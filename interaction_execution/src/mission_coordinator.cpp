@@ -92,7 +92,7 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
     std::chrono::milliseconds(500),
     std::bind(&MissionCoordinator::handleHeartbeat, this));
 
-  publishPerceptionState("IDLE");
+  publishPerceptionStateForMission(state_);
   publishMissionState();
   publishMissionProgress();
 
@@ -160,7 +160,6 @@ void MissionCoordinator::handlePerceptionDetections(const std_msgs::msg::String:
     return;
   }
 
-  publishPerceptionState("IDLE");
   transitionTo(MissionState::READY_TO_MOVE, "Perception returned enough detections");
 
   if (shouldAutoDispatch()) {
@@ -208,7 +207,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickSafetyGuard()
   }
 
   pending_command_.clear();
-  publishPerceptionState("IDLE");
   awaiting_motion_completion_ = false;
   pending_goal_request_ = GoalRequest::NONE;
   transitionTo(MissionState::STOPPED, "Human detected by perception");
@@ -231,7 +229,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
     last_completed_goal_request_ = GoalRequest::NONE;
-    publishPerceptionState("SCANNING");
     transitionTo(MissionState::SCANNING, "Operator requested START");
     return NodeStatus::SUCCESS;
   }
@@ -240,7 +237,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
-    publishPerceptionState("IDLE");
     transitionTo(MissionState::STOPPED, "Operator requested STOP");
     return NodeStatus::SUCCESS;
   }
@@ -251,12 +247,10 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     last_completed_goal_request_ = GoalRequest::NONE;
     if (hasEnoughDetections()) {
       pending_goal_request_ = GoalRequest::TASK_GOAL;
-      publishPerceptionState("IDLE");
       transitionTo(MissionState::READY_TO_MOVE, "Operator resumed with detections already available");
     } else {
       motion_goal_sent_ = false;
       pending_goal_request_ = GoalRequest::NONE;
-      publishPerceptionState("SCANNING");
       transitionTo(MissionState::SCANNING, "Operator requested RESUME");
     }
     return NodeStatus::SUCCESS;
@@ -266,7 +260,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::HOME_GOAL;
     last_completed_goal_request_ = GoalRequest::NONE;
-    publishPerceptionState("IDLE");
     transitionTo(MissionState::HOMING, "Operator requested HOME");
     return NodeStatus::SUCCESS;
   }
@@ -290,7 +283,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickMotionBranch()
     pending_goal_request_ = GoalRequest::NONE;
     last_completed_goal_request_ = last_dispatched_goal_request_;
     last_dispatched_goal_request_ = GoalRequest::NONE;
-    publishPerceptionState("IDLE");
     transitionTo(MissionState::IDLE, "Motion execution completed");
     return NodeStatus::SUCCESS;
   }
@@ -319,7 +311,6 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickScanBranch()
   }
 
   pending_goal_request_ = GoalRequest::TASK_GOAL;
-  publishPerceptionState("IDLE");
   transitionTo(MissionState::READY_TO_MOVE, "Perception returned enough detections");
   return NodeStatus::SUCCESS;
 }
@@ -344,6 +335,7 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
       "Mission state remains %s (%s)",
       toString(new_state).c_str(),
       reason.c_str());
+    publishPerceptionStateForMission(state_);
     publishMissionState();
     return;
   }
@@ -355,8 +347,26 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
     toString(new_state).c_str(),
     reason.c_str());
   state_ = new_state;
+  publishPerceptionStateForMission(state_);
   publishMissionState();
   publishMissionProgress();
+}
+
+void MissionCoordinator::publishPerceptionStateForMission(MissionState state)
+{
+  switch (state) {
+    case MissionState::SCANNING:
+    case MissionState::READY_TO_MOVE:
+    case MissionState::MOVING:
+    case MissionState::HOMING:
+      publishPerceptionState("SCANNING");
+      return;
+    case MissionState::IDLE:
+    case MissionState::STOPPED:
+    case MissionState::ERROR:
+      publishPerceptionState("IDLE");
+      return;
+  }
 }
 
 void MissionCoordinator::publishPerceptionState(const std::string & state)
@@ -410,14 +420,15 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
     "Scan puzzle and detect blocks",
     state_ == MissionState::SCANNING ?
       (detections_detail + " Waiting for enough detections to continue.") :
-      (state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ?
-        (detections_detail + " Scan complete; motion target is available.") :
+      (state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ||
+      state_ == MissionState::HOMING ?
+        (detections_detail + " Continuous scanning remains active while the robot executes.") :
         (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
-          "Previous scan completed and the last task motion finished successfully." :
+          "Previous task motion finished successfully. Perception is now idle until the next command." :
           "Perception is idle until the operator starts or resumes the mission.")),
-    state_ == MissionState::SCANNING ? "active" :
-      ((state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ||
-      last_completed_goal_request_ == GoalRequest::TASK_GOAL) ? "done" :
+    (state_ == MissionState::SCANNING || state_ == MissionState::READY_TO_MOVE ||
+    state_ == MissionState::MOVING || state_ == MissionState::HOMING) ? "active" :
+      (last_completed_goal_request_ == GoalRequest::TASK_GOAL ? "done" :
       (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
 
   steps.push_back({
@@ -450,7 +461,7 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
     "home",
     "Return to safe home pose",
     state_ == MissionState::HOMING ?
-      "Home motion is running. Scanning stays idle until the robot reaches home." :
+      "Home motion is running. Perception continues scanning until the robot reaches home." :
       (last_completed_goal_request_ == GoalRequest::HOME_GOAL ?
         "Home motion completed. The system is back in IDLE and ready for the next command." :
         "Robot moves to a safe home pose upon full task completion or explicit HOME request."),

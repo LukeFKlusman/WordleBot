@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <QFile>
+#include <QFileInfo>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QEvent>
@@ -24,8 +25,8 @@
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPixmap>
+#include <QProcess>
 #include <QPushButton>
-#include <QRandomGenerator>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QStyle>
@@ -134,13 +135,27 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
   setupTabs();
   setupGamificationBridge();
   setupVoiceControls();
+  setupVoiceHelper();
   setupSafetyControls();
   reserveSidebarWidth();
   setupDiagnosticsWindow();
   setupMissionOverlay();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow()
+{
+  sendVoiceHelperShutdown();
+
+  if (voice_helper_process_ != nullptr) {
+    if (voice_helper_process_->state() != QProcess::NotRunning) {
+      voice_helper_process_->terminate();
+      if (!voice_helper_process_->waitForFinished(1000)) {
+        voice_helper_process_->kill();
+        voice_helper_process_->waitForFinished(1000);
+      }
+    }
+  }
+}
 
 void MainWindow::loadWordleDictionary()
 {
@@ -182,21 +197,12 @@ void MainWindow::loadWordleDictionary()
   loaded_words.removeDuplicates();
   loaded_words.sort();
   wordle_dictionary_ = loaded_words;
+  wordle_dictionary_path_ = dictionary_path;
 
   RCLCPP_INFO(
     node_->get_logger(),
     "Loaded %zu Wordle dictionary entries for GUI preview guesses.",
     static_cast<std::size_t>(wordle_dictionary_.size()));
-}
-
-QString MainWindow::randomWordleWord() const
-{
-  if (wordle_dictionary_.isEmpty()) {
-    return QStringLiteral("crane");
-  }
-
-  const int index = QRandomGenerator::global()->bounded(wordle_dictionary_.size());
-  return wordle_dictionary_.at(index);
 }
 
 bool MainWindow::eventFilter(QObject * watched, QEvent * event)
@@ -465,20 +471,28 @@ void MainWindow::setupVoiceControls()
   ui_->voiceRetryButton->setIconSize(QSize(18, 18));
 
   connect(ui_->voiceRecordButton, &QPushButton::clicked, this, [this]() {
+    if (!voice_helper_available_ || voice_helper_process_ == nullptr) {
+      return;
+    }
+
+    wordle_view_->clearPreviewGuess();
+    pending_voice_guess_.clear();
     voice_recording_ = true;
-    ui_->voiceTranscriptValue->setText(tr("Listening..."));
+    voice_transcribing_ = false;
+    setVoicePreviewText(tr("Listening..."));
+    sendVoiceHelperCommand(QStringLiteral("start_recording"));
     updateVoiceControlsState();
   });
 
   connect(ui_->voiceStopButton, &QPushButton::clicked, this, [this]() {
-    if (!voice_recording_) {
+    if (!voice_recording_ || voice_helper_process_ == nullptr) {
       return;
     }
 
     voice_recording_ = false;
-    pending_voice_guess_ = this->randomWordleWord();
-    wordle_view_->previewGuess(pending_voice_guess_);
-    ui_->voiceTranscriptValue->setText(tr("Preview ready"));
+    voice_transcribing_ = true;
+    setVoicePreviewText(tr("Transcribing..."));
+    sendVoiceHelperCommand(QStringLiteral("stop_recording"));
     updateVoiceControlsState();
   });
 
@@ -488,23 +502,259 @@ void MainWindow::setupVoiceControls()
     }
 
     wordle_view_->submitPreviewGuess();
+    setVoicePreviewText(tr("Confirmed: %1").arg(pending_voice_guess_.toUpper()));
     pending_voice_guess_.clear();
-    ui_->voiceTranscriptValue->setText(tr("Guess submitted"));
     updateVoiceControlsState();
   });
 
   connect(ui_->voiceRetryButton, &QPushButton::clicked, this, [this]() {
-    if (pending_voice_guess_.isEmpty()) {
-      return;
+    if (voice_recording_ || voice_transcribing_) {
+      sendVoiceHelperCommand(QStringLiteral("cancel_recording"));
     }
 
+    voice_recording_ = false;
+    voice_transcribing_ = false;
     wordle_view_->clearPreviewGuess();
     pending_voice_guess_.clear();
-    ui_->voiceTranscriptValue->setText(tr("Awaiting input..."));
+    resetVoicePreview();
     updateVoiceControlsState();
   });
 
+  resetVoicePreview();
   updateVoiceControlsState();
+}
+
+void MainWindow::setupVoiceHelper()
+{
+  QString package_share_dir;
+  try {
+    package_share_dir = QString::fromStdString(
+      ament_index_cpp::get_package_share_directory("interaction_execution"));
+  } catch (const std::exception & ex) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "Failed to locate interaction_execution share directory for voice helper lookup: %s",
+      ex.what());
+    setVoicePreviewText(tr("Voice helper unavailable"));
+    updateVoiceControlsState();
+    return;
+  }
+
+  const QString helper_path = package_share_dir + "/voice_control/gui_bridge.py";
+  if (!QFileInfo::exists(helper_path)) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "Voice helper script not found at %s",
+      helper_path.toStdString().c_str());
+    setVoicePreviewText(tr("Voice helper unavailable"));
+    updateVoiceControlsState();
+    return;
+  }
+
+  voice_helper_process_ = new QProcess(this);
+  voice_helper_process_->setProgram(QStringLiteral("/bin/python3"));
+  voice_helper_process_->setArguments({
+    helper_path,
+    QStringLiteral("--dictionary"),
+    wordle_dictionary_path_
+  });
+
+  connect(
+    voice_helper_process_, &QProcess::readyReadStandardOutput, this,
+    &MainWindow::handleVoiceHelperStdout);
+  connect(
+    voice_helper_process_, &QProcess::readyReadStandardError, this,
+    &MainWindow::handleVoiceHelperStderr);
+  connect(
+    voice_helper_process_,
+    qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+    this,
+    [this](int exit_code, QProcess::ExitStatus exit_status) {
+      voice_recording_ = false;
+      voice_transcribing_ = false;
+      voice_helper_available_ = false;
+      updateVoiceControlsState();
+
+      if (exit_status == QProcess::CrashExit) {
+        setVoicePreviewText(tr("Voice helper crashed"));
+        RCLCPP_ERROR(node_->get_logger(), "Voice helper crashed.");
+        return;
+      }
+
+      if (exit_code != 0) {
+        setVoicePreviewText(tr("Voice helper stopped"));
+        RCLCPP_ERROR(
+          node_->get_logger(),
+          "Voice helper exited with code %d.",
+          exit_code);
+      }
+    });
+  connect(
+    voice_helper_process_,
+    &QProcess::errorOccurred,
+    this,
+    [this](QProcess::ProcessError error) {
+      voice_recording_ = false;
+      voice_transcribing_ = false;
+      voice_helper_available_ = false;
+      updateVoiceControlsState();
+      setVoicePreviewText(tr("Voice helper unavailable"));
+      RCLCPP_ERROR(
+        node_->get_logger(),
+        "Voice helper process error: %d",
+        static_cast<int>(error));
+    });
+
+  voice_helper_process_->start();
+  if (!voice_helper_process_->waitForStarted(1500)) {
+    setVoicePreviewText(tr("Voice helper unavailable"));
+    updateVoiceControlsState();
+    RCLCPP_ERROR(node_->get_logger(), "Failed to start voice helper.");
+    return;
+  }
+
+  voice_helper_available_ = true;
+  resetVoicePreview();
+  updateVoiceControlsState();
+}
+
+void MainWindow::handleVoiceHelperStdout()
+{
+  if (voice_helper_process_ == nullptr) {
+    return;
+  }
+
+  voice_helper_stdout_buffer_ += QString::fromUtf8(voice_helper_process_->readAllStandardOutput());
+
+  int newline_index = voice_helper_stdout_buffer_.indexOf('\n');
+  while (newline_index >= 0) {
+    const QString line = voice_helper_stdout_buffer_.left(newline_index).trimmed();
+    voice_helper_stdout_buffer_.remove(0, newline_index + 1);
+    if (!line.isEmpty()) {
+      handleVoiceHelperMessage(line);
+    }
+    newline_index = voice_helper_stdout_buffer_.indexOf('\n');
+  }
+}
+
+void MainWindow::handleVoiceHelperStderr()
+{
+  if (voice_helper_process_ == nullptr) {
+    return;
+  }
+
+  const QString stderr_output = QString::fromUtf8(voice_helper_process_->readAllStandardError());
+  for (const QString & line : stderr_output.split('\n', Qt::SkipEmptyParts)) {
+    RCLCPP_WARN(node_->get_logger(), "Voice helper: %s", line.trimmed().toStdString().c_str());
+  }
+}
+
+void MainWindow::handleVoiceHelperMessage(const QString & payload)
+{
+  const QJsonDocument document = QJsonDocument::fromJson(payload.toUtf8());
+  if (!document.isObject()) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "Ignoring non-JSON voice helper payload: %s",
+      payload.toStdString().c_str());
+    return;
+  }
+
+  const QJsonObject object = document.object();
+  const QString event = object.value("event").toString();
+
+  if (event == "ready") {
+    voice_helper_available_ = true;
+    resetVoicePreview();
+    updateVoiceControlsState();
+    return;
+  }
+
+  if (event == "recording_started") {
+    voice_recording_ = true;
+    voice_transcribing_ = false;
+    setVoicePreviewText(tr("Listening..."));
+    updateVoiceControlsState();
+    return;
+  }
+
+  if (event == "recording_cancelled") {
+    voice_recording_ = false;
+    voice_transcribing_ = false;
+    pending_voice_guess_.clear();
+    wordle_view_->clearPreviewGuess();
+    resetVoicePreview();
+    updateVoiceControlsState();
+    return;
+  }
+
+  if (event == "recording_result") {
+    voice_recording_ = false;
+    voice_transcribing_ = false;
+
+    const QString transcript = object.value("transcript").toString().trimmed();
+    const QString guessed_word = object.value("guess").toString().trimmed().toUpper();
+
+    pending_voice_guess_.clear();
+    wordle_view_->clearPreviewGuess();
+
+    if (!guessed_word.isEmpty()) {
+      pending_voice_guess_ = guessed_word;
+      wordle_view_->previewGuess(guessed_word);
+      setVoicePreviewText(tr("Heard: %1").arg(guessed_word));
+    } else if (!transcript.isEmpty()) {
+      setVoicePreviewText(tr("Heard: %1").arg(transcript));
+    } else {
+      setVoicePreviewText(tr("No speech recognised"));
+    }
+
+    updateVoiceControlsState();
+    return;
+  }
+
+  if (event == "error") {
+    voice_recording_ = false;
+    voice_transcribing_ = false;
+    pending_voice_guess_.clear();
+    wordle_view_->clearPreviewGuess();
+
+    const QString message = object.value("message").toString().trimmed();
+    setVoicePreviewText(message.isEmpty() ? tr("Voice input failed") : message);
+    updateVoiceControlsState();
+  }
+}
+
+void MainWindow::sendVoiceHelperCommand(const QString & command)
+{
+  if (voice_helper_process_ == nullptr || voice_helper_process_->state() != QProcess::Running) {
+    return;
+  }
+
+  QJsonObject payload;
+  payload.insert(QStringLiteral("command"), command);
+  voice_helper_process_->write(QJsonDocument(payload).toJson(QJsonDocument::Compact));
+  voice_helper_process_->write("\n");
+}
+
+void MainWindow::sendVoiceHelperShutdown()
+{
+  if (voice_helper_process_ == nullptr || voice_helper_process_->state() != QProcess::Running) {
+    return;
+  }
+
+  sendVoiceHelperCommand(QStringLiteral("shutdown"));
+  voice_helper_process_->waitForBytesWritten(250);
+}
+
+void MainWindow::setVoicePreviewText(const QString & text)
+{
+  voice_preview_text_ = text;
+  ui_->voiceTranscriptValue->setText(voice_preview_text_);
+}
+
+void MainWindow::resetVoicePreview(const QString & text)
+{
+  setVoicePreviewText(text);
 }
 
 void MainWindow::setupGamificationBridge()
@@ -530,7 +780,6 @@ void MainWindow::setupGamificationBridge()
       }
 
       wordle_view_->setActiveGuess(guess);
-      ui_->voiceTranscriptValue->setText(tr("Robot guess: %1").arg(guess));
       current_wordle_guess_ = guess;
       appendDiagnosticsEvent(tr("Robot guess updated to %1").arg(guess));
       refreshDiagnosticsPanel();
@@ -550,7 +799,6 @@ void MainWindow::setupGamificationBridge()
 
       const QJsonDocument document = QJsonDocument::fromJson(payload.toUtf8());
       if (!document.isObject()) {
-        ui_->voiceTranscriptValue->setText(tr("Diagnostics unavailable"));
         diagnostics_game_json_view_->setPlainText(payload);
         return;
       }
@@ -572,7 +820,6 @@ void MainWindow::setupGamificationBridge()
         summary += tr(" | Guess %1").arg(guess);
       }
 
-      ui_->voiceTranscriptValue->setText(summary);
       appendDiagnosticsEvent(
         tr("Wordle diagnostics: %1 | Attempt %2").arg(status).arg(attempt > 0 ? attempt : 0));
       refreshDiagnosticsPanel();
@@ -581,10 +828,20 @@ void MainWindow::setupGamificationBridge()
 
 void MainWindow::updateVoiceControlsState()
 {
-  ui_->voiceRecordButton->setEnabled(false);
-  ui_->voiceStopButton->setEnabled(false);
-  ui_->voiceConfirmButton->setEnabled(false);
-  ui_->voiceRetryButton->setEnabled(false);
+  const bool can_record = voice_helper_available_ && !voice_recording_ && !voice_transcribing_;
+  const bool can_stop = voice_helper_available_ && voice_recording_;
+  const bool can_confirm =
+    voice_helper_available_ && !voice_recording_ && !voice_transcribing_ &&
+    !pending_voice_guess_.isEmpty();
+  const bool can_retry =
+    voice_helper_available_ &&
+    (voice_recording_ || voice_transcribing_ || !pending_voice_guess_.isEmpty() ||
+    voice_preview_text_ != QStringLiteral("Awaiting input..."));
+
+  ui_->voiceRecordButton->setEnabled(can_record);
+  ui_->voiceStopButton->setEnabled(can_stop);
+  ui_->voiceConfirmButton->setEnabled(can_confirm);
+  ui_->voiceRetryButton->setEnabled(can_retry);
 }
 
 void MainWindow::setupSafetyControls()
@@ -768,7 +1025,7 @@ void MainWindow::setupSafetyControls()
       return;
     }
 
-    publishMissionState("IDLE");
+    publishMissionState("SCANNING");
     publishMissionCommand("HOME");
     coordinator_mission_state_ = "HOMING";
     safety_mode_ = SafetyControlMode::Homing;
@@ -868,7 +1125,6 @@ void MainWindow::publishGamificationFeedback(const QString & feedback)
   std_msgs::msg::String msg;
   msg.data = feedback.trimmed().toUpper().toStdString();
   gamification_feedback_pub_->publish(msg);
-  ui_->voiceTranscriptValue->setText(tr("Feedback sent: %1").arg(feedback.trimmed().toUpper()));
   RCLCPP_INFO(
     node_->get_logger(),
     "Published %s='%s'.",

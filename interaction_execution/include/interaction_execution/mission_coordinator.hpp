@@ -63,6 +63,7 @@ private:
   NodeStatus tickScanBranch();
   std::string normaliseCommand(const std::string & command) const;
   void transitionTo(MissionState new_state, const std::string & reason);
+  void publishPerceptionStateForMission(MissionState state);
   std::vector<MissionStepView> buildMissionSteps() const;
   std::string buildMissionProgressJson() const;
   void publishPerceptionState(const std::string & state);
