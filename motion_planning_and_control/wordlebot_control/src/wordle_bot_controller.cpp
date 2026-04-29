@@ -825,7 +825,8 @@ bool WordleBotController::moveToHome()
 // ---------------------------------------------------------------------------
 
 mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
-                                          const geometry_msgs::msg::Pose & place_pose)
+                                          const geometry_msgs::msg::Pose & place_pose,
+                                          const std::string & object_id)
 {
   RCLCPP_DEBUG(LOGGER, "createTask: initialising MTC task.");
   mtc::Task task;
@@ -922,13 +923,13 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4b — GenerateGraspPose for object '%s' "
         "(angle_delta=π/12, IK solutions=8, z_offset=0.08 m).",
-        LETTER_OBJECT_ID);
+        object_id.c_str());
       auto stage =
         std::make_unique<mtc::stages::GenerateGraspPose>("generate grasp pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
       stage->properties().set("marker_ns", "grasp_pose");
       stage->setPreGraspPose("open");
-      stage->setObject(LETTER_OBJECT_ID);
+      stage->setObject(object_id);
       stage->setAngleDelta(M_PI / 12);
       stage->setMonitoredStage(current_state_ptr);
 
@@ -965,10 +966,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 4c. Allow collisions between gripper links and the object
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4c — ModifyPlanningScene allow collision "
-        "('%s', hand links).", LETTER_OBJECT_ID);
+        "('%s', hand links).", object_id.c_str());
       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
         "allow collision (hand,object)");
-      stage->allowCollisions( LETTER_OBJECT_ID,
+      stage->allowCollisions( object_id,
                               task.getRobotModel()
                                 ->getJointModelGroup(hand_group)
                                 ->getLinkModelNamesWithCollisionGeometry(),
@@ -988,10 +989,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 4e. Attach object to the gripper link — GeneratePlacePose monitors this stage
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4e — ModifyPlanningScene attach '%s' to '%s'.",
-        LETTER_OBJECT_ID, hand_frame.c_str());
+        object_id.c_str(), hand_frame.c_str());
       auto stage =
         std::make_unique<mtc::stages::ModifyPlanningScene>("attach object");
-      stage->attachObject(LETTER_OBJECT_ID, hand_frame);
+      stage->attachObject(object_id, hand_frame);
       attach_object_stage = stage.get();
       grasp->insert(std::move(stage));
     }
@@ -1042,13 +1043,13 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     {
       RCLCPP_DEBUG(LOGGER, "\ncreateTask: 6a — GeneratePlacePose for '%s' "
         "target=(%.3f, %.3f, %.3f) world, IK solutions=4.",
-        LETTER_OBJECT_ID,
+        object_id.c_str(),
         place_pose.position.x, place_pose.position.y, place_pose.position.z);
       auto stage =
         std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
       stage->properties().set("marker_ns", "place_pose");
-      stage->setObject(LETTER_OBJECT_ID);
+      stage->setObject(object_id);
 
       geometry_msgs::msg::PoseStamped target_pose;
       target_pose.header.frame_id = "world";
@@ -1063,7 +1064,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
       wrapper->setMaxIKSolutions(4);
       wrapper->setMinSolutionDistance(1.0);
-      wrapper->setIKFrame(LETTER_OBJECT_ID);
+      wrapper->setIKFrame(object_id);
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
       place->insert(std::move(wrapper));
@@ -1081,11 +1082,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 6c. Restore collision checking between gripper and object
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 6c — ModifyPlanningScene forbid collision "
-        "('%s', hand links).", LETTER_OBJECT_ID);
+        "('%s', hand links).", object_id.c_str());
       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
         "forbid collision (hand,object)");
       stage->allowCollisions(
-        LETTER_OBJECT_ID,
+        object_id,
         task.getRobotModel()
           ->getJointModelGroup(hand_group)
           ->getLinkModelNamesWithCollisionGeometry(),
@@ -1096,10 +1097,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 6d. Detach object from gripper
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 6d — ModifyPlanningScene detach '%s' from '%s'.",
-        LETTER_OBJECT_ID, hand_frame.c_str());
+        object_id.c_str(), hand_frame.c_str());
       auto stage =
         std::make_unique<mtc::stages::ModifyPlanningScene>("detach object");
-      stage->detachObject(LETTER_OBJECT_ID, hand_frame);
+      stage->detachObject(object_id, hand_frame);
       place->insert(std::move(stage));
     }
 
@@ -1139,9 +1140,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 }
 
 bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
-                                         const geometry_msgs::msg::Pose & place_pose)
+                                         const geometry_msgs::msg::Pose & place_pose,
+                                         const std::string & object_id)
 {
-  RCLCPP_INFO(LOGGER, "doPickAndPlace: building MTC task.");
+  RCLCPP_INFO(LOGGER, "doPickAndPlace: building MTC task for object '%s'.", object_id.c_str());
 
   RCLCPP_INFO(LOGGER,
     "doPickAndPlace: object pose = (%.4f, %.4f, %.4f)  "
@@ -1153,7 +1155,7 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
     object_pose.orientation.z, object_pose.orientation.w,
     place_pose.position.x, place_pose.position.y, place_pose.position.z);
 
-  mtc::Task task = createTask(object_pose, place_pose);
+  mtc::Task task = createTask(object_pose, place_pose, object_id);
 
   try {
     task.init();
@@ -1202,6 +1204,8 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
 // Phase-split MTC tasks for stop/resume-aware pick-and-place
 // ---------------------------------------------------------------------------
 
+
+// Pick task and place task are not used, will be implemented later
 mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & object_pose)
 {
   // object_pose is available for future logging or geometric pre-checks;

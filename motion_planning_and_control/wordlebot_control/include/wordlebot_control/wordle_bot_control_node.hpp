@@ -62,8 +62,11 @@ private:
     geometry_msgs::msg::Pose pick_pose;
     geometry_msgs::msg::Pose place_pose;
     moveit_msgs::msg::CollisionObject collision_object;
+    std::string object_id;
   };
   std::vector<PickPlaceEntry> pick_place_queue_;
+
+  int letter_object_counter_{0};
 
   std::atomic<bool> stop_requested_{false};
   bool mission_running_{false};  // guarded by queue_mutex_

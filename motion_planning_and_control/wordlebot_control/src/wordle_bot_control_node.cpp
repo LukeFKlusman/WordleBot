@@ -66,6 +66,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "perception/letter_objects", 10,
     std::bind(&WordleBotControlNode::letterObjectCallback, this, std::placeholders::_1));
 
+  letter_object_counter_ = 0;
+
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
 
   rclcpp::on_shutdown([this]() { cv_.notify_all(); });
@@ -210,8 +212,10 @@ void WordleBotControlNode::letterObjectCallback(
   place_pose.orientation.w = 1.0;
 
   // Build 40 mm cube collision object at the pick pose
+  const std::string object_id = "letter_" + std::to_string(++letter_object_counter_);
+
   moveit_msgs::msg::CollisionObject co;
-  co.id = WordleBotController::LETTER_OBJECT_ID;
+  co.id = object_id;
   co.header.frame_id = incoming_frame;
   co.header.stamp = node_->get_clock()->now();
   co.operation = moveit_msgs::msg::CollisionObject::ADD;
@@ -226,6 +230,7 @@ void WordleBotControlNode::letterObjectCallback(
   entry.pick_pose = msg->pick_pose.pose;
   entry.place_pose = place_pose;
   entry.collision_object = co;
+  entry.object_id = object_id;
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -233,9 +238,9 @@ void WordleBotControlNode::letterObjectCallback(
   }
 
   RCLCPP_INFO(LOGGER,
-    "letterObjectCallback: task queued (pick-and-place queue size=%zu). "
+    "letterObjectCallback: task queued as '%s' (pick-and-place queue size=%zu). "
     "Waiting for start_mission.",
-    pick_place_queue_.size());
+    object_id.c_str(), pick_place_queue_.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +302,7 @@ void WordleBotControlNode::missionLoop()
         controller_->addCollisionObject(current_tasks[i].collision_object);
 
         const bool ok = controller_->doPickAndPlace(
-          current_tasks[i].pick_pose, current_tasks[i].place_pose);
+          current_tasks[i].pick_pose, current_tasks[i].place_pose, current_tasks[i].object_id);
 
         if (!ok || stop_requested_.load()) {
           RCLCPP_ERROR(LOGGER, "Pick-and-place task %zu failed or was stopped.", i + 1);

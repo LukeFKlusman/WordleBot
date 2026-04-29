@@ -91,7 +91,8 @@ public:
 
   // Plan and execute a full MTC pick-and-place for the given object and place poses.
   bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
-                      const geometry_msgs::msg::Pose & place_pose);
+                      const geometry_msgs::msg::Pose & place_pose,
+                      const std::string & object_id);
 
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
@@ -121,7 +122,8 @@ private:
 
   // Monolithic MTC task used by doPickAndPlace.
   moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose,
-                                            const geometry_msgs::msg::Pose & place_pose);
+                                            const geometry_msgs::msg::Pose & place_pose,
+                                            const std::string & object_id);
 
   // Phase-split task builders for stop/resume-aware pick-and-place.
   moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);
