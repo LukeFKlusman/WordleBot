@@ -51,6 +51,7 @@ private:
 
   bool eventFilter(QObject * watched, QEvent * event) override;
   void setupTabs();
+  void setupVisualDesign();
   void setupDiagnosticsWindow();
   void setupVoiceControls();
   void setupSafetyControls();

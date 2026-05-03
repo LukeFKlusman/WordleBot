@@ -131,6 +131,7 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
 : QMainWindow(parent), ui_(std::make_unique<Ui::MainWindow>()), node_(std::move(node))
 {
   ui_->setupUi(this);
+  setupVisualDesign();
   loadWordleDictionary();
   setupTabs();
   setupGamificationBridge();
@@ -333,6 +334,193 @@ void MainWindow::setupTabs()
   connect(ui_->mainTab, &QTabWidget::currentChanged, this, &MainWindow::handleMainTabChanged);
 }
 
+void MainWindow::setupVisualDesign()
+{
+  setStyleSheet(
+    "QMainWindow {"
+    "  background-color: #0b0f14;"
+    "  color: #e6edf3;"
+    "}");
+
+  ui_->centralwidget->setStyleSheet(
+    "QWidget#centralwidget {"
+    "  background-color: #0b0f14;"
+    "}");
+
+  ui_->mainTab->setStyleSheet(
+    "QTabWidget {"
+    "  background-color: #111820;"
+    "}"
+    "QTabWidget::pane {"
+    "  background-color: #0f151c;"
+    "  border: none;"
+    "  border-top: 1px solid rgba(139, 148, 158, 0.18);"
+    "  margin: 0px;"
+    "  padding: 0px;"
+    "}"
+    "QWidget#tab,"
+    "QWidget#tab_2,"
+    "QWidget#tab_3 {"
+    "  background-color: #0f151c;"
+    "}"
+    "QTabWidget::tab-bar {"
+    "  alignment: left;"
+    "}"
+    "QTabBar {"
+    "  background-color: #111820;"
+    "}"
+    "QTabBar::tab {"
+    "  background-color: transparent;"
+    "  color: #8b949e;"
+    "  padding: 11px 22px;"
+    "  font-size: 9pt;"
+    "  font-weight: 700;"
+    "  border: none;"
+    "  border-bottom: 3px solid transparent;"
+    "  min-width: 92px;"
+    "}"
+    "QTabBar::tab:selected {"
+    "  color: #f0f6fc;"
+    "  border-bottom-color: #f2cc60;"
+    "  background-color: #161f29;"
+    "}"
+    "QTabBar::tab:hover:!selected {"
+    "  color: #c9d1d9;"
+    "  background-color: rgba(240, 246, 252, 0.05);"
+    "}");
+
+  ui_->wordle->setStyleSheet(
+    "QWidget#wordle {"
+    "  background-color: #0d1218;"
+    "  border-left: 1px solid rgba(139, 148, 158, 0.16);"
+    "}");
+
+  ui_->voiceControls->setStyleSheet(
+    "QWidget#voiceControls {"
+    "  background-color: #111820;"
+    "  border-top: 1px solid rgba(139, 148, 158, 0.18);"
+    "  border-left: 1px solid rgba(139, 148, 158, 0.16);"
+    "}"
+    "QLabel#voiceLabel {"
+    "  color: #79c0ff;"
+    "  font-size: 8pt;"
+    "  font-weight: 800;"
+    "  letter-spacing: 1.5px;"
+    "  background: transparent;"
+    "}"
+    "QFrame#voiceTranscriptFrame {"
+    "  background-color: #0b0f14;"
+    "  border: 1px solid rgba(121, 192, 255, 0.22);"
+    "  border-radius: 8px;"
+    "}"
+    "QLabel#voiceTranscriptValue {"
+    "  color: #f0f6fc;"
+    "  font-size: 14pt;"
+    "  font-weight: 800;"
+    "  background: transparent;"
+    "}"
+    "QPushButton#voiceRecordButton,"
+    "QPushButton#voiceStopButton,"
+    "QPushButton#voiceConfirmButton,"
+    "QPushButton#voiceRetryButton {"
+    "  border-radius: 6px;"
+    "  font-size: 9pt;"
+    "  font-weight: 800;"
+    "  padding: 8px 0px;"
+    "}"
+    "QPushButton#voiceRecordButton {"
+    "  background-color: #1f6feb;"
+    "  color: #ffffff;"
+    "  border: 1px solid rgba(121, 192, 255, 0.35);"
+    "}"
+    "QPushButton#voiceRecordButton:hover {"
+    "  background-color: #2f81f7;"
+    "}"
+    "QPushButton#voiceStopButton {"
+    "  background-color: #21262d;"
+    "  color: #f0f6fc;"
+    "  border: 1px solid rgba(240, 246, 252, 0.14);"
+    "}"
+    "QPushButton#voiceStopButton:hover {"
+    "  background-color: #30363d;"
+    "}"
+    "QPushButton#voiceConfirmButton {"
+    "  background-color: #238636;"
+    "  color: #ffffff;"
+    "  border: 1px solid rgba(86, 211, 100, 0.28);"
+    "}"
+    "QPushButton#voiceConfirmButton:hover {"
+    "  background-color: #2ea043;"
+    "}"
+    "QPushButton#voiceRetryButton {"
+    "  background-color: #21262d;"
+    "  color: #c9d1d9;"
+    "  border: 1px solid rgba(240, 246, 252, 0.12);"
+    "}"
+    "QPushButton#voiceRetryButton:hover {"
+    "  background-color: #30363d;"
+    "}"
+    "QPushButton:disabled {"
+    "  background-color: #161b22;"
+    "  color: #6e7681;"
+    "  border-color: rgba(139, 148, 158, 0.12);"
+    "}");
+
+  ui_->safetyControls->setStyleSheet(
+    "QWidget#safetyControls {"
+    "  background-color: #120f10;"
+    "  border-top: 1px solid rgba(248, 81, 73, 0.38);"
+    "  border-left: 1px solid rgba(139, 148, 158, 0.16);"
+    "}"
+    "QPushButton {"
+    "  border-radius: 6px;"
+    "  font-size: 9pt;"
+    "  font-weight: 800;"
+    "  padding: 8px 0px;"
+    "}"
+    "QPushButton#pushButton {"
+    "  background-color: #f2cc60;"
+    "  color: #111820;"
+    "  border: 1px solid rgba(242, 204, 96, 0.45);"
+    "}"
+    "QPushButton#pushButton:hover {"
+    "  background-color: #ffd866;"
+    "}"
+    "QPushButton#pushButton:pressed {"
+    "  background-color: #d9a441;"
+    "}"
+    "QPushButton#pushButton_4 {"
+    "  background-color: #da3633;"
+    "  color: #ffffff;"
+    "  border: 1px solid rgba(248, 81, 73, 0.55);"
+    "}"
+    "QPushButton#pushButton_4:hover {"
+    "  background-color: #f85149;"
+    "}"
+    "QPushButton#pushButton_4:pressed {"
+    "  background-color: #b62324;"
+    "}"
+    "QPushButton#pushButton_2,"
+    "QPushButton#pushButton_3 {"
+    "  background-color: #21262d;"
+    "  color: #c9d1d9;"
+    "  border: 1px solid rgba(240, 246, 252, 0.12);"
+    "}"
+    "QPushButton#pushButton_2:hover,"
+    "QPushButton#pushButton_3:hover {"
+    "  background-color: #30363d;"
+    "}"
+    "QPushButton#pushButton_2:pressed,"
+    "QPushButton#pushButton_3:pressed {"
+    "  background-color: #161b22;"
+    "}"
+    "QPushButton:disabled {"
+    "  background-color: #161b22;"
+    "  color: #6e7681;"
+    "  border-color: rgba(139, 148, 158, 0.12);"
+    "}");
+}
+
 void MainWindow::setupDiagnosticsWindow()
 {
   diagnostics_window_ = new QWidget(nullptr, Qt::Window);
@@ -341,34 +529,36 @@ void MainWindow::setupDiagnosticsWindow()
   diagnostics_window_->installEventFilter(this);
   diagnostics_window_->setStyleSheet(
     "QWidget {"
-    "  background-color: #071018;"
+    "  background-color: #0b0f14;"
+    "  color: #e6edf3;"
     "}"
     "QFrame#diagnosticsCard {"
-    "  background-color: rgba(8, 20, 28, 0.96);"
-    "  border: 1px solid rgba(56, 189, 248, 0.22);"
+    "  background-color: #111820;"
+    "  border: 1px solid rgba(139, 148, 158, 0.18);"
     "  border-radius: 8px;"
     "}"
     "QLabel#diagnosticsSectionLabel {"
-    "  color: #67e8f9;"
+    "  color: #79c0ff;"
     "  font-size: 8.5pt;"
-    "  font-weight: 700;"
+    "  font-weight: 800;"
     "  letter-spacing: 1.5px;"
     "}"
     "QLabel#diagnosticsCardTitle {"
-    "  color: #22d3ee;"
+    "  color: #8b949e;"
     "  font-size: 8pt;"
-    "  font-weight: 700;"
+    "  font-weight: 800;"
     "  letter-spacing: 1px;"
     "}"
     "QLabel#diagnosticsCardValue {"
-    "  color: #d9f99d;"
+    "  color: #f0f6fc;"
     "  font-size: 11pt;"
-    "  font-weight: 700;"
+    "  font-weight: 800;"
     "}"
     "QPlainTextEdit#diagnosticsTextPane {"
-    "  background-color: #050b10;"
-    "  color: #86efac;"
-    "  border: 1px solid rgba(34, 211, 238, 0.20);"
+    "  background-color: #0b0f14;"
+    "  color: #c9d1d9;"
+    "  selection-background-color: #1f6feb;"
+    "  border: 1px solid rgba(139, 148, 158, 0.20);"
     "  border-radius: 8px;"
     "  padding: 8px;"
     "}");
@@ -1052,25 +1242,25 @@ void MainWindow::updateSafetyControlsState()
   ui_->pushButton_3->setEnabled(can_home);
 
   if (human_detected_) {
-    updateSafetyBanner("SAFETY CONTROLS | HUMAN DETECTED", "#ef4444");
+    updateSafetyBanner("SAFETY CONTROLS | HUMAN DETECTED", "#f85149");
     return;
   }
 
   switch (safety_mode_) {
     case SafetyControlMode::Idle:
-      updateSafetyBanner("SAFETY CONTROLS | IDLE", "#f59e0b");
+      updateSafetyBanner("SAFETY CONTROLS | IDLE", "#f2cc60");
       return;
     case SafetyControlMode::Stopped:
-      updateSafetyBanner("SAFETY CONTROLS | STOPPED", "#ef4444");
+      updateSafetyBanner("SAFETY CONTROLS | STOPPED", "#f85149");
       return;
     case SafetyControlMode::Homing:
-      updateSafetyBanner("SAFETY CONTROLS | RETURN HOME", "#f59e0b");
+      updateSafetyBanner("SAFETY CONTROLS | RETURN HOME", "#f2cc60");
       return;
     case SafetyControlMode::Active:
       if (coordinator_mission_state_ == "MOVING" || coordinator_mission_state_ == "READY_TO_MOVE") {
-        updateSafetyBanner("SAFETY CONTROLS | ACTIVE", "#22c55e");
+        updateSafetyBanner("SAFETY CONTROLS | ACTIVE", "#56d364");
       } else {
-        updateSafetyBanner("SAFETY CONTROLS | SCANNING", "#22c55e");
+        updateSafetyBanner("SAFETY CONTROLS | SCANNING", "#56d364");
       }
       return;
   }
@@ -1139,8 +1329,8 @@ void MainWindow::updateSafetyBanner(const QString & text, const QString & color_
     "QLabel#safetyLabel {"
     "  color: %1;"
     "  font-size: 8pt;"
-    "  font-weight: 700;"
-    "  letter-spacing: 2px;"
+    "  font-weight: 800;"
+    "  letter-spacing: 1.5px;"
     "  background: transparent;"
     "  border: none;"
     "  padding: 0px;"
@@ -1156,66 +1346,66 @@ void MainWindow::setupMissionOverlay()
   mission_overlay_->setFocusPolicy(Qt::StrongFocus);
   mission_overlay_->setStyleSheet(
     "QFrame#missionOverlay {"
-    "  background-color: rgba(13, 16, 24, 235);"
-    "  border-left: 1px solid rgba(165, 180, 252, 0.18);"
+    "  background-color: rgba(11, 15, 20, 242);"
+    "  border-left: 1px solid rgba(139, 148, 158, 0.24);"
     "}"
     "QLabel#missionHeader {"
-    "  color: #e2e8f0;"
+    "  color: #f0f6fc;"
     "  font-size: 13pt;"
-    "  font-weight: 700;"
-    "  letter-spacing: 1px;"
+    "  font-weight: 800;"
+    "  letter-spacing: 0px;"
     "}"
     "QLabel#missionSubheader {"
-    "  color: #94a3b8;"
+    "  color: #79c0ff;"
     "  font-size: 8pt;"
-    "  font-weight: 600;"
-    "  letter-spacing: 1px;"
+    "  font-weight: 800;"
+    "  letter-spacing: 1.5px;"
     "}"
     "QLabel#missionSummary {"
-    "  color: #cbd5e1;"
+    "  color: #c9d1d9;"
     "  font-size: 8.5pt;"
     "  line-height: 1.35;"
     "}"
     "QFrame#missionItem {"
-    "  background-color: rgba(30, 41, 59, 0.92);"
-    "  border: 1px solid rgba(148, 163, 184, 0.18);"
+    "  background-color: #111820;"
+    "  border: 1px solid rgba(139, 148, 158, 0.18);"
     "  border-radius: 8px;"
     "}"
     "QFrame#missionItem[stepStatus=\"active\"] {"
-    "  background-color: rgba(30, 64, 175, 0.35);"
-    "  border: 1px solid rgba(96, 165, 250, 0.55);"
+    "  background-color: rgba(31, 111, 235, 0.22);"
+    "  border: 1px solid rgba(121, 192, 255, 0.42);"
     "}"
     "QFrame#missionItem[stepStatus=\"done\"] {"
-    "  background-color: rgba(20, 83, 45, 0.30);"
-    "  border: 1px solid rgba(74, 222, 128, 0.32);"
+    "  background-color: rgba(35, 134, 54, 0.22);"
+    "  border: 1px solid rgba(86, 211, 100, 0.34);"
     "}"
     "QFrame#missionItem[stepStatus=\"blocked\"] {"
-    "  background-color: rgba(127, 29, 29, 0.34);"
-    "  border: 1px solid rgba(248, 113, 113, 0.36);"
+    "  background-color: rgba(218, 54, 51, 0.22);"
+    "  border: 1px solid rgba(248, 81, 73, 0.40);"
     "}"
     "QLabel#missionStep {"
-    "  color: #f8fafc;"
+    "  color: #f0f6fc;"
     "  font-size: 10pt;"
-    "  font-weight: 600;"
+    "  font-weight: 800;"
     "}"
     "QLabel#missionStep[stepStatus=\"done\"] {"
-    "  color: #bbf7d0;"
+    "  color: #aff5b4;"
     "}"
     "QLabel#missionStep[stepStatus=\"blocked\"] {"
-    "  color: #fecaca;"
+    "  color: #ffdcd7;"
     "}"
     "QLabel#missionDetail {"
-    "  color: #94a3b8;"
+    "  color: #8b949e;"
     "  font-size: 8.5pt;"
     "}"
     "QLabel#missionDetail[stepStatus=\"active\"] {"
-    "  color: #dbeafe;"
+    "  color: #cae8ff;"
     "}"
     "QLabel#missionDetail[stepStatus=\"done\"] {"
-    "  color: #d1fae5;"
+    "  color: #dcffe4;"
     "}"
     "QLabel#missionDetail[stepStatus=\"blocked\"] {"
-    "  color: #fee2e2;"
+    "  color: #ffdcd7;"
     "}");
 
   auto * overlay_layout = new QVBoxLayout(mission_overlay_);
@@ -1244,7 +1434,7 @@ void MainWindow::setupMissionOverlay()
     "QScrollArea { background: transparent; }"
     "QScrollArea > QWidget > QWidget { background: transparent; }"
     "QScrollBar:vertical { background: transparent; width: 8px; }"
-    "QScrollBar::handle:vertical { background: rgba(148, 163, 184, 0.35); border-radius: 4px; }"
+    "QScrollBar::handle:vertical { background: rgba(139, 148, 158, 0.40); border-radius: 4px; }"
     "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }");
 
   mission_steps_content_ = new QWidget(scroll);

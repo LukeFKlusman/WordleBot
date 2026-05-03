@@ -69,6 +69,9 @@ private:
   void publishPerceptionState(const std::string & state);
   void publishMissionState();
   void publishMissionProgress();
+  void publishMissionSignal(
+    const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & publisher,
+    const char * topic_name);
   void dispatchConfiguredGoal(bool home_goal);
   geometry_msgs::msg::PoseStamped buildPoseFromParameters(
     const std::string & prefix,
@@ -89,6 +92,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_progress_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr set_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stop_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr abort_mission_pub_;
 
   rclcpp::TimerBase::SharedPtr heartbeat_timer_;
 

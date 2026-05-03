@@ -16,6 +16,9 @@ constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 constexpr const char * kSetMissionTopic = "/wordle_bot/set_mission";
 constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
+constexpr const char * kStopMissionTopic = "/wordle_bot/stop_mission";
+constexpr const char * kResumeMissionTopic = "/wordle_bot/resume_mission";
+constexpr const char * kAbortMissionTopic = "/wordle_bot/abort_mission";
 constexpr const char * kMotionCompleteTopic = "/wordle_bot/motion_complete";
 
 std::string jsonEscape(const std::string & value)
@@ -71,6 +74,9 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
     kMissionProgressTopic, rclcpp::QoS(1).reliable().transient_local());
   set_mission_pub_ = this->create_publisher<geometry_msgs::msg::PoseArray>(kSetMissionTopic, 10);
   start_mission_pub_ = this->create_publisher<std_msgs::msg::Bool>(kStartMissionTopic, 10);
+  stop_mission_pub_ = this->create_publisher<std_msgs::msg::Bool>(kStopMissionTopic, 10);
+  resume_mission_pub_ = this->create_publisher<std_msgs::msg::Bool>(kResumeMissionTopic, 10);
+  abort_mission_pub_ = this->create_publisher<std_msgs::msg::Bool>(kAbortMissionTopic, 10);
 
   mission_cmd_sub_ = this->create_subscription<std_msgs::msg::String>(
     kMissionCommandTopic, 10,
@@ -229,11 +235,13 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
     last_completed_goal_request_ = GoalRequest::NONE;
+    publishMissionSignal(start_mission_pub_, kStartMissionTopic);
     transitionTo(MissionState::SCANNING, "Operator requested START");
     return NodeStatus::SUCCESS;
   }
 
   if (command == "STOP") {
+    publishMissionSignal(stop_mission_pub_, kStopMissionTopic);
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
@@ -242,6 +250,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   }
 
   if (command == "RESUME") {
+    publishMissionSignal(resume_mission_pub_, kResumeMissionTopic);
     motion_complete_received_ = false;
     awaiting_motion_completion_ = false;
     last_completed_goal_request_ = GoalRequest::NONE;
@@ -256,11 +265,20 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     return NodeStatus::SUCCESS;
   }
 
-  if (command == "HOME" || command == "ABORT") {
+  if (command == "HOME") {
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::HOME_GOAL;
     last_completed_goal_request_ = GoalRequest::NONE;
-    transitionTo(MissionState::HOMING, "Operator requested HOME");
+    dispatchConfiguredGoal(true);
+    return NodeStatus::SUCCESS;
+  }
+
+  if (command == "ABORT") {
+    publishMissionSignal(abort_mission_pub_, kAbortMissionTopic);
+    awaiting_motion_completion_ = false;
+    pending_goal_request_ = GoalRequest::HOME_GOAL;
+    last_completed_goal_request_ = GoalRequest::NONE;
+    dispatchConfiguredGoal(true);
     return NodeStatus::SUCCESS;
   }
 
@@ -509,6 +527,20 @@ void MissionCoordinator::publishMissionProgress()
   mission_progress_pub_->publish(msg);
 }
 
+void MissionCoordinator::publishMissionSignal(
+  const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & publisher,
+  const char * topic_name)
+{
+  if (publisher == nullptr) {
+    return;
+  }
+
+  std_msgs::msg::Bool signal;
+  signal.data = true;
+  publisher->publish(signal);
+  RCLCPP_INFO(this->get_logger(), "Published mission signal on %s.", topic_name);
+}
+
 void MissionCoordinator::dispatchConfiguredGoal(bool home_goal)
 {
   const std::string frame_id = this->get_parameter(
@@ -520,10 +552,14 @@ void MissionCoordinator::dispatchConfiguredGoal(bool home_goal)
   mission.header = goal.header;
   mission.poses.push_back(goal.pose);
   set_mission_pub_->publish(mission);
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Published %s mission on %s with %zu goal(s).",
+    home_goal ? "home" : "task",
+    kSetMissionTopic,
+    mission.poses.size());
 
-  std_msgs::msg::Bool start_signal;
-  start_signal.data = true;
-  start_mission_pub_->publish(start_signal);
+  publishMissionSignal(start_mission_pub_, kStartMissionTopic);
 
   motion_goal_sent_ = true;
   awaiting_motion_completion_ = true;

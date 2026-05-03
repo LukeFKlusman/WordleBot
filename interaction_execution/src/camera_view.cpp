@@ -15,10 +15,23 @@ constexpr const char * kCameraTopic = "/camera/camera/color/image_raw_not";
 CameraView::CameraView(rclcpp::Node::SharedPtr node, QWidget * parent)
 : QWidget(parent), node_(std::move(node))
 {
-  auto * layout = new QVBoxLayout(this);
-  layout->setContentsMargins(6, 6, 6, 6);
+  setStyleSheet(
+    "CameraView {"
+    "  background-color: #0f151c;"
+    "}"
+    "QLabel {"
+    "  background-color: #0b0f14;"
+    "  color: #8b949e;"
+    "  border: 1px solid rgba(139, 148, 158, 0.18);"
+    "  border-radius: 8px;"
+    "  font-size: 10pt;"
+    "  font-weight: 700;"
+    "}");
 
-  image_label_ = new QLabel("Waiting for /camera/camera/color/image_raw...", this);
+  auto * layout = new QVBoxLayout(this);
+  layout->setContentsMargins(12, 12, 12, 12);
+
+  image_label_ = new QLabel("Waiting for /camera/camera/color/image_raw_not...", this);
   image_label_->setAlignment(Qt::AlignCenter);
   image_label_->setMinimumSize(320, 240);
   layout->addWidget(image_label_);

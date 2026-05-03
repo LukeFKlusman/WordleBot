@@ -32,11 +32,12 @@ def generate_launch_description():
         else None
     )
 
-    workspace_root = Path(get_package_share_directory("interaction_execution")).resolve().parents[4]
+    package_share = Path(get_package_share_directory("interaction_execution")).resolve()
+    workspace_root = package_share.parents[3]
     repo_root = workspace_root / "src" / "RS2"
     perception_script = repo_root / "perception" / "src" / "realsense_camera_cnn.py"
-    gamification_script = repo_root / "gamification" / "gamificiation_node.py"
-    voice_control_script = repo_root / "voice_control" / "main.py"
+    gamification_script = repo_root / "gamification" / "gamification_node.py"
+    voice_control_script = repo_root / "voice_control" / "voice_node.py"
 
     launch_actions = [
         DeclareLaunchArgument(

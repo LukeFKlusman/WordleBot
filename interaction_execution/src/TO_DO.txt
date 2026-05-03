@@ -1,12 +1,8 @@
 NEED TO DO FOR GUI:
-- Get buttons to do stuff, start working on topics it subscribes to, blah blah blah
-- Get widgets to stretch properly with window, or just make window non-resizeable (LAST RESORT ONLY)
-- Change camera_poc to use RealSense D435i camera
-- Figure out how to make a thing that actually looks like NYT wordle, probably code it too
+- Get widgets to stretch properly with window
 - FIGHT AND WIN
-- Fix wordle plugin to not be buggy
-- Determine why the fuck the sim is buggy (it's because of drivers but needs to consistently work brah)
-- MUST BE DONE BY END OF SATURDAY
+- Integrate like MIT Integration Bee you know
+- Do ASAP like 
 
 
 
@@ -24,6 +20,27 @@ Finally, run this in a third terminal:
     ros2 launch interaction_execution gui.launch.py
 
 
-    colcon build --packages-select interaction_execution
+    colcon build --packages-select interaction_execution wordleBot_control
     source install/setup.bash
     ros2 launch interaction_execution gui.launch.py
+
+
+
+
+
+GAMIFICATION INTEGRATION SHIT TO DO:
+- Two modes:
+    Mode A: we give word to bot, bot submits guess and we manually mark it based on if its good or nah.
+    Mode B: bot selects secret word for us, we use voice input to guess word. If record stuffs up, manual override to type in word and guess for feedback.
+
+- Need buttons for manual override or switching modes
+
+
+UI SHIT TO DO:
+- Remodel UI based on mockups, use most of 1 with bits of two
+- Condense pause/resume into one context-specific button
+- Remodel voice control panel, see if visual live voice waveform is possible
+- FIX THE FCKING MISSION TAB POPPING UP OVER OTHER WINDOWS
+- Add a "(?) Help" menu option, which explains how to use the program 
+- Change the tabs system to instead have a drop-down menu which allows for switching between Sim View, MoveIt view and camera view,
+    camera view should also be able to toggle between "raw footage" and "computer vision" modes

@@ -116,8 +116,10 @@ void RvizSimView::showEvent(QShowEvent * event)
 
 void RvizSimView::buildUi()
 {
+  setStyleSheet("RvizSimView { background-color: #0f151c; }");
+
   auto * layout = new QVBoxLayout(this);
-  layout->setContentsMargins(0, 0, 0, 0);
+  layout->setContentsMargins(12, 12, 12, 12);
 }
 
 void RvizSimView::initializeRvizPanel()
