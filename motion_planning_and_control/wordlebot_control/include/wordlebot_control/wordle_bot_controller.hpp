@@ -23,6 +23,7 @@
 #include <moveit/task_constructor/task.h>
 #include <moveit/task_constructor/stages.h>
 #include <moveit/task_constructor/solvers.h>
+#include <moveit/planning_scene/planning_scene.h>
 
 
 class WordleBotController
@@ -30,6 +31,24 @@ class WordleBotController
 public:
   explicit WordleBotController(rclcpp::Node::SharedPtr node);
   ~WordleBotController();
+
+  // One entry per queued pick-and-place task. Moved here from the control node
+  // so the controller's planning methods can accept it directly.
+  struct PickPlaceEntry {
+    geometry_msgs::msg::Pose pick_pose;
+    geometry_msgs::msg::Pose place_pose;
+    moveit_msgs::msg::CollisionObject collision_object;
+    std::string object_id;
+  };
+
+  // Holds a fully planned MTC task and metadata needed to execute it and chain
+  // the next task. mtc::Task is non-copyable, so it is heap-allocated.
+  struct PlannedPickPlace {
+    std::unique_ptr<moveit::task_constructor::Task> task;
+    planning_scene::PlanningScenePtr end_scene;   // cloned terminal scene for chaining
+    const moveit::task_constructor::SolutionBase* best_solution{nullptr};
+    std::string object_id;
+  };
 
   // Move the end-effector to the specified target pose using free-space OMPL planning.
   // Applies floor collision, shoulder joint constraint, and syncs robot state before planning.
@@ -94,17 +113,30 @@ public:
                       const geometry_msgs::msg::Pose & place_pose,
                       const std::string & object_id);
 
+  // Plan one pick-and-place task without executing it.
+  // start_scene: nullptr → use CurrentState (live robot, first task).
+  //              non-null → use FixedState seeded from the previous task's terminal scene.
+  // include_return_home: true only for the last task in a batch.
+  // Returns a PlannedPickPlace; on failure, planned.task == nullptr.
+  PlannedPickPlace planPickAndPlace(const PickPlaceEntry & entry,
+                                    const planning_scene::PlanningScenePtr & start_scene,
+                                    bool include_return_home);
+
+  // Execute a previously planned task. Publishes the solution for visualisation
+  // then calls task.execute(). Returns true on SUCCESS.
+  bool executePlannedTask(PlannedPickPlace & planned);
+
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
   // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).
   // All slots share y=0.3 m and z=0.015 m; columns are 75 mm apart.
   struct PlaceSlot { double x, y, z; };
   static constexpr std::array<PlaceSlot, 5> PLACE_SLOTS = {{
-    {-0.150, 0.3, 0.015},
-    {-0.075, 0.3, 0.015},
-    { 0.000, 0.3, 0.015},
-    { 0.075, 0.3, 0.015},
-    { 0.150, 0.3, 0.015},
+    {-0.150, 0.35, 0.025},
+    {-0.075, 0.35, 0.025},
+    {-0.015, 0.35, 0.025},
+    { 0.075, 0.35, 0.025},
+    { 0.150, 0.35, 0.025},
   }};
 
 private:
@@ -120,10 +152,15 @@ private:
   void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
                      const std::string & title);
 
-  // Monolithic MTC task used by doPickAndPlace.
+  // Build an MTC task for one pick-and-place operation.
+  // start_scene == nullptr → Stage 1 is CurrentState (reads live robot).
+  // start_scene != nullptr → Stage 1 is FixedState seeded from start_scene.
+  // include_return_home controls whether Stage 7 ("return home") is appended.
   moveit::task_constructor::Task createTask(const geometry_msgs::msg::Pose & object_pose,
                                             const geometry_msgs::msg::Pose & place_pose,
-                                            const std::string & object_id);
+                                            const std::string & object_id,
+                                            const planning_scene::PlanningScenePtr & start_scene,
+                                            bool include_return_home);
 
   // Phase-split task builders for stop/resume-aware pick-and-place.
   moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);

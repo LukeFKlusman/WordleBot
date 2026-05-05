@@ -57,14 +57,8 @@ private:
   // Letter object interface — triggers pick-and-place mode
   rclcpp::Subscription<wordlebot_control::msg::PickPlaceTask>::SharedPtr letter_object_sub_;
 
-  // One entry per queued pick-and-place task
-  struct PickPlaceEntry {
-    geometry_msgs::msg::Pose pick_pose;
-    geometry_msgs::msg::Pose place_pose;
-    moveit_msgs::msg::CollisionObject collision_object;
-    std::string object_id;
-  };
-  std::vector<PickPlaceEntry> pick_place_queue_;
+  // PickPlaceEntry is defined on WordleBotController (the controller owns planning).
+  std::vector<WordleBotController::PickPlaceEntry> pick_place_queue_;
 
   int letter_object_counter_{0};
 

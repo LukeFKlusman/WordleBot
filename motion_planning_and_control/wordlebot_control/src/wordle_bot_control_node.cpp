@@ -2,10 +2,7 @@
 
 #include <chrono>
 #include <thread>
-
-// TODO: Functionalities to add:
-// - Scan area for obstacles and add to planning scene (TC1.3)
-// - Resume / Abort mission (TC1.4) — stop is functional; resume/abort require mission state management
+#include <moveit/planning_scene/planning_scene.h>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
@@ -14,7 +11,23 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   controller_(std::make_shared<WordleBotController>(node_))
 {
   // ---------------------------------------------------------------------------
-  // Legacy single-goal interface (backward compat): goal_pose auto-arms the mission
+  // ROS2 topic subscriptions and publications
+  // ---------------------------------------------------------------------------
+  // Publishers
+  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after each successful motion execution.
+  // - /wordle_bot/goal_reached (std_msgs/Bool): Published after reaching each individual goal in a mission.
+  // - /wordle_bot/mission_complete (std_msgs/Bool): Published after completing all goals in a mission.
+  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING" to indicate current state.
+
+  // Subscriptions
+  // - /wordle_bot/goal_pose (geometry_msgs/PoseStamped): Legacy single-goal interface for free-space motion.
+  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Set a multi-goal mission; execution starts on /start_mission.
+  // - /wordle_bot/start_mission (std_msgs/Bool): Start executing the currently set mission.
+  // - /wordle_bot/stop_mission (std_msgs/Bool): Request the robot to stop the current mission safely.
+  // - /wordle_bot/resume_mission (std_msgs/Bool): Request the robot to resume a stopped mission. (not yet implemented)
+  // - /wordle_bot/abort_mission (std_msgs/Bool): Request the robot to abort the current mission. (not yet implemented)
+  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object in the planning scene.
+  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger a pick-and-place task for a detected letter object, with specified pick pose and place slot.
   // ---------------------------------------------------------------------------
   goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
     "/wordle_bot/goal_pose", 10,
@@ -23,9 +36,6 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   motion_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/motion_complete", 10);
 
-  // ---------------------------------------------------------------------------
-  // Mission-level interface
-  // ---------------------------------------------------------------------------
   set_mission_sub_ = node_->create_subscription<geometry_msgs::msg::PoseArray>(
     "/wordle_bot/set_mission", 10,
     std::bind(&WordleBotControlNode::setMissionCallback, this, std::placeholders::_1));
@@ -36,7 +46,6 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   mission_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/mission_complete", 10);
 
-  // Stop / Resume / Abort control (resume and abort not yet implemented)
   start_mission_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     "/wordle_bot/start_mission", 10,
     std::bind(&WordleBotControlNode::startMissionCallback, this, std::placeholders::_1));
@@ -56,12 +65,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   robot_state_pub_ = node_->create_publisher<std_msgs::msg::String>(
     "/wordle_bot/robot_state", 10);
 
-  // Collision object interface: receives collision objects to add to the planning scene
   add_collision_object_sub_ = node_->create_subscription<moveit_msgs::msg::CollisionObject>(
     "/wordle_bot/add_collision_object", 10,
     std::bind(&WordleBotControlNode::collisionObjectCallback, this, std::placeholders::_1));
 
-  // Letter object interface: receives pick pose + place slot, queues pick-and-place tasks
   letter_object_sub_ = node_->create_subscription<wordlebot_control::msg::PickPlaceTask>(
     "perception/letter_objects", 10,
     std::bind(&WordleBotControlNode::letterObjectCallback, this, std::placeholders::_1));
@@ -85,6 +92,22 @@ WordleBotControlNode::~WordleBotControlNode()
 
 // ---------------------------------------------------------------------------
 // Subscriber callbacks
+// ---------------------------------------------------------------------------
+// goalCallback
+// 
+// setMissionCallback
+// 
+// startMissionCallback
+// 
+// stopMissionCallback
+// 
+// resumeMissionCallback
+// 
+// abortMissionCallback
+// 
+// collisionObjectCallback
+// 
+// letterObjectCallback
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
@@ -133,7 +156,6 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
   cv_.notify_one();
   RCLCPP_INFO(LOGGER, "Mission armed — execution will begin.");
 
-  // Only reset the collision scene for waypoint missions; pick-and-place keeps letter objects
   if (do_scene_reset) {
     controller_->clearCollisionScene();
     controller_->setupCollisionScene();
@@ -168,16 +190,14 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
   RCLCPP_WARN(LOGGER, "abortMissionCallback: abort not yet implemented.");
 }
 
-void WordleBotControlNode::collisionObjectCallback(
-  const moveit_msgs::msg::CollisionObject::SharedPtr msg)
+void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
 {
   RCLCPP_INFO(LOGGER, "collisionObjectCallback: received object '%s' (operation=%d).",
     msg->id.c_str(), static_cast<int>(msg->operation));
   controller_->addCollisionObject(*msg);
 }
 
-void WordleBotControlNode::letterObjectCallback(
-  const wordlebot_control::msg::PickPlaceTask::SharedPtr msg)
+void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg)
 {
   const int slot = msg->place_slot;
   if (slot < 1 || slot > 5) {
@@ -211,7 +231,7 @@ void WordleBotControlNode::letterObjectCallback(
   place_pose.position.z = s.z;
   place_pose.orientation.w = 1.0;
 
-  // Build 40 mm cube collision object at the pick pose
+  // Build 50 mm cube collision object at the pick pose
   const std::string object_id = "letter_" + std::to_string(++letter_object_counter_);
 
   moveit_msgs::msg::CollisionObject co;
@@ -226,7 +246,7 @@ void WordleBotControlNode::letterObjectCallback(
   co.primitives.push_back(box);
   co.primitive_poses.push_back(msg->pick_pose.pose);
 
-  PickPlaceEntry entry;
+  WordleBotController::PickPlaceEntry entry;
   entry.pick_pose = msg->pick_pose.pose;
   entry.place_pose = place_pose;
   entry.collision_object = co;
@@ -246,6 +266,9 @@ void WordleBotControlNode::letterObjectCallback(
 // ---------------------------------------------------------------------------
 // Mission loop
 // ---------------------------------------------------------------------------
+// 
+// 
+// ---------------------------------------------------------------------------
 
 void WordleBotControlNode::missionLoop()
 {
@@ -253,7 +276,7 @@ void WordleBotControlNode::missionLoop()
   while (rclcpp::ok()) {
     bool do_pick_and_place = false;
     std::vector<geometry_msgs::msg::Pose> current_mission;
-    std::vector<PickPlaceEntry> current_tasks;
+    std::vector<WordleBotController::PickPlaceEntry> current_tasks;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
       cv_.wait(lock, [this]() {
@@ -286,40 +309,103 @@ void WordleBotControlNode::missionLoop()
     signal.data = true;
 
     if (do_pick_and_place) {
-      RCLCPP_INFO(LOGGER, "Mission thread: executing %zu pick-and-place task(s).",
+      RCLCPP_INFO(LOGGER, "Mission: %zu pick-and-place task(s) queued.", current_tasks.size());
+
+      // ── Scene setup: add ALL collision objects before any planning ──────────
+      // All objects must be present in the live scene so that CurrentState (task 1)
+      // and the chained FixedState scenes (tasks 2..N) all see the full workspace.
+      RCLCPP_INFO(LOGGER,
+        "Mission: adding all %zu collision objects to scene before planning.",
         current_tasks.size());
-
-      bool all_ok = true;
-      for (std::size_t i = 0; i < current_tasks.size(); ++i) {
-        if (stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Pick-and-place queue stopped before task %zu.", i + 1);
-          all_ok = false;
-          break;
-        }
-        RCLCPP_INFO(LOGGER, "Executing pick-and-place task %zu of %zu.", i + 1, current_tasks.size());
-
-        // Re-add this task's collision object so MTC can find it in the planning scene
-        controller_->addCollisionObject(current_tasks[i].collision_object);
-
-        const bool ok = controller_->doPickAndPlace(
-          current_tasks[i].pick_pose, current_tasks[i].place_pose, current_tasks[i].object_id);
-
-        if (!ok || stop_requested_.load()) {
-          RCLCPP_ERROR(LOGGER, "Pick-and-place task %zu failed or was stopped.", i + 1);
-          all_ok = false;
-          break;
-        }
-
-        goal_reached_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Pick-and-place task %zu complete.", i + 1);
+      for (const auto & entry : current_tasks) {
+        controller_->addCollisionObject(entry.collision_object);
+        RCLCPP_INFO(LOGGER, "  Added collision object '%s'.", entry.object_id.c_str());
       }
 
-      if (all_ok && !stop_requested_.load()) {
-        mission_complete_pub_->publish(signal);
-        motion_complete_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Pick-and-place mission complete.");
+      // ── Phase 1: Plan all tasks sequentially, chaining via FixedState ───────
+      std::vector<WordleBotController::PlannedPickPlace> planned_tasks;
+      planned_tasks.reserve(current_tasks.size());
+      bool planning_failed = false;
+
+      for (std::size_t i = 0; i < current_tasks.size(); ++i) {
+        if (stop_requested_.load()) {
+          RCLCPP_INFO(LOGGER, "Planning phase: stop requested before task %zu — aborting.", i + 1);
+          planning_failed = true;
+          break;
+        }
+
+        const bool is_last = (i == current_tasks.size() - 1);
+
+        // Task 0 starts from the live robot (nullptr = CurrentState).
+        // Tasks 1..N start from the terminal scene of the previous planned task.
+        // Type must be explicit — nullptr and PlanningScenePtr cannot unify in a ternary.
+        planning_scene::PlanningScenePtr start_scene =
+            (i == 0) ? nullptr : planned_tasks.back().end_scene;
+
+        RCLCPP_INFO(LOGGER,
+          "Planning task %zu of %zu: '%s' (return_home=%s).",
+          i + 1, current_tasks.size(), current_tasks[i].object_id.c_str(),
+          is_last ? "yes" : "no");
+
+        WordleBotController::PlannedPickPlace planned =
+            controller_->planPickAndPlace(current_tasks[i], start_scene, is_last);
+
+        if (!planned.task) {
+          RCLCPP_ERROR(LOGGER,
+            "Planning FAILED for task %zu ('%s') — aborting remaining planning.",
+            i + 1, current_tasks[i].object_id.c_str());
+          planning_failed = true;
+          break;
+        }
+
+        RCLCPP_INFO(LOGGER, "Planning succeeded for task %zu of %zu.", i + 1, current_tasks.size());
+        planned_tasks.emplace_back(std::move(planned));
+      }
+
+      if (planned_tasks.empty()) {
+        RCLCPP_ERROR(LOGGER, "Mission: no tasks were successfully planned — aborting.");
       } else {
-        RCLCPP_ERROR(LOGGER, "Pick-and-place mission did not complete successfully.");
+        if (planning_failed) {
+          RCLCPP_WARN(LOGGER,
+            "Mission: %zu of %zu tasks planned — executing partial mission.",
+            planned_tasks.size(), current_tasks.size());
+        } else {
+          RCLCPP_INFO(LOGGER,
+            "Mission: all %zu tasks planned successfully — executing.", planned_tasks.size());
+        }
+
+        // ── Phase 2: Execute all pre-planned solutions in order ──────────────
+        bool all_ok = true;
+        for (std::size_t i = 0; i < planned_tasks.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER,
+              "Execution phase: stop requested before task %zu — aborting.", i + 1);
+            all_ok = false;
+            break;
+          }
+
+          RCLCPP_INFO(LOGGER, "Executing pre-planned task %zu of %zu: '%s'.",
+            i + 1, planned_tasks.size(), planned_tasks[i].object_id.c_str());
+
+          if (!controller_->executePlannedTask(planned_tasks[i]) || stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER,
+              "Execution FAILED at task %zu ('%s') — stopping.",
+              i + 1, planned_tasks[i].object_id.c_str());
+            all_ok = false;
+            break;
+          }
+
+          goal_reached_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Task %zu of %zu execution complete.", i + 1, planned_tasks.size());
+        }
+
+        if (all_ok && !planning_failed && !stop_requested_.load()) {
+          mission_complete_pub_->publish(signal);
+          motion_complete_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Pick-and-place mission fully complete.");
+        } else {
+          RCLCPP_ERROR(LOGGER, "Pick-and-place mission did not complete fully.");
+        }
       }
 
     } else {

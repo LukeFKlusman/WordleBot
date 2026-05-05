@@ -1007,9 +1007,8 @@ class TestKeyControlConcepts(unittest.TestCase):
             f"place_slot=P3."
         )
 
-        for _ in range(5):
-            self.letter_object_pub.publish(task_msg)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+        self.letter_object_pub.publish(task_msg)
+        rclpy.spin_once(self.node, timeout_sec=0.1)
 
         # Allow the planning scene to propagate the new collision object
         time.sleep(10)
@@ -1019,7 +1018,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         start_msg = Bool()
         start_msg.data = True
-        self.start_mission_pub.publish(start_msg)
+        # self.start_mission_pub.publish(start_msg)
         self.node.get_logger().info("[TC1.6] Mission armed — waiting for pick-and-place to complete.")
 
         # ------------------------------------------------------------------ #
