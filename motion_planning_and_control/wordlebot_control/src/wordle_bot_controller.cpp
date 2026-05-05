@@ -914,7 +914,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(10.0);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -1054,7 +1054,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         {arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -1426,7 +1426,7 @@ mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & o
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -1561,7 +1561,7 @@ mtc::Task WordleBotController::createPlaceTask()
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
