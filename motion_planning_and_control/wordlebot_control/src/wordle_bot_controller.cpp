@@ -665,6 +665,17 @@ void WordleBotController::addCollisionObject(const moveit_msgs::msg::CollisionOb
 }
 
 
+void WordleBotController::clearLetterObjects(const std::vector<std::string> & ids)
+{
+  if (ids.empty()) {
+    RCLCPP_INFO(LOGGER, "clearLetterObjects: nothing to remove.");
+    return;
+  }
+  planning_scene_.removeCollisionObjects(ids);
+  RCLCPP_INFO(LOGGER, "clearLetterObjects: removed %zu letter object(s).", ids.size());
+}
+
+
 void WordleBotController::attachSensorCollisionObject()
 {
   moveit_msgs::msg::AttachedCollisionObject attached_object;

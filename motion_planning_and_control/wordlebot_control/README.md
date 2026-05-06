@@ -135,11 +135,20 @@ ros2 topic pub --once /wordle_bot/add_collision_object moveit_msgs/msg/Collision
 
 ### Send a letter/wordle object for pick-and-place
 
-This triggers the pick-and-place sequence. The pose must be in the `world` frame.
+This triggers the pick-and-place sequence using the custom `PickPlaceTask` message.
+`pick_pose` is the object's pose in the `world` frame; `place_slot` is the integer index of the target slot on the board.
 
 ```bash
-ros2 topic pub --once perception/letter_objects geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: 'world'}, pose: {position: {x: 0.35, y: 0.2, z: 0.025}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+ros2 topic pub --once perception/letter_objects wordlebot_control/msg/PickPlaceTask \
+  "{pick_pose: {header: {frame_id: 'world'}, pose: {position: {x: 0.35, y: 0.2, z: 0.025}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}, place_slot: 2}"
+```
+
+### Clear all letter collision objects
+
+Removes every letter object added this session from the planning scene and resets the pick-and-place queue. Only works when the robot is idle (not mid-mission).
+
+```bash
+ros2 topic pub --once /wordle_bot/clear_letter_objects std_msgs/msg/Bool "{data: true}"
 ```
 
 ### Monitor robot state

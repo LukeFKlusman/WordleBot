@@ -69,6 +69,9 @@ public:
   // Sleeps 300 ms after applying to allow the planning scene to propagate.
   void addCollisionObject(const moveit_msgs::msg::CollisionObject & obj);
 
+  // Remove collision objects with the given IDs from the planning scene.
+  void clearLetterObjects(const std::vector<std::string> & ids);
+
   // Attach a protective cylinder collision shape to the tool0 end-effector link.
   // The cylinder moves rigidly with the robot so the planner avoids it.
   void attachSensorCollisionObject();
