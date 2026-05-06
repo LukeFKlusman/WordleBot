@@ -386,26 +386,7 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
 
 moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 {
-  moveit_msgs::msg::JointConstraint shoulder;
-  shoulder.joint_name      = "shoulder_lift_joint";
-  shoulder.position        = -M_PI / 2.0;
-  shoulder.tolerance_above = M_PI / 180.0 * 110.0;
-  shoulder.tolerance_below = M_PI / 180.0 * 110.0;
-  shoulder.weight          = 1.0;
-
-  // Keep wrist_3_joint within [-π, π] throughout the planned path.
-  // The UR RTDE interface reports wrist_3 in this range; going outside causes
-  // a PATH_TOLERANCE_VIOLATED (2π position error) on the trajectory controller.
-  moveit_msgs::msg::JointConstraint wrist3;
-  wrist3.joint_name      = "wrist_3_joint";
-  wrist3.position        = 0.0;
-  wrist3.tolerance_above = M_PI;
-  wrist3.tolerance_below = M_PI;
-  wrist3.weight          = 1.0;
-
   moveit_msgs::msg::Constraints constraints;
-  constraints.joint_constraints.push_back(shoulder);
-  constraints.joint_constraints.push_back(wrist3);
   return constraints;
 }
 
@@ -934,9 +915,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
-    stage_move_to_pick->setTimeout(15.0);
+    stage_move_to_pick->setTimeout(0.9);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -983,7 +964,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       // Transform from gripper_tcp to the object centre when grasping top-down.
       // z=0.08 means gripper_tcp sits 80 mm above the object centre at grasp time.
-      constexpr double GRASP_Z_OFFSET = 0.08;
+      constexpr double GRASP_Z_OFFSET = 0.01;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
@@ -1074,9 +1055,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
         {arm_group, sampling_planner}});
-    stage->setTimeout(15.0);
+    stage->setTimeout(0.90);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
