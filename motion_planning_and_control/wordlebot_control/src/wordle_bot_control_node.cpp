@@ -281,7 +281,7 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
     if (mission_running_) {
       RCLCPP_WARN(LOGGER,
         "clearLetterObjectsCallback: mission is running — cannot clear letter objects now.");
-      return;x
+      return;
     }
     ids_to_remove = tracked_letter_ids_;
     tracked_letter_ids_.clear();
