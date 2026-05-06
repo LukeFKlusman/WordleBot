@@ -3,6 +3,16 @@ import random
 
 from constants import GOOD, BAD_POSITION, INCORRECT, TOP_OPENERS
 
+
+def is_valid_word(word, words):
+    """Returns True when word is a five-letter dictionary entry."""
+    return isinstance(word, str) and word.lower() in set(words)
+
+
+def choose_secret_word(words):
+    """Chooses a hidden solution word for player-guess mode."""
+    return random.choice(words) if words else None
+
 def score_guess_against_target(guess, target):
     """
     Returns a list of 5 feedback tokens (GOOD, BAD_POSITION, INCORRECT)

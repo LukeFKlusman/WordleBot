@@ -76,13 +76,39 @@ WordleView::WordleView(QWidget * parent)
     setFocusProxy(web_view_);
     web_view_->load(QUrl::fromLocalFile(wordle_path));
     connect(web_view_, &QWebEngineView::titleChanged, this, [this](const QString & title) {
-      if (!title.startsWith(QStringLiteral("feedback:"))) {
-        return;
+      bool handled_command = false;
+
+      if (title.startsWith(QStringLiteral("feedback:"))) {
+        const QString feedback = title.mid(9).trimmed().toUpper();
+        if (!feedback.isEmpty()) {
+          emit feedbackSubmitted(feedback);
+        }
+        handled_command = true;
+      } else if (title.startsWith(QStringLiteral("wordle_mode:"))) {
+        const QString mode = title.mid(12).trimmed().toUpper();
+        if (!mode.isEmpty()) {
+          emit modeSelected(mode);
+        }
+        handled_command = true;
+      } else if (title.startsWith(QStringLiteral("secret_word:"))) {
+        const QString word = title.mid(12).trimmed().toUpper();
+        if (!word.isEmpty()) {
+          emit secretWordSubmitted(word);
+        }
+        handled_command = true;
+      } else if (title.startsWith(QStringLiteral("player_guess:"))) {
+        const QString guess = title.mid(13).trimmed().toUpper();
+        if (!guess.isEmpty()) {
+          emit playerGuessSubmitted(guess);
+        }
+        handled_command = true;
+      } else if (title == QStringLiteral("reset_game")) {
+        emit resetRequested();
+        handled_command = true;
       }
 
-      const QString feedback = title.mid(9).trimmed().toUpper();
-      if (!feedback.isEmpty()) {
-        emit feedbackSubmitted(feedback);
+      if (!handled_command) {
+        return;
       }
 
       if (web_view_ != nullptr) {
@@ -271,34 +297,7 @@ void WordleView::updateScale()
 #ifdef HAS_QT_WEBENGINE
 bool WordleView::forwardWebKeyPress(QKeyEvent * event)
 {
-  if (web_view_ == nullptr) {
-    return false;
-  }
-
-  const Qt::KeyboardModifiers modifiers = event->modifiers();
-  if (modifiers != Qt::NoModifier && modifiers != Qt::ShiftModifier) {
-    return false;
-  }
-
-  switch (event->key()) {
-    case Qt::Key_Return:
-    case Qt::Key_Enter:
-      sendInputToPage("enter");
-      return true;
-    case Qt::Key_Backspace:
-    case Qt::Key_Delete:
-      sendInputToPage("backspace");
-      return true;
-    default:
-      break;
-  }
-
-  const QString text = event->text().toLower();
-  if (text.size() == 1 && text.front().isLetter()) {
-    sendInputToPage(text);
-    return true;
-  }
-
+  (void)event;
   return false;
 }
 

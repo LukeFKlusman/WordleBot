@@ -9,6 +9,9 @@
 #    /perception/detections      std_msgs/String  — JSON block list from SS1
 #    /mission/state              std_msgs/String  — game start/stop from SS3
 #    /gamification/feedback      std_msgs/String  — G/B/I feedback from SS3/voice
+#    /gamification/mode          std_msgs/String  — MODE_A or MODE_B
+#    /gamification/secret_word   std_msgs/String  — human-selected secret for Mode A
+#    /gamification/player_guess  std_msgs/String  — human guess for Mode B
 #
 #  TOPICS PUBLISHED:
 #    /gamification/guess         std_msgs/String  — current word guess
@@ -38,12 +41,16 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from dictionary   import load_dictionary
 from wordle_logic import (
+    choose_secret_word,
     filter_candidates,
     choose_opening_guess,
     choose_best_guess,
     parse_feedback,
+    score_guess_against_target,
 )
 from constants import GOOD, BAD_POSITION, INCORRECT
+
+MAX_ATTEMPTS = 6
 
 
 class GamificationNode(Node):
@@ -60,15 +67,23 @@ class GamificationNode(Node):
         self.available_letters = []
         self.block_positions   = {}        # letter -> {x_m, y_m, z_m, theta_deg}
         self.current_guess     = None
+        self.selected_secret   = None
         self.attempt           = 1
         self.game_active       = False
         self.last_feedback     = None
         self.guess_pending     = True      # True = ready to pick and publish next guess
+        self.game_mode         = None      # A = robot guesses, B = human guesses
+        self.mode_locked       = False
+        self.last_error        = None
+        self.last_scored_attempt = None
 
         # ── Subscribers ───────────────────────────────────────────
         self.create_subscription(String, '/perception/detections', self.detections_callback, 10)
         self.create_subscription(String, '/mission/state',          self.mission_callback,    10)
         self.create_subscription(String, '/gamification/feedback',  self.feedback_callback,   10)
+        self.create_subscription(String, '/gamification/mode',       self.mode_callback,       10)
+        self.create_subscription(String, '/gamification/secret_word', self.secret_callback,    10)
+        self.create_subscription(String, '/gamification/player_guess', self.player_guess_callback, 10)
 
         # ── Publishers ────────────────────────────────────────────
         self.pub_guess       = self.create_publisher(String, '/gamification/guess',        10)
@@ -82,6 +97,7 @@ class GamificationNode(Node):
         self.get_logger().info(
             '\nGamification node ready.'
             '\n  Subscribing: /perception/detections  /mission/state  /gamification/feedback'
+            '\n               /gamification/mode  /gamification/secret_word  /gamification/player_guess'
             '\n  Publishing:  /gamification/guess  /gamification/mission_state  /diagnostics'
         )
 
@@ -98,6 +114,8 @@ class GamificationNode(Node):
         preventing re-guessing on every detection frame.
         """
         if not self.game_active:
+            return
+        if self.game_mode != 'A' or not self.mode_locked:
             return
 
         try:
@@ -162,19 +180,35 @@ class GamificationNode(Node):
         """START begins the game, STOP pauses it, RESET clears everything."""
         state = msg.data.upper().strip()
 
-        if state == 'START' and not self.game_active:
+        if state in ('START', 'SCANNING', 'RESUME') and not self.game_active:
+            if not self.mode_locked or self.game_mode not in ('A', 'B'):
+                self.last_error = 'Choose a game mode before starting.'
+                self.get_logger().warn('[Mission] Start ignored because no game mode is selected.')
+                self._publish_diagnostics(status='SELECT_MODE')
+                return
+
             self.game_active  = True
-            self.guess_pending = True
-            self.get_logger().info('[Mission] Game started.')
+            self.last_error = None
+            if self.game_mode == 'A':
+                self.guess_pending = True
+                if self.selected_secret is None:
+                    self.get_logger().warn(
+                        '[Mission] Mode A started without a selected secret word; manual feedback is still accepted.')
+                self.get_logger().info('[Mission] Mode A game started.')
+            else:
+                self.selected_secret = choose_secret_word(self.words)
+                self.current_guess = None
+                self.guess_pending = False
+                self.get_logger().info('[Mission] Mode B game started with hidden solution selected.')
             self._publish_diagnostics(status='ACTIVE')
 
-        elif state == 'STOP':
+        elif state in ('STOP', 'IDLE'):
             self.game_active = False
             self.get_logger().info('[Mission] Game paused.')
             self._publish_diagnostics(status='PAUSED')
 
         elif state == 'RESET':
-            self._reset_game()
+            self._reset_game(preserve_mode=False)
             self.get_logger().info('[Mission] Game reset.')
 
 
@@ -183,6 +217,10 @@ class GamificationNode(Node):
         Receives G/B/I feedback from SS3 GUI or voice_node after the robot places letters.
         Filters candidates and sets guess_pending so the next detection triggers a new guess.
         """
+        if self.game_mode != 'A' or not self.mode_locked:
+            self.get_logger().warn('Ignoring manual feedback because Mode A is not active.')
+            return
+
         if not self.game_active or not self.current_guess:
             return
 
@@ -197,9 +235,18 @@ class GamificationNode(Node):
         if all(f == GOOD for f in feedback):
             self.get_logger().info(
                 f'SOLVED in {self.attempt} attempt(s)! Word: {self.current_guess.upper()}')
-            self._publish_diagnostics(status='SOLVED')
             self.game_active  = False
             self.guess_pending = False
+            self._publish_diagnostics(status='SOLVED')
+            return
+
+        self.last_feedback = feedback
+        if self.attempt >= MAX_ATTEMPTS:
+            self.get_logger().info(
+                f'AI failed in {MAX_ATTEMPTS} attempts. Word was {self.selected_secret.upper()}')
+            self.game_active = False
+            self.guess_pending = False
+            self._publish_diagnostics(status='GAME_OVER')
             return
 
         self.candidates = filter_candidates(self.candidates, self.current_guess, feedback)
@@ -211,9 +258,99 @@ class GamificationNode(Node):
             return
 
         self.attempt      += 1
-        self.last_feedback = feedback
-        self.guess_pending = True    # ready for next guess on next detection
+        self.guess_pending = True
+        self._publish_next_mode_a_guess()
 
+
+    def mode_callback(self, msg):
+        """Switches between Mode A (robot guesses) and Mode B (human guesses)."""
+        requested = msg.data.upper().strip().replace('MODE_', '')
+        if requested not in ('A', 'B'):
+            self.get_logger().error(f'Invalid game mode: {msg.data}')
+            self.last_error = f'Invalid game mode: {msg.data}'
+            self._publish_diagnostics(status='ERROR')
+            return
+
+        if self.mode_locked and requested == self.game_mode:
+            self._publish_diagnostics(status='MODE_SELECTED')
+            return
+
+        if self.mode_locked:
+            self.last_error = 'Reset the game before changing modes.'
+            self.get_logger().warn('Ignoring mode change because mode is locked until reset.')
+            self._publish_diagnostics(status='MODE_LOCKED')
+            return
+
+        self.game_mode = requested
+        self.mode_locked = True
+        self.last_error = None
+        self.get_logger().info(f'Game mode set to Mode {self.game_mode}.')
+        if self.game_mode == 'B':
+            self._start_mode_b_game()
+            return
+
+        self._publish_diagnostics(status='SELECT_SECRET')
+
+
+    def secret_callback(self, msg):
+        """Stores the human-selected secret word for Mode A."""
+        word = ''.join(ch for ch in msg.data.lower().strip() if ch.isalpha())
+        if len(word) != 5 or word not in self.words:
+            self.get_logger().error(f'Invalid Mode A secret word: {msg.data}')
+            self.last_error = 'Secret word must be a valid five-letter dictionary word.'
+            self._publish_diagnostics(status='INVALID_SECRET')
+            return
+
+        if self.game_mode != 'A' or not self.mode_locked:
+            self.get_logger().warn('Ignoring selected secret because Mode A is not active.')
+            return
+
+        self.selected_secret = word
+        self.game_active = True
+        self.guess_pending = True
+        self.last_error = None
+        self.get_logger().info('Mode A secret word accepted.')
+        self._publish_next_mode_a_guess()
+
+
+    def player_guess_callback(self, msg):
+        """Scores a human guess against the hidden Mode B solution."""
+        if self.game_mode != 'B' or not self.mode_locked:
+            self.get_logger().warn('Ignoring player guess because Mode B is not active.')
+            return
+
+        if not self.game_active or not self.selected_secret:
+            self.last_error = 'Mode B is not active.'
+            self._publish_diagnostics(status='WAITING_FOR_START')
+            return
+
+        guess = ''.join(ch for ch in msg.data.lower().strip() if ch.isalpha())
+        if len(guess) != 5 or guess not in self.words:
+            self.last_error = 'Guess must be a valid five-letter dictionary word.'
+            self.get_logger().error(f'Invalid player guess: {msg.data}')
+            self._publish_diagnostics(status='INVALID_GUESS')
+            return
+
+        self.current_guess = guess
+        self.last_feedback = score_guess_against_target(guess, self.selected_secret)
+        self.last_scored_attempt = self.attempt
+        self.last_error = None
+
+        if all(f == GOOD for f in self.last_feedback):
+            self.get_logger().info(
+                f'PLAYER SOLVED in {self.attempt} attempt(s)! Word: {guess.upper()}')
+            self.game_active = False
+            self._publish_diagnostics(status='SOLVED')
+            return
+
+        if self.attempt >= MAX_ATTEMPTS:
+            self.get_logger().info(
+                f'Mode B game over. Solution was {self.selected_secret.upper()}')
+            self.game_active = False
+            self._publish_diagnostics(status='GAME_OVER')
+            return
+
+        self.attempt += 1
         self._publish_diagnostics(status='NEXT_TURN')
 
 
@@ -222,7 +359,7 @@ class GamificationNode(Node):
     # ─────────────────────────────────────────────────────────────
 
     def reset_callback(self, request, response):
-        self._reset_game()
+        self._reset_game(preserve_mode=False)
         response.success = True
         response.message = 'Game reset successfully.'
         self.get_logger().info('[Service] Game reset.')
@@ -305,11 +442,22 @@ class GamificationNode(Node):
         top     = self.candidates[:5] if self.candidates else []
         payload = json.dumps({
             'status'           : status,
+            'mode'             : self.game_mode,
+            'mode_locked'      : self.mode_locked,
             'attempt'          : self.attempt,
             'current_guess'    : self.current_guess.upper() if self.current_guess else None,
             'candidates_left'  : len(self.candidates),
             'available_letters': self.available_letters,
             'top_candidates'   : [w.upper() for w in top],
+            'last_feedback'    : ''.join(self._feedback_to_chars(self.last_feedback)),
+            'scored_attempt'   : self.last_scored_attempt,
+            'secret_word_set'  : self.selected_secret is not None,
+            'solution_word'    : self.selected_secret.upper()
+                if status in ('SOLVED', 'GAME_OVER') and self.selected_secret
+                else None,
+            'game_active'      : self.game_active,
+            'max_attempts'     : MAX_ATTEMPTS,
+            'error'            : self.last_error,
         })
         msg      = String()
         msg.data = payload
@@ -321,15 +469,92 @@ class GamificationNode(Node):
     #  Helpers
     # ─────────────────────────────────────────────────────────────
 
-    def _reset_game(self):
+    def _start_mode_b_game(self):
+        self.candidates = self.words[:]
+        self.selected_secret = choose_secret_word(self.words)
+        self.current_guess = None
+        self.attempt = 1
+        self.game_active = True
+        self.last_feedback = None
+        self.last_scored_attempt = None
+        self.guess_pending = False
+        self.last_error = None
+        self.get_logger().info('Mode B game started with hidden solution selected.')
+        self._publish_diagnostics(status='ACTIVE')
+
+
+    def _publish_next_mode_a_guess(self):
+        if self.game_mode != 'A' or not self.mode_locked or not self.game_active:
+            return False
+
+        if not self.guess_pending:
+            return False
+
+        formable = self.candidates[:]
+        if self.available_letters:
+            letter_pool = [l.lower() for l in self.available_letters]
+            detected_formable = [
+                w for w in self.candidates
+                if all(letter_pool.count(c) >= w.count(c) for c in set(w))
+            ]
+            if detected_formable:
+                formable = detected_formable
+            else:
+                self.get_logger().warn(
+                    'No candidate can be formed from detected letters; using candidate list for next guess.')
+
+        if not formable:
+            self.get_logger().error('No candidates left — feedback may be inconsistent.')
+            self._publish_diagnostics(status='ERROR')
+            return False
+
+        if self.attempt == 1:
+            self.current_guess = choose_opening_guess(formable)
+        else:
+            self.current_guess = choose_best_guess(formable)
+
+        if not self.current_guess:
+            self._publish_diagnostics(status='ERROR')
+            return False
+
+        self.get_logger().info(f'Attempt {self.attempt}: Guessing {self.current_guess.upper()}')
+        self._publish_guess(self.current_guess)
+        self._publish_mission(self.current_guess)
+        self._publish_diagnostics(status='GUESSING')
+        self.guess_pending = False
+        return True
+
+    def _feedback_to_chars(self, feedback):
+        if not feedback:
+            return []
+
+        mapping = {
+            GOOD: 'G',
+            BAD_POSITION: 'B',
+            INCORRECT: 'I',
+        }
+        return [mapping.get(token, '') for token in feedback]
+
+
+    def _reset_game(self, preserve_mode=False):
+        mode = self.game_mode
         self.candidates        = self.words[:]
         self.available_letters = []
         self.block_positions   = {}
         self.current_guess     = None
+        self.selected_secret   = None
         self.attempt           = 1
         self.game_active       = False
         self.last_feedback     = None
         self.guess_pending     = True
+        self.last_error        = None
+        self.last_scored_attempt = None
+        if preserve_mode:
+            self.game_mode = mode
+            self.mode_locked = mode in ('A', 'B')
+        else:
+            self.game_mode = None
+            self.mode_locked = False
         self._publish_diagnostics(status='RESET')
 
 

@@ -42,6 +42,13 @@ private:
     Homing
   };
 
+  enum class WordleGameMode
+  {
+    Unset,
+    ModeA,
+    ModeB
+  };
+
   struct MissionStepWidgets
   {
     QWidget * item{nullptr};
@@ -81,6 +88,14 @@ private:
   void publishMissionState(const std::string & state);
   void publishMissionCommand(const std::string & command);
   void publishGamificationFeedback(const QString & feedback);
+  void publishGamificationMode(const QString & mode);
+  void publishGamificationSecretWord(const QString & word);
+  void publishGamificationPlayerGuess(const QString & guess);
+  void resetGamificationGame();
+  void beginVoiceRecording(bool reset_retry_sequence);
+  void stopVoiceRecording();
+  void promptManualVoiceOverride();
+  bool isValidWordleWord(const QString & word) const;
   void updateSafetyBanner(const QString & text, const QString & color_hex);
   void moveEvent(QMoveEvent * event) override;
   void resizeEvent(QResizeEvent * event) override;
@@ -124,7 +139,10 @@ private:
   bool voice_recording_{false};
   bool voice_transcribing_{false};
   bool voice_helper_available_{false};
+  bool voice_result_pending_{false};
   bool human_detected_{false};
+  int voice_retry_rejections_{0};
+  WordleGameMode current_wordle_mode_{WordleGameMode::Unset};
   QString pending_voice_guess_;
   QString voice_preview_text_{QStringLiteral("Awaiting input...")};
   QString voice_helper_stdout_buffer_;
@@ -133,6 +151,9 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_feedback_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_mode_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_secret_word_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_player_guess_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr human_detected_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_state_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_status_sub_;

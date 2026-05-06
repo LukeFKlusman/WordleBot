@@ -26,6 +26,10 @@ public:
 
 signals:
   void feedbackSubmitted(const QString & feedback);
+  void modeSelected(const QString & mode);
+  void secretWordSubmitted(const QString & word);
+  void playerGuessSubmitted(const QString & guess);
+  void resetRequested();
 
 protected:
   bool eventFilter(QObject * watched, QEvent * event) override;

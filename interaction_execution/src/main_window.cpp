@@ -15,11 +15,14 @@
 #include <QFontDatabase>
 #include <QGridLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLayoutItem>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QMoveEvent>
 #include <QPainter>
@@ -52,6 +55,9 @@ constexpr const char * kPerceptionStatusTopic = "/perception/status";
 constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
 constexpr const char * kGamificationGuessTopic = "/gamification/guess";
 constexpr const char * kGamificationFeedbackTopic = "/gamification/feedback";
+constexpr const char * kGamificationModeTopic = "/gamification/mode";
+constexpr const char * kGamificationSecretWordTopic = "/gamification/secret_word";
+constexpr const char * kGamificationPlayerGuessTopic = "/gamification/player_guess";
 constexpr const char * kDiagnosticsTopic = "/diagnostics";
 
 QIcon makeRecordIcon()
@@ -653,37 +659,19 @@ void MainWindow::setupVoiceControls()
 {
   ui_->voiceRecordButton->setIcon(makeRecordIcon());
   ui_->voiceRecordButton->setIconSize(QSize(18, 18));
-  ui_->voiceStopButton->setIcon(makeStopIcon());
-  ui_->voiceStopButton->setIconSize(QSize(18, 18));
+  ui_->voiceStopButton->hide();
   ui_->voiceConfirmButton->setIcon(makeConfirmIcon());
   ui_->voiceConfirmButton->setIconSize(QSize(18, 18));
   ui_->voiceRetryButton->setIcon(style()->standardIcon(QStyle::SP_BrowserReload));
   ui_->voiceRetryButton->setIconSize(QSize(18, 18));
 
   connect(ui_->voiceRecordButton, &QPushButton::clicked, this, [this]() {
-    if (!voice_helper_available_ || voice_helper_process_ == nullptr) {
+    if (voice_recording_) {
+      stopVoiceRecording();
       return;
     }
 
-    wordle_view_->clearPreviewGuess();
-    pending_voice_guess_.clear();
-    voice_recording_ = true;
-    voice_transcribing_ = false;
-    setVoicePreviewText(tr("Listening..."));
-    sendVoiceHelperCommand(QStringLiteral("start_recording"));
-    updateVoiceControlsState();
-  });
-
-  connect(ui_->voiceStopButton, &QPushButton::clicked, this, [this]() {
-    if (!voice_recording_ || voice_helper_process_ == nullptr) {
-      return;
-    }
-
-    voice_recording_ = false;
-    voice_transcribing_ = true;
-    setVoicePreviewText(tr("Transcribing..."));
-    sendVoiceHelperCommand(QStringLiteral("stop_recording"));
-    updateVoiceControlsState();
+    beginVoiceRecording(true);
   });
 
   connect(ui_->voiceConfirmButton, &QPushButton::clicked, this, [this]() {
@@ -691,9 +679,12 @@ void MainWindow::setupVoiceControls()
       return;
     }
 
-    wordle_view_->submitPreviewGuess();
-    setVoicePreviewText(tr("Confirmed: %1").arg(pending_voice_guess_.toUpper()));
+    const QString confirmed_guess = pending_voice_guess_.toUpper();
+    publishGamificationPlayerGuess(confirmed_guess);
+    setVoicePreviewText(tr("Submitted: %1").arg(confirmed_guess));
     pending_voice_guess_.clear();
+    voice_result_pending_ = false;
+    voice_retry_rejections_ = 0;
     updateVoiceControlsState();
   });
 
@@ -702,16 +693,113 @@ void MainWindow::setupVoiceControls()
       sendVoiceHelperCommand(QStringLiteral("cancel_recording"));
     }
 
-    voice_recording_ = false;
-    voice_transcribing_ = false;
-    wordle_view_->clearPreviewGuess();
-    pending_voice_guess_.clear();
-    resetVoicePreview();
-    updateVoiceControlsState();
+    if (voice_retry_rejections_ >= 1) {
+      promptManualVoiceOverride();
+      return;
+    }
+
+    voice_retry_rejections_ += 1;
+    beginVoiceRecording(false);
   });
 
-  resetVoicePreview();
+  resetVoicePreview(tr("Select game mode"));
   updateVoiceControlsState();
+}
+
+void MainWindow::beginVoiceRecording(bool reset_retry_sequence)
+{
+  if (
+    current_wordle_mode_ != WordleGameMode::ModeB || !voice_helper_available_ ||
+    voice_helper_process_ == nullptr || voice_transcribing_)
+  {
+    return;
+  }
+
+  if (reset_retry_sequence) {
+    voice_retry_rejections_ = 0;
+  }
+
+  wordle_view_->clearPreviewGuess();
+  pending_voice_guess_.clear();
+  voice_result_pending_ = false;
+  voice_recording_ = true;
+  voice_transcribing_ = false;
+  setVoicePreviewText(tr("Listening..."));
+  sendVoiceHelperCommand(QStringLiteral("start_recording"));
+  updateVoiceControlsState();
+}
+
+void MainWindow::stopVoiceRecording()
+{
+  if (!voice_recording_ || voice_helper_process_ == nullptr) {
+    return;
+  }
+
+  voice_recording_ = false;
+  voice_transcribing_ = true;
+  setVoicePreviewText(tr("Transcribing..."));
+  sendVoiceHelperCommand(QStringLiteral("stop_recording"));
+  updateVoiceControlsState();
+}
+
+void MainWindow::promptManualVoiceOverride()
+{
+  const auto choice = QMessageBox::question(
+    this,
+    tr("Manual Override"),
+    tr("Voice input still does not match. Manually type the word?"),
+    QMessageBox::Yes | QMessageBox::No,
+    QMessageBox::Yes);
+  if (choice != QMessageBox::Yes) {
+    beginVoiceRecording(false);
+    return;
+  }
+
+  QString typed_word = pending_voice_guess_;
+  while (true) {
+    bool accepted = false;
+    typed_word = QInputDialog::getText(
+      this,
+      tr("Manual Word Override"),
+      tr("Word"),
+      QLineEdit::Normal,
+      typed_word,
+      &accepted).trimmed().toUpper();
+
+    if (!accepted) {
+      updateVoiceControlsState();
+      return;
+    }
+
+    if (isValidWordleWord(typed_word)) {
+      break;
+    }
+
+    QMessageBox::warning(
+      this,
+      tr("Invalid Word"),
+      tr("Enter a valid five-letter Wordle word from the dictionary."));
+  }
+
+  pending_voice_guess_ = typed_word;
+  voice_recording_ = false;
+  voice_transcribing_ = false;
+  voice_result_pending_ = true;
+  wordle_view_->previewGuess(pending_voice_guess_);
+  setVoicePreviewText(tr("Override: %1").arg(pending_voice_guess_));
+  updateVoiceControlsState();
+}
+
+bool MainWindow::isValidWordleWord(const QString & word) const
+{
+  const QString cleaned = word.trimmed().toLower();
+  if (cleaned.size() != 5 ||
+    !std::all_of(cleaned.cbegin(), cleaned.cend(), [](const QChar ch) { return ch.isLetter(); }))
+  {
+    return false;
+  }
+
+  return wordle_dictionary_.contains(cleaned);
 }
 
 void MainWindow::setupVoiceHelper()
@@ -762,6 +850,7 @@ void MainWindow::setupVoiceHelper()
     [this](int exit_code, QProcess::ExitStatus exit_status) {
       voice_recording_ = false;
       voice_transcribing_ = false;
+      voice_result_pending_ = false;
       voice_helper_available_ = false;
       updateVoiceControlsState();
 
@@ -786,6 +875,7 @@ void MainWindow::setupVoiceHelper()
     [this](QProcess::ProcessError error) {
       voice_recording_ = false;
       voice_transcribing_ = false;
+      voice_result_pending_ = false;
       voice_helper_available_ = false;
       updateVoiceControlsState();
       setVoicePreviewText(tr("Voice helper unavailable"));
@@ -804,7 +894,11 @@ void MainWindow::setupVoiceHelper()
   }
 
   voice_helper_available_ = true;
-  resetVoicePreview();
+  resetVoicePreview(
+    current_wordle_mode_ == WordleGameMode::ModeB ?
+    tr("Awaiting input...") :
+    (current_wordle_mode_ == WordleGameMode::ModeA ?
+    tr("Mode B voice input only") : tr("Select game mode")));
   updateVoiceControlsState();
 }
 
@@ -855,7 +949,11 @@ void MainWindow::handleVoiceHelperMessage(const QString & payload)
 
   if (event == "ready") {
     voice_helper_available_ = true;
-    resetVoicePreview();
+    resetVoicePreview(
+      current_wordle_mode_ == WordleGameMode::ModeB ?
+      tr("Awaiting input...") :
+      (current_wordle_mode_ == WordleGameMode::ModeA ?
+      tr("Mode B voice input only") : tr("Select game mode")));
     updateVoiceControlsState();
     return;
   }
@@ -871,9 +969,14 @@ void MainWindow::handleVoiceHelperMessage(const QString & payload)
   if (event == "recording_cancelled") {
     voice_recording_ = false;
     voice_transcribing_ = false;
+    voice_result_pending_ = false;
     pending_voice_guess_.clear();
     wordle_view_->clearPreviewGuess();
-    resetVoicePreview();
+    resetVoicePreview(
+      current_wordle_mode_ == WordleGameMode::ModeB ?
+      tr("Awaiting input...") :
+      (current_wordle_mode_ == WordleGameMode::ModeA ?
+      tr("Mode B voice input only") : tr("Select game mode")));
     updateVoiceControlsState();
     return;
   }
@@ -881,6 +984,7 @@ void MainWindow::handleVoiceHelperMessage(const QString & payload)
   if (event == "recording_result") {
     voice_recording_ = false;
     voice_transcribing_ = false;
+    voice_result_pending_ = true;
 
     const QString transcript = object.value("transcript").toString().trimmed();
     const QString guessed_word = object.value("guess").toString().trimmed().toUpper();
@@ -905,6 +1009,7 @@ void MainWindow::handleVoiceHelperMessage(const QString & payload)
   if (event == "error") {
     voice_recording_ = false;
     voice_transcribing_ = false;
+    voice_result_pending_ = true;
     pending_voice_guess_.clear();
     wordle_view_->clearPreviewGuess();
 
@@ -951,9 +1056,31 @@ void MainWindow::setupGamificationBridge()
 {
   gamification_feedback_pub_ =
     node_->create_publisher<std_msgs::msg::String>(kGamificationFeedbackTopic, 10);
+  gamification_mode_pub_ =
+    node_->create_publisher<std_msgs::msg::String>(kGamificationModeTopic, 10);
+  gamification_secret_word_pub_ =
+    node_->create_publisher<std_msgs::msg::String>(kGamificationSecretWordTopic, 10);
+  gamification_player_guess_pub_ =
+    node_->create_publisher<std_msgs::msg::String>(kGamificationPlayerGuessTopic, 10);
 
   connect(wordle_view_, &WordleView::feedbackSubmitted, this, [this](const QString & feedback) {
     publishGamificationFeedback(feedback);
+  });
+  connect(wordle_view_, &WordleView::modeSelected, this, [this](const QString & mode) {
+    publishGamificationMode(mode);
+  });
+  connect(
+    wordle_view_, &WordleView::secretWordSubmitted, this,
+    [this](const QString & word) {
+      publishGamificationSecretWord(word);
+    });
+  connect(
+    wordle_view_, &WordleView::playerGuessSubmitted, this,
+    [this](const QString & guess) {
+      publishGamificationPlayerGuess(guess);
+    });
+  connect(wordle_view_, &WordleView::resetRequested, this, [this]() {
+    resetGamificationGame();
   });
 
   gamification_guess_sub_ = node_->create_subscription<std_msgs::msg::String>(
@@ -995,14 +1122,25 @@ void MainWindow::setupGamificationBridge()
 
       const QJsonObject object = document.object();
       const QString status = object.value("status").toString("UNKNOWN");
+      const QString mode = object.value("mode").toString("A").toUpper();
+      const bool mode_locked = object.value("mode_locked").toBool(false);
       const int attempt = object.value("attempt").toInt(0);
       const QString guess = object.value("current_guess").toString();
+      if (!mode_locked) {
+        current_wordle_mode_ = WordleGameMode::Unset;
+      } else {
+        current_wordle_mode_ = mode == "B" ? WordleGameMode::ModeB : WordleGameMode::ModeA;
+      }
       current_wordle_status_ = status;
       current_wordle_attempt_ = attempt;
       current_wordle_guess_ = guess;
       current_candidates_left_ = object.value("candidates_left").toInt(0);
+      updateVoiceControlsState();
 
-      QString summary = tr("Status: %1").arg(status);
+      QString summary = mode_locked ?
+        tr("Mode %1 | Status: %2").arg(
+          mode == "B" ? QStringLiteral("B") : QStringLiteral("A"), status) :
+        tr("Mode: Select | Status: %1").arg(status);
       if (attempt > 0) {
         summary += tr(" | Attempt %1").arg(attempt);
       }
@@ -1018,20 +1156,33 @@ void MainWindow::setupGamificationBridge()
 
 void MainWindow::updateVoiceControlsState()
 {
-  const bool can_record = voice_helper_available_ && !voice_recording_ && !voice_transcribing_;
-  const bool can_stop = voice_helper_available_ && voice_recording_;
-  const bool can_confirm =
-    voice_helper_available_ && !voice_recording_ && !voice_transcribing_ &&
-    !pending_voice_guess_.isEmpty();
-  const bool can_retry =
-    voice_helper_available_ &&
-    (voice_recording_ || voice_transcribing_ || !pending_voice_guess_.isEmpty() ||
-    voice_preview_text_ != QStringLiteral("Awaiting input..."));
+  const bool mode_b = current_wordle_mode_ == WordleGameMode::ModeB;
+  const bool terminal_game =
+    current_wordle_status_ == QStringLiteral("SOLVED") ||
+    current_wordle_status_ == QStringLiteral("GAME_OVER");
+  const bool busy = voice_recording_ || voice_transcribing_;
+  const bool show_result_actions = mode_b && !terminal_game && voice_result_pending_ && !busy;
 
-  ui_->voiceRecordButton->setEnabled(can_record);
-  ui_->voiceStopButton->setEnabled(can_stop);
-  ui_->voiceConfirmButton->setEnabled(can_confirm);
-  ui_->voiceRetryButton->setEnabled(can_retry);
+  ui_->voiceStopButton->setVisible(false);
+  ui_->voiceRecordButton->setVisible(!show_result_actions || busy);
+  ui_->voiceConfirmButton->setVisible(show_result_actions);
+  ui_->voiceRetryButton->setVisible(show_result_actions);
+
+  ui_->voiceRecordButton->setEnabled(
+    voice_helper_available_ && mode_b && !terminal_game && !voice_transcribing_);
+  ui_->voiceConfirmButton->setEnabled(show_result_actions && !pending_voice_guess_.isEmpty());
+  ui_->voiceRetryButton->setEnabled(show_result_actions);
+
+  if (voice_recording_) {
+    ui_->voiceRecordButton->setText(tr("Stop"));
+    ui_->voiceRecordButton->setIcon(makeStopIcon());
+  } else if (voice_transcribing_) {
+    ui_->voiceRecordButton->setText(tr("Transcribing"));
+    ui_->voiceRecordButton->setIcon(makeStopIcon());
+  } else {
+    ui_->voiceRecordButton->setText(tr("Record"));
+    ui_->voiceRecordButton->setIcon(makeRecordIcon());
+  }
 }
 
 void MainWindow::setupSafetyControls()
@@ -1320,6 +1471,113 @@ void MainWindow::publishGamificationFeedback(const QString & feedback)
     "Published %s='%s'.",
     kGamificationFeedbackTopic,
     msg.data.c_str());
+}
+
+void MainWindow::publishGamificationMode(const QString & mode)
+{
+  if (gamification_mode_pub_ == nullptr) {
+    return;
+  }
+
+  const QString cleaned_mode = mode.trimmed().toUpper() == "B" ? "MODE_B" : "MODE_A";
+  current_wordle_mode_ =
+    cleaned_mode == "MODE_B" ? WordleGameMode::ModeB : WordleGameMode::ModeA;
+  if (voice_recording_ || voice_transcribing_) {
+    sendVoiceHelperCommand(QStringLiteral("cancel_recording"));
+  }
+  voice_recording_ = false;
+  voice_transcribing_ = false;
+  voice_result_pending_ = false;
+  pending_voice_guess_.clear();
+  voice_retry_rejections_ = 0;
+  resetVoicePreview(
+    current_wordle_mode_ == WordleGameMode::ModeB ?
+    tr("Awaiting input...") : tr("Mode B voice input only"));
+
+  std_msgs::msg::String msg;
+  msg.data = cleaned_mode.toStdString();
+  gamification_mode_pub_->publish(msg);
+  updateVoiceControlsState();
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Published %s='%s'.",
+    kGamificationModeTopic,
+    msg.data.c_str());
+}
+
+void MainWindow::publishGamificationSecretWord(const QString & word)
+{
+  if (gamification_secret_word_pub_ == nullptr) {
+    return;
+  }
+
+  if (!isValidWordleWord(word)) {
+    QMessageBox::warning(
+      this,
+      tr("Invalid Secret"),
+      tr("Choose a valid five-letter Wordle word from the dictionary."));
+    return;
+  }
+
+  std_msgs::msg::String msg;
+  msg.data = word.trimmed().toUpper().toStdString();
+  gamification_secret_word_pub_->publish(msg);
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Published %s='<hidden>'.",
+    kGamificationSecretWordTopic);
+}
+
+void MainWindow::publishGamificationPlayerGuess(const QString & guess)
+{
+  if (gamification_player_guess_pub_ == nullptr) {
+    return;
+  }
+
+  if (current_wordle_mode_ != WordleGameMode::ModeB) {
+    setVoicePreviewText(tr("Select Mode B first"));
+    updateVoiceControlsState();
+    return;
+  }
+
+  if (!isValidWordleWord(guess)) {
+    QMessageBox::warning(
+      this,
+      tr("Invalid Guess"),
+      tr("Enter a valid five-letter Wordle word from the dictionary."));
+    return;
+  }
+
+  wordle_view_->previewGuess(guess);
+
+  std_msgs::msg::String msg;
+  msg.data = guess.trimmed().toUpper().toStdString();
+  gamification_player_guess_pub_->publish(msg);
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Published %s='%s'.",
+    kGamificationPlayerGuessTopic,
+    msg.data.c_str());
+}
+
+void MainWindow::resetGamificationGame()
+{
+  if (voice_recording_ || voice_transcribing_) {
+    sendVoiceHelperCommand(QStringLiteral("cancel_recording"));
+  }
+
+  current_wordle_mode_ = WordleGameMode::Unset;
+  voice_recording_ = false;
+  voice_transcribing_ = false;
+  voice_result_pending_ = false;
+  pending_voice_guess_.clear();
+  voice_retry_rejections_ = 0;
+  resetVoicePreview(tr("Select game mode"));
+  updateVoiceControlsState();
+
+  if (mission_state_pub_ != nullptr) {
+    publishMissionState("RESET");
+  }
 }
 
 void MainWindow::updateSafetyBanner(const QString & text, const QString & color_hex)
