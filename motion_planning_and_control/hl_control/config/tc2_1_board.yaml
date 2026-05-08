@@ -31,7 +31,7 @@ letters:
   - letter: R
     object_id: R_object_1
     x: -0.377
-    y:  0.078
+    y:  0.1540
     z:  0.025
     qx: 0.0
     qy: 0.0
@@ -41,7 +41,7 @@ letters:
   - letter: A
     object_id: A_object_1
     x: -0.302
-    y:  0.073
+    y:  0.302
     z:  0.025
     qx: 0.0
     qy: 0.0
@@ -51,7 +51,7 @@ letters:
   - letter: N
     object_id: N_object_1
     x:  0.373
-    y:  0.077
+    y:  0.220
     z:  0.025
     qx: 0.0
     qy: 0.0
@@ -60,8 +60,8 @@ letters:
 
   - letter: E
     object_id: E_object_1
-    x:  0.447
-    y:  0.074
+    x:  0.157
+    y:  0.304
     z:  0.025
     qx: 0.0
     qy: 0.0

@@ -15,6 +15,13 @@ Waits until both word and board state have arrived before solving.
 Re-solves on each new word request (board state is latched from last received).
 """
 
+import sys
+import os
+
+# Allow sibling scripts (rl_task_optimiser.py) to be imported whether this node
+# is run installed (lib/hl_control/) or from source.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
@@ -27,7 +34,7 @@ from shape_msgs.msg import SolidPrimitive
 from hl_control.msg import GameboardState
 from wordlebot_control.msg import PickPlaceTask
 
-from .rl_task_optimiser import RLTaskOptimiser
+from rl_task_optimiser import RLTaskOptimiser
 
 LETTER_CUBE_SIZE = 0.05     # 50 mm cube for collision objects
 SOLVE_STAGE = 3             # C3 masking handles both C2-like and C3-like boards
@@ -53,7 +60,7 @@ class HLControlNode(Node):
             String,
             '/hl_control/word_request',
             self._word_callback,
-            10,
+            latched_qos,
         )
         self._board_sub = self.create_subscription(
             GameboardState,
