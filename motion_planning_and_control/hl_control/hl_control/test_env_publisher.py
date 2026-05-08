@@ -66,7 +66,8 @@ class TestEnvPublisher(Node):
 
         self._board_pub = self.create_publisher(
             GameboardState, '/perception/gameboard_state', latched_qos)
-        self._word_pub = self.create_publisher(String, '/hl_control/word_request', 10)
+        self._word_pub = self.create_publisher(
+            String, '/hl_control/word_request', latched_qos)
 
         # Publish after a short delay to allow subscribers to connect
         self._timer = self.create_timer(delay, self._publish_once)
