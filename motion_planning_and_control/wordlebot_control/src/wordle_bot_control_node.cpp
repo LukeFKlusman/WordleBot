@@ -27,7 +27,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   // - /wordle_bot/resume_mission (std_msgs/Bool): Request the robot to resume a stopped mission. (not yet implemented)
   // - /wordle_bot/abort_mission (std_msgs/Bool): Request the robot to abort the current mission. (not yet implemented)
   // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object in the planning scene.
-  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger a pick-and-place task for a detected letter object, with specified pick pose and place slot.
+  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger a pick-and-place task with pick_pose, place_pose, and object_id from hl_control.
+  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all tracked letter collision objects from the planning scene and reset the queue.
   // ---------------------------------------------------------------------------
   goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
     "/wordle_bot/goal_pose", 10,
@@ -73,6 +74,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "perception/letter_objects", 10,
     std::bind(&WordleBotControlNode::letterObjectCallback, this, std::placeholders::_1));
 
+  clear_letter_objects_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/clear_letter_objects", 10,
+    std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
+
   letter_object_counter_ = 0;
 
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
@@ -106,8 +111,10 @@ WordleBotControlNode::~WordleBotControlNode()
 // abortMissionCallback
 // 
 // collisionObjectCallback
-// 
+//
 // letterObjectCallback
+//
+// clearLetterObjectsCallback
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
@@ -199,22 +206,20 @@ void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::Colli
 
 void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg)
 {
-  const int slot = msg->place_slot;
-  if (slot < 1 || slot > 5) {
-    RCLCPP_WARN(LOGGER,
-      "letterObjectCallback: place_slot=%d is out of range [1,5] — discarding task.", slot);
-    return;
-  }
-
   const std::string incoming_frame =
     msg->pick_pose.header.frame_id.empty() ? "world" : msg->pick_pose.header.frame_id;
 
   RCLCPP_INFO(LOGGER,
-    "letterObjectCallback: received pick=(%.3f, %.3f, %.3f) frame='%s'  place_slot=P%d.",
+    "letterObjectCallback: received pick=(%.3f, %.3f, %.3f) place=(%.3f, %.3f, %.3f) "
+    "object_id='%s' frame='%s'.",
     msg->pick_pose.pose.position.x,
     msg->pick_pose.pose.position.y,
     msg->pick_pose.pose.position.z,
-    incoming_frame.c_str(), slot);
+    msg->place_pose.position.x,
+    msg->place_pose.position.y,
+    msg->place_pose.position.z,
+    msg->object_id.c_str(),
+    incoming_frame.c_str());
 
   if (incoming_frame != "world") {
     RCLCPP_WARN(LOGGER,
@@ -223,16 +228,11 @@ void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::Pi
       incoming_frame.c_str());
   }
 
-  // Resolve the place pose from the slot index
-  const auto & s = WordleBotController::PLACE_SLOTS[static_cast<std::size_t>(slot - 1)];
-  geometry_msgs::msg::Pose place_pose;
-  place_pose.position.x = s.x;
-  place_pose.position.y = s.y;
-  place_pose.position.z = s.z;
-  place_pose.orientation.w = 1.0;
-
-  // Build 50 mm cube collision object at the pick pose
-  const std::string object_id = "letter_" + std::to_string(++letter_object_counter_);
+  // Use the object_id from the message if provided, otherwise generate one
+  const std::string object_id =
+    msg->object_id.empty()
+    ? "letter_" + std::to_string(++letter_object_counter_)
+    : msg->object_id;
 
   moveit_msgs::msg::CollisionObject co;
   co.id = object_id;
@@ -248,19 +248,44 @@ void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::Pi
 
   WordleBotController::PickPlaceEntry entry;
   entry.pick_pose = msg->pick_pose.pose;
-  entry.place_pose = place_pose;
+  entry.place_pose = msg->place_pose;
   entry.collision_object = co;
   entry.object_id = object_id;
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     pick_place_queue_.push_back(entry);
+    tracked_letter_ids_.push_back(object_id);
   }
 
   RCLCPP_INFO(LOGGER,
     "letterObjectCallback: task queued as '%s' (pick-and-place queue size=%zu). "
     "Waiting for start_mission.",
     object_id.c_str(), pick_place_queue_.size());
+}
+
+void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+
+  std::vector<std::string> ids_to_remove;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER,
+        "clearLetterObjectsCallback: mission is running — cannot clear letter objects now.");
+      return;
+    }
+    ids_to_remove = tracked_letter_ids_;
+    tracked_letter_ids_.clear();
+    pick_place_queue_.clear();
+    letter_object_counter_ = 0;
+  }
+
+  controller_->clearLetterObjects(ids_to_remove);
+  RCLCPP_INFO(LOGGER,
+    "clearLetterObjectsCallback: cleared %zu letter object(s) and reset queue.",
+    ids_to_remove.size());
 }
 
 // ---------------------------------------------------------------------------
