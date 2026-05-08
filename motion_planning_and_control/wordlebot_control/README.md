@@ -136,11 +136,17 @@ ros2 topic pub --once /wordle_bot/add_collision_object moveit_msgs/msg/Collision
 ### Send a letter/wordle object for pick-and-place
 
 This triggers the pick-and-place sequence using the custom `PickPlaceTask` message.
-`pick_pose` is the object's pose in the `world` frame; `place_slot` is the integer index of the target slot on the board.
+`pick_pose` is the object's pose in the `world` frame; `place_pose` is the target pose in the `world` frame; `object_id` is the MoveIt collision object ID (e.g. `C_object_1`).
+
+> In normal operation this is published automatically by `hl_control_node`. Use the command below only for direct testing without the HL control layer.
 
 ```bash
-ros2 topic pub --once perception/letter_objects wordlebot_control/msg/PickPlaceTask \
-  "{pick_pose: {header: {frame_id: 'world'}, pose: {position: {x: 0.35, y: 0.2, z: 0.025}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}, place_slot: 2}"
+ros2 topic pub --once /perception/letter_objects wordlebot_control/msg/PickPlaceTask \
+  "{pick_pose: {header: {frame_id: 'world'}, pose: {position: {x: -0.35, y: 0.1, z: 0.025}, orientation: {w: 1.0}}},
+    place_pose: {position: {x: -0.15, y: 0.225, z: 0.025}, orientation: {w: 1.0}},
+    object_id: 'C_object_1'}"
+
+ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
 ```
 
 ### Clear all letter collision objects

@@ -1,2 +1,3 @@
 geometry_msgs/PoseStamped pick_pose
-int32 place_slot
+geometry_msgs/Pose place_pose
+string object_id
