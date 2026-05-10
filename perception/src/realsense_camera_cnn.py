@@ -40,6 +40,8 @@ CNN_CONF_THRESHOLD  = 32.0   # min confidence % to publish a letter
 FRAMES_TO_AVERAGE   = 15     # temporal smoothing frames
 CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-255)
 CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
+
+ENABLE_HUMAN_DETECTION = False
 # ─────────────────────────────────────────────────────────
 
 import cv2
@@ -47,7 +49,8 @@ import numpy as np
 import os
 import collections
 import json
-import mediapipe as mp
+if ENABLE_HUMAN_DETECTION:
+    import mediapipe as mp
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -298,43 +301,51 @@ def extract_roi(frame, x, y, w, h):
 
 class Perception:
     def __init__(self):
-        self.mp_holistic = mp.solutions.holistic
-        self.holistic    = self.mp_holistic.Holistic(
-            model_complexity=0,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.mp_draw         = mp.solutions.drawing_utils
         self.block_detector  = BlockDetector()
         self.cnn             = CNNPredictor(MODEL_PATH, LABEL_MAP)
         self.at_position     = False
-        self.last_detections = []   # (x, y, w, h, letter, conf, x_m, y_m, z_m, theta)
+        self.last_detections = []
         self.human_detected  = False
+
+        if ENABLE_HUMAN_DETECTION:
+            self.mp_holistic = mp.solutions.holistic
+            self.holistic    = self.mp_holistic.Holistic(
+                model_complexity=0,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_draw = mp.solutions.drawing_utils
+        else:
+            self.holistic = None
+            self.mp_draw  = None
+
 
     def process(self, color_bgr, depth_raw=None, depth_colormap=None):
         frame = color_bgr.copy()
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # ── Pose / human detection (runs every frame) ─────
-        results = self.holistic.process(rgb)
-        self.human_detected = results.pose_landmarks is not None
-
-        self.mp_draw.draw_landmarks(
-            frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
-            self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
-        self.mp_draw.draw_landmarks(
-            frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
-            self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
-        self.mp_draw.draw_landmarks(
-            frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
-            self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
-
-        if self.human_detected:
-            cv2.putText(frame, "HUMAN DETECTED", (10, frame.shape[0]-15),
+        if ENABLE_HUMAN_DETECTION and self.holistic is not None:
+            results = self.holistic.process(rgb)
+            self.human_detected = results.pose_landmarks is not None
+            self.mp_draw.draw_landmarks(
+                frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
+                self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
+            self.mp_draw.draw_landmarks(
+                frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
+                self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
+            self.mp_draw.draw_landmarks(
+                frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
+                self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
+            if self.human_detected:
+                cv2.putText(frame, "HUMAN DETECTED", (10, frame.shape[0]-15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,255,0), 2)
+        else:
+            self.human_detected = False
+    
 
         # ── Depth info per block ──────────────────────────
         depth_info = {}
@@ -456,7 +467,8 @@ class Perception:
         print(f"[Trigger] -> {'AT POSITION' if self.at_position else 'MOVING'}")
 
     def close(self):
-        self.holistic.close()
+        if self.holistic is not None:
+            self.holistic.close()
 
 
 # ══════════════════════════════════════════════════════════
@@ -508,7 +520,7 @@ def run_ros2():
     from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
     from cv_bridge import CvBridge
-    from message_filters import ApproximateTimeSynchronizer, Subscriber
+    
 
     class RealSenseCNNNode(Node):
         def __init__(self):
@@ -517,11 +529,25 @@ def run_ros2():
             self.perception = Perception()
 
             # ── Camera subscribers ────────────────────────
-            color_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
-            depth_sub = Subscriber(self, Image, '/camera/camera/aligned_depth_to_color/image_raw')
-            self.sync = ApproximateTimeSynchronizer(
-                [color_sub, depth_sub], queue_size=10, slop=0.05)
-            self.sync.registerCallback(self.camera_callback)
+            self.latest_depth = None
+            self._processing  = False   
+            self.frame_count  = 0
+
+            self.create_subscription(
+              Image,
+              '/camera/camera/aligned_depth_to_color/image_raw',
+              self.depth_callback,
+              10)
+
+            self.create_subscription(
+              Image,
+              '/camera/camera/color/image_raw',
+              self.color_callback,
+              10)
+            
+            
+            
+            
 
             # ── Mission state subscriber ──────────────────
             # Elijah's behaviour tree sends "SCANNING" or "IDLE"
@@ -572,24 +598,41 @@ def run_ros2():
                 self.perception.last_detections = []
                 self.get_logger().info('[Mission] IDLE → MOVING')
 
-        def camera_callback(self, color_msg, depth_msg):
+        def depth_callback(self, depth_msg):
             try:
-                color_bgr     = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
-                depth_raw     = self.bridge.imgmsg_to_cv2(depth_msg, '16UC1')
-                depth_norm    = cv2.normalize(depth_raw, None, 0, 255, cv2.NORM_MINMAX)
-                depth_colored = cv2.applyColorMap(depth_norm.astype(np.uint8), cv2.COLORMAP_JET)
+                was_none = self.latest_depth is None
+                self.latest_depth = self.bridge.imgmsg_to_cv2(depth_msg, '16UC1')
+                if was_none:
+                    self.get_logger().info('[Camera] First depth frame received')
+            except Exception as e:
+                self.get_logger().error(f'Depth error: {e}')
+        
+        
+        
+        
 
-                display = self.perception.process(color_bgr, depth_raw, depth_colored)
+        def color_callback(self, color_msg):
+            if self._processing:
+                return
+            self._processing = True
+            if self.frame_count == 0:
+                self.get_logger().info('[Camera] First colour frame received — starting display')
+            try:
+                color_bgr = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
+                depth_raw = self.latest_depth
 
-                # ── Publish human detected (every frame) ──
-                human_msg      = Bool()
-                human_msg.data = self.perception.human_detected
-                self.pub_human.publish(human_msg)
+                display = self.perception.process(color_bgr, depth_raw, None)
 
-                # ── Publish status (every frame) ───────────
-                status_msg      = String()
-                status_msg.data = "SCANNING" if self.perception.at_position else "IDLE"
-                self.pub_status.publish(status_msg)
+                # ── Publish at reduced rate (every 6th frame = 5Hz) ──
+                self.frame_count += 1
+                if self.frame_count % 6 == 0:
+                    human_msg      = Bool()
+                    human_msg.data = self.perception.human_detected
+                    self.pub_human.publish(human_msg)
+
+                    status_msg      = String()
+                    status_msg.data = "SCANNING" if self.perception.at_position else "IDLE"
+                    self.pub_status.publish(status_msg)
 
                 # ── Publish detections (when scanning) ─────
                 if self.perception.at_position:
@@ -599,6 +642,7 @@ def run_ros2():
                     self.get_logger().info(f'[Detections] {det_msg.data}')
 
                 # ── Display ───────────────────────────────
+                display = cv2.resize(display, (960, 540))
                 cv2.imshow("RealSense CNN Vision", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
@@ -608,6 +652,10 @@ def run_ros2():
 
             except Exception as e:
                 self.get_logger().error(f'Error: {e}')
+            finally:
+                self._processing = False
+
+
 
         def destroy_node(self):
             self.perception.close()
