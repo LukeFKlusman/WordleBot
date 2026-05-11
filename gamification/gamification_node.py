@@ -17,6 +17,7 @@
 #    /gamification/guess         std_msgs/String  — current word guess
 #    /gamification/mission_state std_msgs/String  — ordered placement JSON for SS2
 #    /diagnostics                std_msgs/String  — board state JSON for SS3 GUI
+#    /hl_control/word_request    std_msgs/String  — confirmed word for HL controller (latched)
 #
 #  SERVICES:
 #    /gamification/reset         — resets the game state
@@ -34,6 +35,7 @@ import sys
 import json
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
@@ -63,32 +65,44 @@ class GamificationNode(Node):
         self.get_logger().info(f'Dictionary loaded: {len(self.words)} words')
 
         # ── Game state ────────────────────────────────────────────
-        self.candidates        = self.words[:]
-        self.available_letters = []
-        self.block_positions   = {}        # letter -> {x_m, y_m, z_m, theta_deg}
-        self.current_guess     = None
-        self.selected_secret   = None
-        self.attempt           = 1
-        self.game_active       = False
-        self.last_feedback     = None
-        self.guess_pending     = True      # True = ready to pick and publish next guess
-        self.game_mode         = None      # A = robot guesses, B = human guesses
-        self.mode_locked       = False
-        self.last_error        = None
+        self.candidates          = self.words[:]
+        self.available_letters   = []
+        self.block_positions     = {}        # letter -> {x_m, y_m, z_m, theta_deg}
+        self.current_guess       = None
+        self.selected_secret     = None
+        self.attempt             = 1
+        self.game_active         = False
+        self.last_feedback       = None
+        self.guess_pending       = True      # True = ready to pick and publish next guess
+        self.game_mode           = None      # A = robot guesses, B = human guesses
+        self.mode_locked         = False
+        self.last_error          = None
         self.last_scored_attempt = None
 
+        # ── Latched QoS for HL control ────────────────────────────
+        # HL control receives the last published word even if it starts
+        # after the gamification node has already published.
+        latched_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+
         # ── Subscribers ───────────────────────────────────────────
-        self.create_subscription(String, '/perception/detections', self.detections_callback, 10)
-        self.create_subscription(String, '/mission/state',          self.mission_callback,    10)
-        self.create_subscription(String, '/gamification/feedback',  self.feedback_callback,   10)
-        self.create_subscription(String, '/gamification/mode',       self.mode_callback,       10)
-        self.create_subscription(String, '/gamification/secret_word', self.secret_callback,    10)
-        self.create_subscription(String, '/gamification/player_guess', self.player_guess_callback, 10)
+        self.create_subscription(String, '/perception/detections',    self.detections_callback,     10)
+        self.create_subscription(String, '/mission/state',            self.mission_callback,         10)
+        self.create_subscription(String, '/gamification/feedback',    self.feedback_callback,        10)
+        self.create_subscription(String, '/gamification/mode',        self.mode_callback,            10)
+        self.create_subscription(String, '/gamification/secret_word', self.secret_callback,          10)
+        self.create_subscription(String, '/gamification/player_guess', self.player_guess_callback,   10)
 
         # ── Publishers ────────────────────────────────────────────
-        self.pub_guess       = self.create_publisher(String, '/gamification/guess',        10)
-        self.pub_mission     = self.create_publisher(String, '/gamification/mission_state', 10)
-        self.pub_diagnostics = self.create_publisher(String, '/diagnostics',               10)
+        self.pub_guess        = self.create_publisher(String, '/gamification/guess',         10)
+        self.pub_mission      = self.create_publisher(String, '/gamification/mission_state', 10)
+        self.pub_diagnostics  = self.create_publisher(String, '/diagnostics',                10)
+
+        # Latched — HL controller receives this automatically on connect
+        self.pub_word_request = self.create_publisher(
+            String, '/hl_control/word_request', latched_qos)
 
         # ── Services ─────────────────────────────────────────────
         self.create_service(Trigger, '/gamification/reset', self.reset_callback)
@@ -99,6 +113,7 @@ class GamificationNode(Node):
             '\n  Subscribing: /perception/detections  /mission/state  /gamification/feedback'
             '\n               /gamification/mode  /gamification/secret_word  /gamification/player_guess'
             '\n  Publishing:  /gamification/guess  /gamification/mission_state  /diagnostics'
+            '\n               /hl_control/word_request  (latched)'
         )
 
 
@@ -171,6 +186,7 @@ class GamificationNode(Node):
 
         self._publish_guess(self.current_guess)
         self._publish_mission(self.current_guess)
+        self._publish_word_request(self.current_guess)
         self._publish_diagnostics(status='GUESSING')
 
         self.guess_pending = False   # wait for feedback before next guess
@@ -187,8 +203,8 @@ class GamificationNode(Node):
                 self._publish_diagnostics(status='SELECT_MODE')
                 return
 
-            self.game_active  = True
-            self.last_error = None
+            self.game_active = True
+            self.last_error  = None
             if self.game_mode == 'A':
                 self.guess_pending = True
                 if self.selected_secret is None:
@@ -197,8 +213,8 @@ class GamificationNode(Node):
                 self.get_logger().info('[Mission] Mode A game started.')
             else:
                 self.selected_secret = choose_secret_word(self.words)
-                self.current_guess = None
-                self.guess_pending = False
+                self.current_guess   = None
+                self.guess_pending   = False
                 self.get_logger().info('[Mission] Mode B game started with hidden solution selected.')
             self._publish_diagnostics(status='ACTIVE')
 
@@ -235,7 +251,7 @@ class GamificationNode(Node):
         if all(f == GOOD for f in feedback):
             self.get_logger().info(
                 f'SOLVED in {self.attempt} attempt(s)! Word: {self.current_guess.upper()}')
-            self.game_active  = False
+            self.game_active   = False
             self.guess_pending = False
             self._publish_diagnostics(status='SOLVED')
             return
@@ -244,7 +260,7 @@ class GamificationNode(Node):
         if self.attempt >= MAX_ATTEMPTS:
             self.get_logger().info(
                 f'AI failed in {MAX_ATTEMPTS} attempts. Word was {self.selected_secret.upper()}')
-            self.game_active = False
+            self.game_active   = False
             self.guess_pending = False
             self._publish_diagnostics(status='GAME_OVER')
             return
@@ -281,9 +297,9 @@ class GamificationNode(Node):
             self._publish_diagnostics(status='MODE_LOCKED')
             return
 
-        self.game_mode = requested
+        self.game_mode   = requested
         self.mode_locked = True
-        self.last_error = None
+        self.last_error  = None
         self.get_logger().info(f'Game mode set to Mode {self.game_mode}.')
         if self.game_mode == 'B':
             self._start_mode_b_game()
@@ -306,9 +322,9 @@ class GamificationNode(Node):
             return
 
         self.selected_secret = word
-        self.game_active = True
-        self.guess_pending = True
-        self.last_error = None
+        self.game_active     = True
+        self.guess_pending   = True
+        self.last_error      = None
         self.get_logger().info('Mode A secret word accepted.')
         self._publish_next_mode_a_guess()
 
@@ -331,10 +347,10 @@ class GamificationNode(Node):
             self._publish_diagnostics(status='INVALID_GUESS')
             return
 
-        self.current_guess = guess
-        self.last_feedback = score_guess_against_target(guess, self.selected_secret)
+        self.current_guess       = guess
+        self.last_feedback       = score_guess_against_target(guess, self.selected_secret)
         self.last_scored_attempt = self.attempt
-        self.last_error = None
+        self.last_error          = None
 
         if all(f == GOOD for f in self.last_feedback):
             self.get_logger().info(
@@ -392,6 +408,19 @@ class GamificationNode(Node):
         self.get_logger().info(f'Published guess: {guess.upper()}')
 
 
+    def _publish_word_request(self, guess):
+        """
+        Publishes confirmed word to HL controller via latched topic.
+        HL control arms the robot and runs the task sequencer automatically
+        as soon as both the word and board state have arrived — no separate
+        start signal needed.
+        """
+        msg      = String()
+        msg.data = guess.upper()
+        self.pub_word_request.publish(msg)
+        self.get_logger().info(f'Published word request to HL control: {guess.upper()}')
+
+
     def _publish_mission(self, guess):
         """
         Publishes ordered letter placement sequence to SS2: Motion Planning.
@@ -418,9 +447,13 @@ class GamificationNode(Node):
                 'theta_deg': pos.get('theta_deg', 0.0),
             })
 
-        payload      = json.dumps({'word': guess.upper(), 'attempt': self.attempt, 'placements': placements})
-        msg          = String()
-        msg.data     = payload
+        payload  = json.dumps({
+            'word'      : guess.upper(),
+            'attempt'   : self.attempt,
+            'placements': placements,
+        })
+        msg      = String()
+        msg.data = payload
         self.pub_mission.publish(msg)
         self.get_logger().info(f'Published mission state: {payload}')
 
@@ -470,15 +503,15 @@ class GamificationNode(Node):
     # ─────────────────────────────────────────────────────────────
 
     def _start_mode_b_game(self):
-        self.candidates = self.words[:]
-        self.selected_secret = choose_secret_word(self.words)
-        self.current_guess = None
-        self.attempt = 1
-        self.game_active = True
-        self.last_feedback = None
+        self.candidates          = self.words[:]
+        self.selected_secret     = choose_secret_word(self.words)
+        self.current_guess       = None
+        self.attempt             = 1
+        self.game_active         = True
+        self.last_feedback       = None
         self.last_scored_attempt = None
-        self.guess_pending = False
-        self.last_error = None
+        self.guess_pending       = False
+        self.last_error          = None
         self.get_logger().info('Mode B game started with hidden solution selected.')
         self._publish_diagnostics(status='ACTIVE')
 
@@ -492,7 +525,7 @@ class GamificationNode(Node):
 
         formable = self.candidates[:]
         if self.available_letters:
-            letter_pool = [l.lower() for l in self.available_letters]
+            letter_pool       = [l.lower() for l in self.available_letters]
             detected_formable = [
                 w for w in self.candidates
                 if all(letter_pool.count(c) >= w.count(c) for c in set(w))
@@ -520,40 +553,37 @@ class GamificationNode(Node):
         self.get_logger().info(f'Attempt {self.attempt}: Guessing {self.current_guess.upper()}')
         self._publish_guess(self.current_guess)
         self._publish_mission(self.current_guess)
+        self._publish_word_request(self.current_guess)
         self._publish_diagnostics(status='GUESSING')
         self.guess_pending = False
         return True
 
+
     def _feedback_to_chars(self, feedback):
         if not feedback:
             return []
-
-        mapping = {
-            GOOD: 'G',
-            BAD_POSITION: 'B',
-            INCORRECT: 'I',
-        }
+        mapping = {GOOD: 'G', BAD_POSITION: 'B', INCORRECT: 'I'}
         return [mapping.get(token, '') for token in feedback]
 
 
     def _reset_game(self, preserve_mode=False):
         mode = self.game_mode
-        self.candidates        = self.words[:]
-        self.available_letters = []
-        self.block_positions   = {}
-        self.current_guess     = None
-        self.selected_secret   = None
-        self.attempt           = 1
-        self.game_active       = False
-        self.last_feedback     = None
-        self.guess_pending     = True
-        self.last_error        = None
+        self.candidates          = self.words[:]
+        self.available_letters   = []
+        self.block_positions     = {}
+        self.current_guess       = None
+        self.selected_secret     = None
+        self.attempt             = 1
+        self.game_active         = False
+        self.last_feedback       = None
+        self.guess_pending       = True
+        self.last_error          = None
         self.last_scored_attempt = None
         if preserve_mode:
-            self.game_mode = mode
+            self.game_mode   = mode
             self.mode_locked = mode in ('A', 'B')
         else:
-            self.game_mode = None
+            self.game_mode   = None
             self.mode_locked = False
         self._publish_diagnostics(status='RESET')
 
