@@ -316,25 +316,25 @@ Publish a board state and word request manually without `test_sim.py`:
 ```bash
 ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
   "{letters: [
-    {letter: 'C', object_id: 'C_object_1',
+    {letter: 'A', object_id: 'C_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.448, y: 0.072, z: 0.025},
+            pose: {position: {x: -0.308, y: 0.302, z: 0.025},
                    orientation: {w: 1.0}}}},
     {letter: 'R', object_id: 'R_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.377, y: 0.078, z: 0.025},
+            pose: {position: {x: -0.377, y: 0.154, z: 0.025},
                    orientation: {w: 1.0}}}},
-    {letter: 'A', object_id: 'A_object_1',
+    {letter: 'C', object_id: 'A_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.302, y: 0.073, z: 0.025},
+            pose: {position: {x: -0.442, y: 0.073, z: 0.025},
                    orientation: {w: 1.0}}}},
-    {letter: 'N', object_id: 'N_object_1',
+    {letter: 'E', object_id: 'N_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: 0.373, y: 0.077, z: 0.025},
+            pose: {position: {x: 0.153, y: 0.457, z: 0.025},
                    orientation: {w: 1.0}}}},
-    {letter: 'E', object_id: 'E_object_1',
+    {letter: 'N', object_id: 'E_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: 0.447, y: 0.074, z: 0.025},
+            pose: {position: {x: 0.377, y: 0.224, z: 0.025},
                    orientation: {w: 1.0}}}}
   ]}"
 
