@@ -75,11 +75,6 @@ class TestKeyControlConcepts(unittest.TestCase):
         rclpy.init()
         cls.node = rclpy.create_node("tc1_key_control_concepts_node")
 
-        # Legacy single-goal publisher (backward compat; auto-arms mission)
-        cls.goal_pub = cls.node.create_publisher(
-            PoseStamped, "/wordle_bot/goal_pose", 10
-        )
-
         # Mission-level publishers
         cls.set_mission_pub = cls.node.create_publisher(
             PoseArray, "/wordle_bot/set_mission", 10
@@ -1288,26 +1283,6 @@ class TestKeyControlConcepts(unittest.TestCase):
             if time.time() > deadline:
                 self.fail(
                     f"Mission did not complete within {MOTION_TIMEOUT_S * len(poses):.0f} s"
-                )
-
-    def _send_goal_and_wait(self, pose: PoseStamped) -> None:
-        """Publish a single goal via legacy topic and block until motion_complete fires."""
-        TestKeyControlConcepts.motion_complete = False
-        time.sleep(0.5)  # subscriber handshake
-        pose.header.stamp = self.node.get_clock().now().to_msg()
-        self.goal_pub.publish(pose)
-        self.node.get_logger().info(
-            f"Published goal: ({pose.pose.position.x:.3f}, "
-            f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
-        )
-        deadline = time.time() + MOTION_TIMEOUT_S
-        while not TestKeyControlConcepts.motion_complete:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-            if time.time() > deadline:
-                self.fail(
-                    f"Motion did not complete within {MOTION_TIMEOUT_S}s "
-                    f"for goal ({pose.pose.position.x:.3f}, "
-                    f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
                 )
 
     def _get_ee_transform(self):

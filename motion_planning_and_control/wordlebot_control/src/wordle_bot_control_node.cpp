@@ -14,26 +14,24 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   // ROS2 topic subscriptions and publications
   // ---------------------------------------------------------------------------
   // Publishers
-  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after each successful motion execution.
+  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after a successful mission execution.
   // - /wordle_bot/goal_reached (std_msgs/Bool): Published after reaching each individual goal in a mission.
   // - /wordle_bot/mission_complete (std_msgs/Bool): Published after completing all goals in a mission.
-  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING" to indicate current state.
+  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING".
 
   // Subscriptions
-  // - /wordle_bot/goal_pose (geometry_msgs/PoseStamped): Legacy single-goal interface for free-space motion.
-  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Set a multi-goal mission; execution starts on /start_mission.
-  // - /wordle_bot/start_mission (std_msgs/Bool): Start executing the currently set mission.
-  // - /wordle_bot/stop_mission (std_msgs/Bool): Request the robot to stop the current mission safely.
-  // - /wordle_bot/resume_mission (std_msgs/Bool): Request the robot to resume a stopped mission. (not yet implemented)
-  // - /wordle_bot/abort_mission (std_msgs/Bool): Request the robot to abort the current mission. (not yet implemented)
-  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object in the planning scene.
-  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger a pick-and-place task with pick_pose, place_pose, and object_id from hl_control.
-  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all tracked letter collision objects from the planning scene and reset the queue.
+  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Queue N goal poses; execution starts on /start_mission.
+  // - /wordle_bot/start_mission (std_msgs/Bool): Plan and execute the queued mission (goal poses or pick-and-place).
+  // - /wordle_bot/stop_mission (std_msgs/Bool): Stop the current mission safely.
+  // - /wordle_bot/resume_mission (std_msgs/Bool): Resume a stopped mission (not yet implemented).
+  // - /wordle_bot/abort_mission (std_msgs/Bool): Abort the current mission (not yet implemented).
+  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object.
+  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger pick-and-place mode.
+  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all letter collision objects and reset queue.
+  // - /wordle_bot/open_gripper (std_msgs/Bool): Open the gripper (IDLE only).
+  // - /wordle_bot/close_gripper (std_msgs/Bool): Close the gripper (IDLE only).
+  // - /wordle_bot/return_home (std_msgs/Bool): Return arm to home position (IDLE only).
   // ---------------------------------------------------------------------------
-  goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
-    "/wordle_bot/goal_pose", 10,
-    std::bind(&WordleBotControlNode::goalCallback, this, std::placeholders::_1));
-
   motion_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/motion_complete", 10);
 
@@ -128,17 +126,6 @@ WordleBotControlNode::~WordleBotControlNode()
 //
 // clearLetterObjectsCallback
 // ---------------------------------------------------------------------------
-
-void WordleBotControlNode::goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    goal_queue_.push_back(msg->pose);
-    mission_armed_ = true;
-  }
-  cv_.notify_one();
-  RCLCPP_INFO(LOGGER, "Goal enqueued and armed. Queue size: %zu", goal_queue_.size());
-}
 
 void WordleBotControlNode::setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
 {
@@ -488,26 +475,78 @@ void WordleBotControlNode::missionLoop()
       }
 
     } else {
-      RCLCPP_INFO(LOGGER, "Mission thread: executing %zu waypoint goal(s).",
-        current_mission.size());
+      RCLCPP_INFO(LOGGER, "Goal mission: %zu goal(s) queued.", current_mission.size());
+
+      // ── Phase 1: Plan all goals sequentially, chaining via FixedState ────────
+      std::vector<WordleBotController::PlannedMoveToGoal> planned_goals;
+      planned_goals.reserve(current_mission.size());
+      bool planning_failed = false;
+
       for (std::size_t i = 0; i < current_mission.size(); ++i) {
         if (stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Waypoint mission stopped before goal %zu.", i + 1);
+          RCLCPP_INFO(LOGGER, "Goal planning: stop requested before goal %zu — aborting.", i + 1);
+          planning_failed = true;
           break;
         }
-        RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, current_mission.size());
-        const bool ok = controller_->moveToTarget(current_mission[i]);
-        if (!ok || stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Waypoint mission stopped at goal %zu.", i + 1);
+
+        const bool is_last = (i == current_mission.size() - 1);
+        planning_scene::PlanningScenePtr start_scene =
+            (i == 0) ? nullptr : planned_goals.back().end_scene;
+
+        RCLCPP_INFO(LOGGER, "Planning goal %zu of %zu (return_home=%s).",
+          i + 1, current_mission.size(), is_last ? "yes" : "no");
+
+        WordleBotController::PlannedMoveToGoal planned =
+            controller_->planMoveToGoal(current_mission[i], start_scene, is_last);
+
+        if (!planned.task) {
+          RCLCPP_ERROR(LOGGER, "Planning FAILED for goal %zu — aborting.", i + 1);
+          planning_failed = true;
           break;
         }
-        goal_reached_pub_->publish(signal);
-        motion_complete_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Goal %zu reached.", i + 1);
+
+        RCLCPP_INFO(LOGGER, "Planning succeeded for goal %zu of %zu.", i + 1, current_mission.size());
+        planned_goals.emplace_back(std::move(planned));
       }
-      if (!stop_requested_.load()) {
-        mission_complete_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Mission complete published.");
+
+      if (planned_goals.empty()) {
+        RCLCPP_ERROR(LOGGER, "Goal mission: no goals were successfully planned — aborting.");
+      } else {
+        if (planning_failed) {
+          RCLCPP_WARN(LOGGER, "Goal mission: %zu of %zu goals planned — executing partial mission.",
+            planned_goals.size(), current_mission.size());
+        } else {
+          RCLCPP_INFO(LOGGER, "Goal mission: all %zu goals planned — executing.", planned_goals.size());
+        }
+
+        // ── Phase 2: Execute all pre-planned goals in order ──────────────────
+        bool all_ok = true;
+        for (std::size_t i = 0; i < planned_goals.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER, "Goal execution: stop requested before goal %zu — aborting.", i + 1);
+            all_ok = false;
+            break;
+          }
+
+          RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, planned_goals.size());
+
+          if (!controller_->executePlannedMoveToGoal(planned_goals[i]) || stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER, "Execution FAILED at goal %zu — stopping.", i + 1);
+            all_ok = false;
+            break;
+          }
+
+          goal_reached_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Goal %zu of %zu reached.", i + 1, planned_goals.size());
+        }
+
+        if (all_ok && !planning_failed && !stop_requested_.load()) {
+          mission_complete_pub_->publish(signal);
+          motion_complete_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Goal mission fully complete.");
+        } else {
+          RCLCPP_ERROR(LOGGER, "Goal mission did not complete fully.");
+        }
       }
     }
 

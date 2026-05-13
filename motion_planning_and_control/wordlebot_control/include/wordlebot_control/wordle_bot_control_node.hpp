@@ -10,7 +10,6 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
-#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <moveit_msgs/msg/collision_object.hpp>
@@ -33,8 +32,6 @@ private:
   rclcpp::Node::SharedPtr node_;
   std::shared_ptr<WordleBotController> controller_;
 
-  // Legacy single-goal interface (backward compat)
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr motion_complete_pub_;
 
   // Mission-level interface
@@ -83,7 +80,6 @@ private:
   std::thread mission_thread_;
 
   // Subscriber callbacks
-  void goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg);
   void startMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void stopMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);

@@ -41,6 +41,13 @@ public:
     std::string object_id;
   };
 
+  // Holds a fully planned MTC move-to-goal task. Same chaining pattern as PlannedPickPlace.
+  struct PlannedMoveToGoal {
+    std::unique_ptr<moveit::task_constructor::Task> task;
+    planning_scene::PlanningScenePtr end_scene;
+    const moveit::task_constructor::SolutionBase* best_solution{nullptr};
+  };
+
   // Holds a fully planned MTC task and metadata needed to execute it and chain
   // the next task. mtc::Task is non-copyable, so it is heap-allocated.
   struct PlannedPickPlace {
@@ -49,14 +56,6 @@ public:
     const moveit::task_constructor::SolutionBase* best_solution{nullptr};
     std::string object_id;
   };
-
-  // Move the end-effector to the specified target pose using free-space OMPL planning.
-  // Applies floor collision, shoulder joint constraint, and syncs robot state before planning.
-  bool moveToTarget(const geometry_msgs::msg::Pose & target);
-
-  // Move to target via a Cartesian waypoint path: lift up → translate → descend.
-  // More predictable path shape than free-space planning; returns false if < 90% of path planned.
-  bool moveToTargetCartesian(const geometry_msgs::msg::Pose & target, double lift_height = 0.15);
 
   // Add floor collision and attach a sensor guard cylinder to the end effector.
   void setupCollisionScene();
@@ -86,9 +85,6 @@ public:
   // Clear the stop flag before issuing a new motion so the motion is not immediately rejected.
   void clearStopFlag();
 
-  // Move to the named "home" joint state. Does NOT apply path constraints so abort always succeeds.
-  bool moveToHome();
-
   // Execute MTC stages 1-4: open gripper → move to pick → grasp → lift.
   // Returns true on success; false if stopped, planning failed, or execution failed.
   bool doPickPhase(const geometry_msgs::msg::Pose & object_pose);
@@ -102,14 +98,23 @@ public:
   static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
                                             double roll, double pitch, double yaw);
 
-  // Return the path constraints used by moveToTarget: shoulder_lift_joint and wrist_3_joint bounds.
-  // Pass the result to MTC Connect stages so pick-and-place planning is constrained identically.
+  // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
   static moveit_msgs::msg::Constraints buildPathConstraints();
 
   // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
   // This is the L1 path length in joint space — used to validate motion efficiency.
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
+
+  // Plan a move-to-goal MTC task without executing it.
+  // start_scene: nullptr → CurrentState (first goal); non-null → FixedState (chained).
+  // include_return_home: true only for the last goal in the mission.
+  PlannedMoveToGoal planMoveToGoal(const geometry_msgs::msg::Pose & goal_pose,
+                                    const planning_scene::PlanningScenePtr & start_scene,
+                                    bool include_return_home);
+
+  // Execute a previously planned move-to-goal task. Returns true on SUCCESS.
+  bool executePlannedMoveToGoal(PlannedMoveToGoal & planned);
 
   // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
   bool returnToHome();
@@ -152,18 +157,6 @@ public:
   }};
 
 private:
-  std::vector<double> computeBestIK(const moveit::core::RobotStatePtr & current_state,
-                                    const geometry_msgs::msg::Pose & target_pose);
-
-  std::vector<moveit::planning_interface::MoveGroupInterface::Plan> generateCandidatePlans(int num_attempts);
-
-  moveit::planning_interface::MoveGroupInterface::Plan selectBestPlan(const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans,
-                                                                      const std::vector<double> & q_start,
-                                                                      const std::vector<double> & q_goal);
-
-  void visualisePlan(const moveit::planning_interface::MoveGroupInterface::Plan * plan,
-                     const std::string & title);
-
   // Build an MTC task for one pick-and-place operation.
   // start_scene == nullptr → Stage 1 is CurrentState (reads live robot).
   // start_scene != nullptr → Stage 1 is FixedState seeded from start_scene.
