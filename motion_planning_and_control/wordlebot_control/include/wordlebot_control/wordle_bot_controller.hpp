@@ -143,6 +143,18 @@ public:
   // then calls task.execute(). Returns true on SUCCESS.
   bool executePlannedTask(PlannedPickPlace & planned);
 
+  // Plan a Cartesian (straight-line) move to an absolute goal pose using the CartesianPath solver.
+  // Mirrors planMoveToGoal but replaces the OMPL sampling planner with CartesianPath.
+  // start_scene: nullptr → CurrentState; non-null → FixedState (chained).
+  PlannedMoveToGoal planMoveToGoalCartesian(const geometry_msgs::msg::Pose & goal_pose,
+                                             const planning_scene::PlanningScenePtr & start_scene);
+
+  // Execute the full scan-and-sweep sequence using the provided poses and dwell time.
+  // poses[0] is reached via free-space planning; poses[1..3] via Cartesian moves.
+  // Dwells dwell_time_seconds at each pose, then returns to home.
+  bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses,
+                       double dwell_time_seconds);
+
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
   // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).

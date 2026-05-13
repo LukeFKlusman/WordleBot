@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -62,6 +64,11 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr close_gripper_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr return_home_sub_;
 
+  // Scan and sweep
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_sub_;
+  std::array<geometry_msgs::msg::Pose, 4> scan_sweep_poses_;
+  double scan_sweep_dwell_time_{1.5};
+
   // PickPlaceEntry is defined on WordleBotController (the controller owns planning).
   std::vector<WordleBotController::PickPlaceEntry> pick_place_queue_;
 
@@ -91,6 +98,7 @@ private:
   void openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void returnHomeCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg);
 
   // Mission loop (runs on mission_thread_)
   void missionLoop();

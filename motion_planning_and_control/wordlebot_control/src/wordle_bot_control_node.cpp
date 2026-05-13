@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include <moveit/planning_scene/planning_scene.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
@@ -87,6 +88,45 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   return_home_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     "/wordle_bot/return_home", 10,
     std::bind(&WordleBotControlNode::returnHomeCallback, this, std::placeholders::_1));
+
+  scan_and_sweep_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/scan_and_sweep", 10,
+    std::bind(&WordleBotControlNode::scanAndSweepCallback, this, std::placeholders::_1));
+
+  // Load scan-and-sweep parameters from config/scan_sweep_poses.yaml.
+  // Guard each declaration: if the YAML was loaded via --params-file the parameters
+  // are already declared by the time the constructor runs.
+  if (!node_->has_parameter("scan_sweep_dwell_time"))
+    node_->declare_parameter<double>("scan_sweep_dwell_time", 1.5);
+  if (!node_->has_parameter("scan_sweep_pose_0"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_0", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_1"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_1", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_2"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_2", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_3"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_3", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+
+  scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
+
+  auto load_pose = [&](const std::string & param_name) -> geometry_msgs::msg::Pose {
+    auto v = node_->get_parameter(param_name).as_double_array();
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = v[0];
+    pose.position.y = v[1];
+    pose.position.z = v[2];
+    tf2::Quaternion q;
+    q.setRPY(v[3], v[4], v[5]);
+    pose.orientation.x = q.x();
+    pose.orientation.y = q.y();
+    pose.orientation.z = q.z();
+    pose.orientation.w = q.w();
+    return pose;
+  };
+  scan_sweep_poses_[0] = load_pose("scan_sweep_pose_0");
+  scan_sweep_poses_[1] = load_pose("scan_sweep_pose_1");
+  scan_sweep_poses_[2] = load_pose("scan_sweep_pose_2");
+  scan_sweep_poses_[3] = load_pose("scan_sweep_pose_3");
 
   letter_object_counter_ = 0;
 
@@ -299,6 +339,42 @@ void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedP
   }
   RCLCPP_INFO(LOGGER, "returnHomeCallback: returning to home.");
   controller_->returnToHome();
+}
+
+void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "scanAndSweepCallback: mission running — ignoring.");
+      return;
+    }
+    mission_running_ = true;
+  }
+
+  RCLCPP_INFO(LOGGER, "scanAndSweepCallback: starting scan-and-sweep sequence.");
+
+  std_msgs::msg::String state_msg;
+  state_msg.data = "RUNNING";
+  robot_state_pub_->publish(state_msg);
+
+  auto poses = scan_sweep_poses_;
+  double dwell = scan_sweep_dwell_time_;
+
+  std::thread([this, poses, dwell]() {
+    controller_->runScanAndSweep(
+      std::vector<geometry_msgs::msg::Pose>(poses.begin(), poses.end()), dwell);
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      mission_running_ = false;
+    }
+    std_msgs::msg::String s;
+    s.data = "IDLE";
+    robot_state_pub_->publish(s);
+    RCLCPP_INFO(rclcpp::get_logger("WordleBotControlNode"),
+      "scanAndSweepCallback: sequence complete, returning to IDLE.");
+  }).detach();
 }
 
 void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
