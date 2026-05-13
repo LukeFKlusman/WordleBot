@@ -86,6 +86,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/close_gripper", 10,
     std::bind(&WordleBotControlNode::closeGripperCallback, this, std::placeholders::_1));
 
+  return_home_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/return_home", 10,
+    std::bind(&WordleBotControlNode::returnHomeCallback, this, std::placeholders::_1));
+
   letter_object_counter_ = 0;
 
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
@@ -294,6 +298,20 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
   RCLCPP_INFO(LOGGER,
     "clearLetterObjectsCallback: cleared %zu letter object(s) and reset queue.",
     ids_to_remove.size());
+}
+
+void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "returnHomeCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "returnHomeCallback: returning to home.");
+  controller_->returnToHome();
 }
 
 void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)

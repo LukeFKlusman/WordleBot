@@ -1233,6 +1233,53 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
 }
 
 // ---------------------------------------------------------------------------
+// Standalone return to home / gripper open / close
+// ---------------------------------------------------------------------------
+
+bool WordleBotController::returnToHome()
+{
+  RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("return home");
+  task.loadRobotModel(node_);
+  task.setProperty("group", std::string("ur_onrobot_manipulator"));
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+  stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+  stage->setGoal("home");
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "returnToHome: task init failed: " << e);
+    return false;
+  }
+
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "returnToHome: succeeded.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Standalone gripper open / close
 // ---------------------------------------------------------------------------
 

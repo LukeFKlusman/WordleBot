@@ -111,6 +111,9 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
+  // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
+  bool returnToHome();
+
   // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
   bool openGripper();
 
