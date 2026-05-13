@@ -36,7 +36,7 @@ WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
   visual_tools_.loadRemoteControl();
 
   // Give OMPL more time and attempts to find a better path
-  move_group_.setPlanningTime(10.0);
+  move_group_.setPlanningTime(15.0);
   move_group_.setNumPlanningAttempts(5);
 
   // DEBUG: log all link names in the robot model so we can verify touch_links names
@@ -386,26 +386,7 @@ moveit::planning_interface::MoveGroupInterface::Plan WordleBotController::select
 
 moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 {
-  moveit_msgs::msg::JointConstraint shoulder;
-  shoulder.joint_name      = "shoulder_lift_joint";
-  shoulder.position        = -M_PI / 2.0;
-  shoulder.tolerance_above = M_PI / 180.0 * 110.0;
-  shoulder.tolerance_below = M_PI / 180.0 * 110.0;
-  shoulder.weight          = 1.0;
-
-  // Keep wrist_3_joint within [-π, π] throughout the planned path.
-  // The UR RTDE interface reports wrist_3 in this range; going outside causes
-  // a PATH_TOLERANCE_VIOLATED (2π position error) on the trajectory controller.
-  moveit_msgs::msg::JointConstraint wrist3;
-  wrist3.joint_name      = "wrist_3_joint";
-  wrist3.position        = 0.0;
-  wrist3.tolerance_above = M_PI;
-  wrist3.tolerance_below = M_PI;
-  wrist3.weight          = 1.0;
-
   moveit_msgs::msg::Constraints constraints;
-  constraints.joint_constraints.push_back(shoulder);
-  constraints.joint_constraints.push_back(wrist3);
   return constraints;
 }
 
@@ -665,6 +646,17 @@ void WordleBotController::addCollisionObject(const moveit_msgs::msg::CollisionOb
 }
 
 
+void WordleBotController::clearLetterObjects(const std::vector<std::string> & ids)
+{
+  if (ids.empty()) {
+    RCLCPP_INFO(LOGGER, "clearLetterObjects: nothing to remove.");
+    return;
+  }
+  planning_scene_.removeCollisionObjects(ids);
+  RCLCPP_INFO(LOGGER, "clearLetterObjects: removed %zu letter object(s).", ids.size());
+}
+
+
 void WordleBotController::attachSensorCollisionObject()
 {
   moveit_msgs::msg::AttachedCollisionObject attached_object;
@@ -823,6 +815,17 @@ bool WordleBotController::moveToHome()
 // ---------------------------------------------------------------------------
 // Pick-and-place: MTC task creation, planning, execution
 // ---------------------------------------------------------------------------
+// createTask() 
+//  - Inputs: pick/place poses, object ID, optional start scene for chaining
+//  - Output: MTC Task with stages for pick and place, ready for planning
+// 
+// planTask()
+//  - Input: MTC Task from createTask()
+//  - Output: MTC Solution with planned trajectories for all stages
+// 
+// executeTask()
+//  - Input: MTC Solution from planTask() 
+// ---------------------------------------------------------------------------
 
 mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
                                           const geometry_msgs::msg::Pose & place_pose,
@@ -912,9 +915,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
-    stage_move_to_pick->setTimeout(10.0);
+    stage_move_to_pick->setTimeout(0.20);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -961,7 +964,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       // Transform from gripper_tcp to the object centre when grasping top-down.
       // z=0.08 means gripper_tcp sits 80 mm above the object centre at grasp time.
-      constexpr double GRASP_Z_OFFSET = 0.08;
+      constexpr double GRASP_Z_OFFSET = 0.01;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
@@ -1052,9 +1055,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
         {arm_group, sampling_planner}});
-    stage->setTimeout(10.0);
+    stage->setTimeout(0.20);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -1377,386 +1380,386 @@ bool WordleBotController::executePlannedTask(PlannedPickPlace & planned)
 
 
 // Pick task and place task are not used, will be implemented later
-mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & object_pose)
-{
-  // object_pose is available for future logging or geometric pre-checks;
-  // MTC reads the object from the planning scene by LETTER_OBJECT_ID.
-  (void)object_pose;
+// mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & object_pose)
+// {
+//   // object_pose is available for future logging or geometric pre-checks;
+//   // MTC reads the object from the planning scene by LETTER_OBJECT_ID.
+//   (void)object_pose;
 
-  mtc::Task task;
-  task.stages()->setName("pick letter");
-  task.loadRobotModel(node_);
+//   mtc::Task task;
+//   task.stages()->setName("pick letter");
+//   task.loadRobotModel(node_);
 
-  const std::string arm_group  = "ur_onrobot_manipulator";
-  const std::string hand_group = "ur_onrobot_gripper";
-  const std::string hand_frame = "gripper_tcp";
+//   const std::string arm_group  = "ur_onrobot_manipulator";
+//   const std::string hand_group = "ur_onrobot_gripper";
+//   const std::string hand_frame = "gripper_tcp";
 
-  task.setProperty("group",    arm_group);
-  task.setProperty("eef",      hand_group);
-  task.setProperty("ik_frame", hand_frame);
+//   task.setProperty("group",    arm_group);
+//   task.setProperty("eef",      hand_group);
+//   task.setProperty("ik_frame", hand_frame);
 
-  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+//   auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+//   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  cartesian_planner->setMaxVelocityScalingFactor(0.5);
-  cartesian_planner->setMaxAccelerationScalingFactor(0.5);
-  cartesian_planner->setStepSize(0.001);
+//   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
+//   cartesian_planner->setMaxVelocityScalingFactor(0.5);
+//   cartesian_planner->setMaxAccelerationScalingFactor(0.5);
+//   cartesian_planner->setStepSize(0.001);
 
-  // Stage 1: current state
-  mtc::Stage * current_state_ptr = nullptr;
-  {
-    auto stage = std::make_unique<mtc::stages::CurrentState>("current");
-    current_state_ptr = stage.get();
-    task.add(std::move(stage));
-  }
+//   // Stage 1: current state
+//   mtc::Stage * current_state_ptr = nullptr;
+//   {
+//     auto stage = std::make_unique<mtc::stages::CurrentState>("current");
+//     current_state_ptr = stage.get();
+//     task.add(std::move(stage));
+//   }
 
-  // Stage 2: open gripper
-  {
-    auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
-    stage->setGroup(hand_group);
-    stage->setGoal("open");
-    task.add(std::move(stage));
-  }
+//   // Stage 2: open gripper
+//   {
+//     auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
+//     stage->setGroup(hand_group);
+//     stage->setGoal("open");
+//     task.add(std::move(stage));
+//   }
 
-  // Stage 3: move to pick region
-  {
-    auto stage = std::make_unique<mtc::stages::Connect>(
-      "move to pick",
-      mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
-    stage->setTimeout(10.0);
-    stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
-    task.add(std::move(stage));
-  }
+//   // Stage 3: move to pick region
+//   {
+//     auto stage = std::make_unique<mtc::stages::Connect>(
+//       "move to pick",
+//       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
+//     stage->setTimeout(10.0);
+//     stage->properties().configureInitFrom(mtc::Stage::PARENT);
+//     // stage->setPathConstraints(WordleBotController::buildPathConstraints());
+//     task.add(std::move(stage));
+//   }
 
-  // Stage 4: pick container (approach → grasp IK → allow collision → close → attach → lift)
-  {
-    auto grasp = std::make_unique<mtc::SerialContainer>("pick object");
-    task.properties().exposeTo(grasp->properties(), {"eef", "group", "ik_frame"});
-    grasp->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
+//   // Stage 4: pick container (approach → grasp IK → allow collision → close → attach → lift)
+//   {
+//     auto grasp = std::make_unique<mtc::SerialContainer>("pick object");
+//     task.properties().exposeTo(grasp->properties(), {"eef", "group", "ik_frame"});
+//     grasp->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
 
-    // 4a. Cartesian approach
-    {
-      auto stage = std::make_unique<mtc::stages::MoveRelative>("approach object", cartesian_planner);
-      stage->properties().set("marker_ns", "approach_object");
-      stage->properties().set("link", hand_frame);
-      stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
-      geometry_msgs::msg::Vector3Stamped vec;
-      vec.header.frame_id = hand_frame;
-      vec.vector.z = 1.0;
-      stage->setDirection(vec);
-      grasp->insert(std::move(stage));
-    }
+//     // 4a. Cartesian approach
+//     {
+//       auto stage = std::make_unique<mtc::stages::MoveRelative>("approach object", cartesian_planner);
+//       stage->properties().set("marker_ns", "approach_object");
+//       stage->properties().set("link", hand_frame);
+//       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+//       stage->setMinMaxDistance(0.05, 0.15);
+//       geometry_msgs::msg::Vector3Stamped vec;
+//       vec.header.frame_id = hand_frame;
+//       vec.vector.z = 1.0;
+//       stage->setDirection(vec);
+//       grasp->insert(std::move(stage));
+//     }
 
-    // 4b. Generate grasp pose + IK
-    {
-      auto stage = std::make_unique<mtc::stages::GenerateGraspPose>("generate grasp pose");
-      stage->properties().configureInitFrom(mtc::Stage::PARENT);
-      stage->properties().set("marker_ns", "grasp_pose");
-      stage->setPreGraspPose("open");
-      stage->setObject(LETTER_OBJECT_ID);
-      stage->setAngleDelta(M_PI / 12);
-      stage->setMonitoredStage(current_state_ptr);
+//     // 4b. Generate grasp pose + IK
+//     {
+//       auto stage = std::make_unique<mtc::stages::GenerateGraspPose>("generate grasp pose");
+//       stage->properties().configureInitFrom(mtc::Stage::PARENT);
+//       stage->properties().set("marker_ns", "grasp_pose");
+//       stage->setPreGraspPose("open");
+//       stage->setObject(LETTER_OBJECT_ID);
+//       stage->setAngleDelta(M_PI / 12);
+//       stage->setMonitoredStage(current_state_ptr);
 
-      constexpr double GRASP_Z_OFFSET = 0.08;
-      Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
-      Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
-                             Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
-                             Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitZ());
-      grasp_frame_transform.linear() = q.matrix();
-      grasp_frame_transform.translation().z() = GRASP_Z_OFFSET;
+//       constexpr double GRASP_Z_OFFSET = 0.08;
+//       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
+//       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
+//                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
+//                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitZ());
+//       grasp_frame_transform.linear() = q.matrix();
+//       grasp_frame_transform.translation().z() = GRASP_Z_OFFSET;
 
-      auto wrapper = std::make_unique<mtc::stages::ComputeIK>("grasp pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(8);
-      wrapper->setMinSolutionDistance(1.0);
-      wrapper->setIKFrame(grasp_frame_transform, hand_frame);
-      wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
-      wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
-      grasp->insert(std::move(wrapper));
-    }
+//       auto wrapper = std::make_unique<mtc::stages::ComputeIK>("grasp pose IK", std::move(stage));
+//       wrapper->setMaxIKSolutions(8);
+//       wrapper->setMinSolutionDistance(1.0);
+//       wrapper->setIKFrame(grasp_frame_transform, hand_frame);
+//       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
+//       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
+//       grasp->insert(std::move(wrapper));
+//     }
 
-    // 4c. Allow collision between hand and object
-    {
-      auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
-        "allow collision (hand,object)");
-      stage->allowCollisions(LETTER_OBJECT_ID,
-        task.getRobotModel()->getJointModelGroup(hand_group)->getLinkModelNamesWithCollisionGeometry(),
-        true);
-      grasp->insert(std::move(stage));
-    }
+//     // 4c. Allow collision between hand and object
+//     {
+//       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
+//         "allow collision (hand,object)");
+//       stage->allowCollisions(LETTER_OBJECT_ID,
+//         task.getRobotModel()->getJointModelGroup(hand_group)->getLinkModelNamesWithCollisionGeometry(),
+//         true);
+//       grasp->insert(std::move(stage));
+//     }
 
-    // 4d. Close gripper
-    {
-      auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
-      stage->setGroup(hand_group);
-      stage->setGoal("closed");
-      grasp->insert(std::move(stage));
-    }
+//     // 4d. Close gripper
+//     {
+//       auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
+//       stage->setGroup(hand_group);
+//       stage->setGoal("closed");
+//       grasp->insert(std::move(stage));
+//     }
 
-    // 4e. Attach object
-    {
-      auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("attach object");
-      stage->attachObject(LETTER_OBJECT_ID, hand_frame);
-      grasp->insert(std::move(stage));
-    }
+//     // 4e. Attach object
+//     {
+//       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("attach object");
+//       stage->attachObject(LETTER_OBJECT_ID, hand_frame);
+//       grasp->insert(std::move(stage));
+//     }
 
-    // 4f. Lift object
-    {
-      auto stage = std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
-      stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
-      stage->setIKFrame(hand_frame);
-      stage->properties().set("marker_ns", "lift_object");
-      geometry_msgs::msg::Vector3Stamped vec;
-      vec.header.frame_id = "world";
-      vec.vector.z = 1.0;
-      stage->setDirection(vec);
-      grasp->insert(std::move(stage));
-    }
+//     // 4f. Lift object
+//     {
+//       auto stage = std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
+//       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+//       stage->setMinMaxDistance(0.05, 0.15);
+//       stage->setIKFrame(hand_frame);
+//       stage->properties().set("marker_ns", "lift_object");
+//       geometry_msgs::msg::Vector3Stamped vec;
+//       vec.header.frame_id = "world";
+//       vec.vector.z = 1.0;
+//       stage->setDirection(vec);
+//       grasp->insert(std::move(stage));
+//     }
 
-    task.add(std::move(grasp));
-  }
+//     task.add(std::move(grasp));
+//   }
 
-  return task;
-}
+//   return task;
+// }
 
-mtc::Task WordleBotController::createPlaceTask()
-{
-  mtc::Task task;
-  task.stages()->setName("place letter");
-  task.loadRobotModel(node_);
+// mtc::Task WordleBotController::createPlaceTask()
+// {
+//   mtc::Task task;
+//   task.stages()->setName("place letter");
+//   task.loadRobotModel(node_);
 
-  const std::string arm_group  = "ur_onrobot_manipulator";
-  const std::string hand_group = "ur_onrobot_gripper";
-  const std::string hand_frame = "gripper_tcp";
+//   const std::string arm_group  = "ur_onrobot_manipulator";
+//   const std::string hand_group = "ur_onrobot_gripper";
+//   const std::string hand_frame = "gripper_tcp";
 
-  task.setProperty("group",    arm_group);
-  task.setProperty("eef",      hand_group);
-  task.setProperty("ik_frame", hand_frame);
+//   task.setProperty("group",    arm_group);
+//   task.setProperty("eef",      hand_group);
+//   task.setProperty("ik_frame", hand_frame);
 
-  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+//   auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+//   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  auto retreat_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  retreat_planner->setMaxVelocityScalingFactor(0.5);
-  retreat_planner->setMaxAccelerationScalingFactor(0.5);
-  retreat_planner->setStepSize(0.001);
-  retreat_planner->setMinFraction(0.0);
+//   auto retreat_planner = std::make_shared<mtc::solvers::CartesianPath>();
+//   retreat_planner->setMaxVelocityScalingFactor(0.5);
+//   retreat_planner->setMaxAccelerationScalingFactor(0.5);
+//   retreat_planner->setStepSize(0.001);
+//   retreat_planner->setMinFraction(0.0);
 
-  // Stage 1: current state — captures post-pick robot+scene including attached object.
-  // GeneratePlacePose monitors this stage to reason about the object's attached state.
-  mtc::Stage * current_state_ptr = nullptr;
-  {
-    auto stage = std::make_unique<mtc::stages::CurrentState>("current");
-    current_state_ptr = stage.get();
-    task.add(std::move(stage));
-  }
+//   // Stage 1: current state — captures post-pick robot+scene including attached object.
+//   // GeneratePlacePose monitors this stage to reason about the object's attached state.
+//   mtc::Stage * current_state_ptr = nullptr;
+//   {
+//     auto stage = std::make_unique<mtc::stages::CurrentState>("current");
+//     current_state_ptr = stage.get();
+//     task.add(std::move(stage));
+//   }
 
-  // Stage 2: move to place region
-  {
-    auto stage = std::make_unique<mtc::stages::Connect>(
-      "move to place",
-      mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
-    stage->setTimeout(10.0);
-    stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
-    task.add(std::move(stage));
-  }
+//   // Stage 2: move to place region
+//   {
+//     auto stage = std::make_unique<mtc::stages::Connect>(
+//       "move to place",
+//       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
+//     stage->setTimeout(10.0);
+//     stage->properties().configureInitFrom(mtc::Stage::PARENT);
+//     // stage->setPathConstraints(WordleBotController::buildPathConstraints());
+//     task.add(std::move(stage));
+//   }
 
-  // Stage 3: place container (place IK → open → forbid collision → detach → retreat)
-  {
-    auto place = std::make_unique<mtc::SerialContainer>("place object");
-    task.properties().exposeTo(place->properties(), {"eef", "group", "ik_frame"});
-    place->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
+//   // Stage 3: place container (place IK → open → forbid collision → detach → retreat)
+//   {
+//     auto place = std::make_unique<mtc::SerialContainer>("place object");
+//     task.properties().exposeTo(place->properties(), {"eef", "group", "ik_frame"});
+//     place->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
 
-    // 3a. Generate place pose + IK
-    {
-      auto stage = std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
-      stage->properties().configureInitFrom(mtc::Stage::PARENT);
-      stage->properties().set("marker_ns", "place_pose");
-      stage->setObject(LETTER_OBJECT_ID);
+//     // 3a. Generate place pose + IK
+//     {
+//       auto stage = std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
+//       stage->properties().configureInitFrom(mtc::Stage::PARENT);
+//       stage->properties().set("marker_ns", "place_pose");
+//       stage->setObject(LETTER_OBJECT_ID);
 
-      geometry_msgs::msg::PoseStamped target_pose;
-      target_pose.header.frame_id = "world";
-      // target_pose.pose.position.x = PLACE_X;
-      // target_pose.pose.position.y = PLACE_Y;
-      target_pose.pose.position.z = 0.05;
-      target_pose.pose.orientation.w = 1.0;
-      stage->setPose(target_pose);
-      stage->setMonitoredStage(current_state_ptr);
+//       geometry_msgs::msg::PoseStamped target_pose;
+//       target_pose.header.frame_id = "world";
+//       // target_pose.pose.position.x = PLACE_X;
+//       // target_pose.pose.position.y = PLACE_Y;
+//       target_pose.pose.position.z = 0.05;
+//       target_pose.pose.orientation.w = 1.0;
+//       stage->setPose(target_pose);
+//       stage->setMonitoredStage(current_state_ptr);
 
-      auto wrapper = std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(4);
-      wrapper->setMinSolutionDistance(1.0);
-      wrapper->setIKFrame(LETTER_OBJECT_ID);
-      wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
-      wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
-      place->insert(std::move(wrapper));
-    }
+//       auto wrapper = std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
+//       wrapper->setMaxIKSolutions(4);
+//       wrapper->setMinSolutionDistance(1.0);
+//       wrapper->setIKFrame(LETTER_OBJECT_ID);
+//       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
+//       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
+//       place->insert(std::move(wrapper));
+//     }
 
-    // 3b. Open gripper
-    {
-      auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
-      stage->setGroup(hand_group);
-      stage->setGoal("open");
-      place->insert(std::move(stage));
-    }
+//     // 3b. Open gripper
+//     {
+//       auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
+//       stage->setGroup(hand_group);
+//       stage->setGoal("open");
+//       place->insert(std::move(stage));
+//     }
 
-    // 3c. Forbid collision between hand and object
-    {
-      auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
-        "forbid collision (hand,object)");
-      stage->allowCollisions(LETTER_OBJECT_ID,
-        task.getRobotModel()->getJointModelGroup(hand_group)->getLinkModelNamesWithCollisionGeometry(),
-        false);
-      place->insert(std::move(stage));
-    }
+//     // 3c. Forbid collision between hand and object
+//     {
+//       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
+//         "forbid collision (hand,object)");
+//       stage->allowCollisions(LETTER_OBJECT_ID,
+//         task.getRobotModel()->getJointModelGroup(hand_group)->getLinkModelNamesWithCollisionGeometry(),
+//         false);
+//       place->insert(std::move(stage));
+//     }
 
-    // 3d. Detach object
-    {
-      auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("detach object");
-      stage->detachObject(LETTER_OBJECT_ID, hand_frame);
-      place->insert(std::move(stage));
-    }
+//     // 3d. Detach object
+//     {
+//       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>("detach object");
+//       stage->detachObject(LETTER_OBJECT_ID, hand_frame);
+//       place->insert(std::move(stage));
+//     }
 
-    // 3e. Retreat
-    {
-      auto stage = std::make_unique<mtc::stages::MoveRelative>("retreat", retreat_planner);
-      stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.03, 0.15);
-      stage->setIKFrame(hand_frame);
-      stage->properties().set("marker_ns", "retreat");
-      geometry_msgs::msg::Vector3Stamped vec;
-      vec.header.frame_id = "world";
-      vec.vector.z = 1.0;
-      stage->setDirection(vec);
-      place->insert(std::move(stage));
-    }
+//     // 3e. Retreat
+//     {
+//       auto stage = std::make_unique<mtc::stages::MoveRelative>("retreat", retreat_planner);
+//       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+//       stage->setMinMaxDistance(0.03, 0.15);
+//       stage->setIKFrame(hand_frame);
+//       stage->properties().set("marker_ns", "retreat");
+//       geometry_msgs::msg::Vector3Stamped vec;
+//       vec.header.frame_id = "world";
+//       vec.vector.z = 1.0;
+//       stage->setDirection(vec);
+//       place->insert(std::move(stage));
+//     }
 
-    task.add(std::move(place));
-  }
+//     task.add(std::move(place));
+//   }
 
-  // Stage 4: return home
-  {
-    auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-    stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-    stage->setGoal("home");
-    task.add(std::move(stage));
-  }
+//   // Stage 4: return home
+//   {
+//     auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+//     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+//     stage->setGoal("home");
+//     task.add(std::move(stage));
+//   }
 
-  return task;
-}
+//   return task;
+// }
 
-bool WordleBotController::doPickPhase(const geometry_msgs::msg::Pose & object_pose)
-{
-  RCLCPP_INFO(LOGGER, "doPickPhase: building pick MTC task.");
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPickPhase: stop requested before start — aborting.");
-    return false;
-  }
+// bool WordleBotController::doPickPhase(const geometry_msgs::msg::Pose & object_pose)
+// {
+//   RCLCPP_INFO(LOGGER, "doPickPhase: building pick MTC task.");
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPickPhase: stop requested before start — aborting.");
+//     return false;
+//   }
 
-  mtc::Task task = createPickTask(object_pose);
+//   mtc::Task task = createPickTask(object_pose);
 
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "doPickPhase: init failed: " << e);
-    return false;
-  }
+//   try {
+//     task.init();
+//   } catch (const mtc::InitStageException & e) {
+//     RCLCPP_ERROR_STREAM(LOGGER, "doPickPhase: init failed: " << e);
+//     return false;
+//   }
 
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPickPhase: stop requested after init — aborting.");
-    return false;
-  }
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPickPhase: stop requested after init — aborting.");
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPickPhase: planning...");
-  moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = task.plan(5);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "doPickPhase: planning threw: " << e);
-    return false;
-  }
+//   RCLCPP_INFO(LOGGER, "doPickPhase: planning...");
+//   moveit::core::MoveItErrorCode plan_result;
+//   try {
+//     plan_result = task.plan(5);
+//   } catch (const mtc::InitStageException & e) {
+//     RCLCPP_ERROR_STREAM(LOGGER, "doPickPhase: planning threw: " << e);
+//     return false;
+//   }
 
-  if (!plan_result || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "doPickPhase: planning failed — no solutions.");
-    return false;
-  }
+//   if (!plan_result || task.solutions().empty()) {
+//     RCLCPP_ERROR(LOGGER, "doPickPhase: planning failed — no solutions.");
+//     return false;
+//   }
 
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPickPhase: stop requested after planning — aborting.");
-    return false;
-  }
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPickPhase: stop requested after planning — aborting.");
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPickPhase: executing best solution (cost=%.3f).",
-    task.solutions().front()->cost());
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
+//   RCLCPP_INFO(LOGGER, "doPickPhase: executing best solution (cost=%.3f).",
+//     task.solutions().front()->cost());
+//   task.introspection().publishSolution(*task.solutions().front());
+//   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  const auto result = task.execute(*task.solutions().front());
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "doPickPhase: execution failed (error %d).", result.val);
-    return false;
-  }
+//   const auto result = task.execute(*task.solutions().front());
+//   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+//     RCLCPP_ERROR(LOGGER, "doPickPhase: execution failed (error %d).", result.val);
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPickPhase: pick complete — object attached.");
-  return true;
-}
+//   RCLCPP_INFO(LOGGER, "doPickPhase: pick complete — object attached.");
+//   return true;
+// }
 
-bool WordleBotController::doPlacePhase()
-{
-  RCLCPP_INFO(LOGGER, "doPlacePhase: building place MTC task.");
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested before start — aborting.");
-    return false;
-  }
+// bool WordleBotController::doPlacePhase()
+// {
+//   RCLCPP_INFO(LOGGER, "doPlacePhase: building place MTC task.");
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested before start — aborting.");
+//     return false;
+//   }
 
-  mtc::Task task = createPlaceTask();
+//   mtc::Task task = createPlaceTask();
 
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "doPlacePhase: init failed: " << e);
-    return false;
-  }
+//   try {
+//     task.init();
+//   } catch (const mtc::InitStageException & e) {
+//     RCLCPP_ERROR_STREAM(LOGGER, "doPlacePhase: init failed: " << e);
+//     return false;
+//   }
 
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested after init — aborting.");
-    return false;
-  }
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested after init — aborting.");
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPlacePhase: planning...");
-  moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = task.plan(5);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "doPlacePhase: planning threw: " << e);
-    return false;
-  }
+//   RCLCPP_INFO(LOGGER, "doPlacePhase: planning...");
+//   moveit::core::MoveItErrorCode plan_result;
+//   try {
+//     plan_result = task.plan(5);
+//   } catch (const mtc::InitStageException & e) {
+//     RCLCPP_ERROR_STREAM(LOGGER, "doPlacePhase: planning threw: " << e);
+//     return false;
+//   }
 
-  if (!plan_result || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "doPlacePhase: planning failed — no solutions.");
-    return false;
-  }
+//   if (!plan_result || task.solutions().empty()) {
+//     RCLCPP_ERROR(LOGGER, "doPlacePhase: planning failed — no solutions.");
+//     return false;
+//   }
 
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested after planning — aborting.");
-    return false;
-  }
+//   if (stop_requested_.load()) {
+//     RCLCPP_INFO(LOGGER, "doPlacePhase: stop requested after planning — aborting.");
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPlacePhase: executing best solution (cost=%.3f).",
-    task.solutions().front()->cost());
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
+//   RCLCPP_INFO(LOGGER, "doPlacePhase: executing best solution (cost=%.3f).",
+//     task.solutions().front()->cost());
+//   task.introspection().publishSolution(*task.solutions().front());
+//   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  const auto result = task.execute(*task.solutions().front());
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "doPlacePhase: execution failed (error %d).", result.val);
-    return false;
-  }
+//   const auto result = task.execute(*task.solutions().front());
+//   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+//     RCLCPP_ERROR(LOGGER, "doPlacePhase: execution failed (error %d).", result.val);
+//     return false;
+//   }
 
-  RCLCPP_INFO(LOGGER, "doPlacePhase: place complete.");
-  return true;
-}
+//   RCLCPP_INFO(LOGGER, "doPlacePhase: place complete.");
+//   return true;
+// }

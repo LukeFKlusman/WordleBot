@@ -57,8 +57,14 @@ private:
   // Letter object interface — triggers pick-and-place mode
   rclcpp::Subscription<wordlebot_control::msg::PickPlaceTask>::SharedPtr letter_object_sub_;
 
+  // Clears all letter collision objects from the planning scene
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr clear_letter_objects_sub_;
+
   // PickPlaceEntry is defined on WordleBotController (the controller owns planning).
   std::vector<WordleBotController::PickPlaceEntry> pick_place_queue_;
+
+  // IDs of every letter collision object added this session, used for targeted removal.
+  std::vector<std::string> tracked_letter_ids_;
 
   int letter_object_counter_{0};
 
@@ -80,6 +86,7 @@ private:
   void abortMissionCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
   void letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg);
+  void clearLetterObjectsCallback(const std_msgs::msg::Bool::SharedPtr msg);
 
   // Mission loop (runs on mission_thread_)
   void missionLoop();

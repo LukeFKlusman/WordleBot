@@ -40,6 +40,8 @@ CNN_CONF_THRESHOLD  = 32.0   # min confidence % to publish a letter
 FRAMES_TO_AVERAGE   = 15     # temporal smoothing frames
 CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-255)
 CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
+
+ENABLE_HUMAN_DETECTION = False
 # ─────────────────────────────────────────────────────────
 
 import cv2
@@ -47,7 +49,8 @@ import numpy as np
 import os
 import collections
 import json
-import mediapipe as mp
+if ENABLE_HUMAN_DETECTION:
+    import mediapipe as mp
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -64,6 +67,26 @@ CAM_FX = 615.0
 CAM_FY = 615.0
 CAM_CX = 320.0
 CAM_CY = 240.0
+# TF frame broadcast by the RealSense ROS2 driver for the colour camera
+CAMERA_FRAME = "camera_color_optical_frame"
+
+# ── Camera extrinsic calibration (camera mount relative to gripper_tcp) ───
+# gripper_tcp is the tool centre point — the midpoint between the gripper fingers.
+# These values define where the camera sits relative to that point.
+# Edit these to re-calibrate; restart the node to apply. No other code changes needed.
+#
+# On the UR3e with OnRobot RG2, gripper_tcp z-axis points downward (toward the table).
+# Current mount: camera is 5 cm back (toward wrist) and 5 cm up from gripper_tcp.
+CAM_MOUNT_X =  0.00   # metres — left/right from gripper_tcp centreline
+CAM_MOUNT_Y =  0.05   # metres — upward from gripper_tcp (perpendicular to gripper z)
+CAM_MOUNT_Z = -0.05   # metres — back toward wrist along gripper_tcp z-axis
+
+# Rotation: RPY from gripper_tcp frame into camera_color_optical_frame.
+# RealSense optical convention: x=right, y=down, z=forward (into scene).
+# Adjust if projected world points don't land on the real block positions.
+CAM_MOUNT_ROLL  = 0.0  # radians (-90 deg)
+CAM_MOUNT_PITCH =  0.0      # radians
+CAM_MOUNT_YAW   = 0.0  # radians (-90 deg)
 # ─────────────────────────────────────────────────────────
 
 
@@ -298,43 +321,51 @@ def extract_roi(frame, x, y, w, h):
 
 class Perception:
     def __init__(self):
-        self.mp_holistic = mp.solutions.holistic
-        self.holistic    = self.mp_holistic.Holistic(
-            model_complexity=0,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        self.mp_draw         = mp.solutions.drawing_utils
         self.block_detector  = BlockDetector()
         self.cnn             = CNNPredictor(MODEL_PATH, LABEL_MAP)
         self.at_position     = False
-        self.last_detections = []   # (x, y, w, h, letter, conf, x_m, y_m, z_m, theta)
+        self.last_detections = []
         self.human_detected  = False
+
+        if ENABLE_HUMAN_DETECTION:
+            self.mp_holistic = mp.solutions.holistic
+            self.holistic    = self.mp_holistic.Holistic(
+                model_complexity=0,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            self.mp_draw = mp.solutions.drawing_utils
+        else:
+            self.holistic = None
+            self.mp_draw  = None
+
 
     def process(self, color_bgr, depth_raw=None, depth_colormap=None):
         frame = color_bgr.copy()
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # ── Pose / human detection (runs every frame) ─────
-        results = self.holistic.process(rgb)
-        self.human_detected = results.pose_landmarks is not None
-
-        self.mp_draw.draw_landmarks(
-            frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
-            self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
-        self.mp_draw.draw_landmarks(
-            frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
-            self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
-        self.mp_draw.draw_landmarks(
-            frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
-            self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
-            self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
-
-        if self.human_detected:
-            cv2.putText(frame, "HUMAN DETECTED", (10, frame.shape[0]-15),
+        if ENABLE_HUMAN_DETECTION and self.holistic is not None:
+            results = self.holistic.process(rgb)
+            self.human_detected = results.pose_landmarks is not None
+            self.mp_draw.draw_landmarks(
+                frame, results.pose_landmarks, self.mp_holistic.POSE_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=2),
+                self.mp_draw.DrawingSpec(color=(0,200,0), thickness=2))
+            self.mp_draw.draw_landmarks(
+                frame, results.left_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(255,100,0), thickness=2, circle_radius=3),
+                self.mp_draw.DrawingSpec(color=(255,150,0), thickness=2))
+            self.mp_draw.draw_landmarks(
+                frame, results.right_hand_landmarks, self.mp_holistic.HAND_CONNECTIONS,
+                self.mp_draw.DrawingSpec(color=(0,100,255), thickness=2, circle_radius=3),
+                self.mp_draw.DrawingSpec(color=(0,150,255), thickness=2))
+            if self.human_detected:
+                cv2.putText(frame, "HUMAN DETECTED", (10, frame.shape[0]-15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,255,0), 2)
+        else:
+            self.human_detected = False
+
 
         # ── Depth info per block ──────────────────────────
         depth_info = {}
@@ -456,7 +487,8 @@ class Perception:
         print(f"[Trigger] -> {'AT POSITION' if self.at_position else 'MOVING'}")
 
     def close(self):
-        self.holistic.close()
+        if self.holistic is not None:
+            self.holistic.close()
 
 
 # ══════════════════════════════════════════════════════════
@@ -505,10 +537,27 @@ def run_sdk():
 def run_ros2():
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
     from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
+    from geometry_msgs.msg import PoseStamped
     from cv_bridge import CvBridge
-    from message_filters import ApproximateTimeSynchronizer, Subscriber
+    import tf2_ros
+
+    # Latched QoS — Connor's hl_control_node uses TRANSIENT_LOCAL so it receives
+    # the message regardless of startup order.
+    LATCHED_QOS = QoSProfile(
+        depth=1,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        reliability=ReliabilityPolicy.RELIABLE,
+    )
+
+    # Connor's hl_control message types — generated at build time from hl_control/msg/*.msg
+    try:
+        from hl_control.msg import GameboardState, LetterObject
+        HL_CONTROL_AVAILABLE = True
+    except ImportError:
+        HL_CONTROL_AVAILABLE = False
 
     class RealSenseCNNNode(Node):
         def __init__(self):
@@ -517,11 +566,21 @@ def run_ros2():
             self.perception = Perception()
 
             # ── Camera subscribers ────────────────────────
-            color_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
-            depth_sub = Subscriber(self, Image, '/camera/camera/aligned_depth_to_color/image_raw')
-            self.sync = ApproximateTimeSynchronizer(
-                [color_sub, depth_sub], queue_size=10, slop=0.05)
-            self.sync.registerCallback(self.camera_callback)
+            self.latest_depth = None
+            self._processing  = False
+            self.frame_count  = 0
+
+            self.create_subscription(
+                Image,
+                '/camera/camera/aligned_depth_to_color/image_raw',
+                self.depth_callback,
+                10)
+
+            self.create_subscription(
+                Image,
+                '/camera/camera/color/image_raw',
+                self.color_callback,
+                10)
 
             # ── Mission state subscriber ──────────────────
             # Elijah's behaviour tree sends "SCANNING" or "IDLE"
@@ -533,19 +592,24 @@ def run_ros2():
                 10
             )
 
-            # ── Publishers ────────────────────────────────
-            # Human detected — Bool, every frame, for Elijah's safety monitor
+            # ── TF2 buffer — listens for the full robot TF tree ──
+            self.tf_buffer   = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+            # ── Static TF: gripper_tcp -> camera_color_optical_frame ──
+            # Completes the chain: camera -> gripper_tcp -> ... -> world
+            # Uses CAM_MOUNT_* values at the top of this file.
+            self._broadcast_camera_static_tf()
+
+            # ── Publishers — existing interface (Kermit / Elijah) ──
             self.pub_human = self.create_publisher(
                 Bool, '/perception/human_detected', 10)
 
-            # Node status — String, every frame
             self.pub_status = self.create_publisher(
                 String, '/perception/status', 10)
 
             # Block detections — JSON String, published each scan frame
-            # Kermit's word solver subscribes to get the letter set
-            # Connor's motion planner subscribes to get pixel positions for 3D conversion
-            # Format: {"blocks": [{"letter":"A","conf":94.2,"x":120,"y":200,"w":80,"h":80}]}
+            # Kermit's word solver and Elijah's safety monitor subscribe to this.
             self.pub_detections = self.create_publisher(
                 String, '/perception/detections', 10)
 
@@ -554,6 +618,21 @@ def run_ros2():
             # Shows pose landmarks, bounding boxes, and HUD text
             self.pub_annotated = self.create_publisher(
                 Image, '/perception/image_annotated', 10)
+
+            # ── Publisher — Connor's HL control interface ──
+            # Latched so hl_control_node receives it regardless of startup order.
+            # Published once per completed scan, not every frame.
+            if HL_CONTROL_AVAILABLE:
+                self.pub_gameboard = self.create_publisher(
+                    GameboardState, '/perception/gameboard_state', LATCHED_QOS)
+                self.get_logger().info(
+                    '[SS3] hl_control msgs found — will publish /perception/gameboard_state')
+            else:
+                self.pub_gameboard = None
+                self.get_logger().warn(
+                    '[SS3] hl_control package not found — '
+                    '/perception/gameboard_state will NOT be published. '
+                    'Run: colcon build --packages-select hl_control')
 
             self.get_logger().info(
                 '\nCNN perception node ready.'
@@ -564,8 +643,13 @@ def run_ros2():
                 '\n               /perception/status          (String, every frame)'
                 '\n               /perception/detections      (String JSON, when scanning)'
                 '\n               /perception/image_annotated (Image, for GUI CV mode)'
+                '\n               /perception/gameboard_state (GameboardState, latched, on scan complete)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
+
+        # ─────────────────────────────────────────────────────────────
+        # Mission state callback (Elijah's behaviour tree)
+        # ─────────────────────────────────────────────────────────────
 
         def mission_callback(self, msg):
             """Receive scan trigger from Elijah's behaviour tree."""
@@ -573,32 +657,51 @@ def run_ros2():
             if state == "SCANNING" and not self.perception.at_position:
                 self.perception.at_position = True
                 self.perception.cnn.clear_votes()
-                self.get_logger().info('[Mission] SCANNING → AT POSITION')
+                self.get_logger().info('[Mission] SCANNING -> AT POSITION')
             elif state == "IDLE" and self.perception.at_position:
                 self.perception.at_position = False
+                # Publish gameboard snapshot to Connor before clearing detections
+                self._publish_gameboard_state()
                 self.perception.last_detections = []
-                self.get_logger().info('[Mission] IDLE → MOVING')
+                self.get_logger().info('[Mission] IDLE -> published gameboard_state -> MOVING')
 
-        def camera_callback(self, color_msg, depth_msg):
+        # ─────────────────────────────────────────────────────────────
+        # Camera callbacks
+        # ─────────────────────────────────────────────────────────────
+
+        def depth_callback(self, depth_msg):
             try:
-                color_bgr     = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
-                depth_raw     = self.bridge.imgmsg_to_cv2(depth_msg, '16UC1')
-                depth_norm    = cv2.normalize(depth_raw, None, 0, 255, cv2.NORM_MINMAX)
-                depth_colored = cv2.applyColorMap(depth_norm.astype(np.uint8), cv2.COLORMAP_JET)
+                was_none = self.latest_depth is None
+                self.latest_depth = self.bridge.imgmsg_to_cv2(depth_msg, '16UC1')
+                if was_none:
+                    self.get_logger().info('[Camera] First depth frame received')
+            except Exception as e:
+                self.get_logger().error(f'Depth error: {e}')
 
-                display = self.perception.process(color_bgr, depth_raw, depth_colored)
+        def color_callback(self, color_msg):
+            if self._processing:
+                return
+            self._processing = True
+            if self.frame_count == 0:
+                self.get_logger().info('[Camera] First colour frame received — starting display')
+            try:
+                color_bgr = self.bridge.imgmsg_to_cv2(color_msg, 'bgr8')
+                depth_raw = self.latest_depth
 
-                # ── Publish human detected (every frame) ──
-                human_msg      = Bool()
-                human_msg.data = self.perception.human_detected
-                self.pub_human.publish(human_msg)
+                display = self.perception.process(color_bgr, depth_raw, None)
 
-                # ── Publish status (every frame) ───────────
-                status_msg      = String()
-                status_msg.data = "SCANNING" if self.perception.at_position else "IDLE"
-                self.pub_status.publish(status_msg)
+                # ── Publish at reduced rate (every 6th frame = ~5 Hz) ──
+                self.frame_count += 1
+                if self.frame_count % 6 == 0:
+                    human_msg      = Bool()
+                    human_msg.data = self.perception.human_detected
+                    self.pub_human.publish(human_msg)
 
-                # ── Publish detections (when scanning) ─────
+                    status_msg      = String()
+                    status_msg.data = "SCANNING" if self.perception.at_position else "IDLE"
+                    self.pub_status.publish(status_msg)
+
+                # ── Publish detections JSON (Kermit / Elijah) ──────────
                 if self.perception.at_position:
                     det_msg      = String()
                     det_msg.data = self.perception.get_detections_json()
@@ -616,16 +719,216 @@ def run_ros2():
                     self.get_logger().warn(f'annotated publish failed: {e}',
                                            throttle_duration_sec=5.0)
 
-                # ── Display ───────────────────────────────
+                # ── Display ────────────────────────────────────────────
+                display = cv2.resize(display, (960, 540))
                 cv2.imshow("RealSense CNN Vision", display)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     rclpy.shutdown()
                 elif key == ord(' '):
+                    was_at_position = self.perception.at_position
                     self.perception.toggle_position()
+                    # Manual toggle: publish gameboard snapshot when leaving AT POSITION
+                    if was_at_position and not self.perception.at_position:
+                        self._publish_gameboard_state()
 
             except Exception as e:
                 self.get_logger().error(f'Error: {e}')
+            finally:
+                self._processing = False
+
+        # ─────────────────────────────────────────────────────────────
+        # Broadcast static TF: gripper_tcp -> camera_color_optical_frame
+        # ─────────────────────────────────────────────────────────────
+
+        def _broadcast_camera_static_tf(self):
+            """
+            Publish a one-shot static transform from gripper_tcp to
+            camera_color_optical_frame using the CAM_MOUNT_* values at the top
+            of this file. StaticTransformBroadcaster re-latches it automatically
+            so late subscribers always receive it.
+
+            To re-calibrate: edit CAM_MOUNT_X/Y/Z and CAM_MOUNT_ROLL/PITCH/YAW
+            at the top of the file and restart the node.
+            """
+            import math
+            from geometry_msgs.msg import TransformStamped
+
+            broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+
+            ts = TransformStamped()
+            ts.header.stamp    = self.get_clock().now().to_msg()
+            ts.header.frame_id = 'gripper_tcp'   # parent: OnRobot RG2 tool centre point
+            ts.child_frame_id  = CAMERA_FRAME    # child:  RealSense colour optical frame
+
+            ts.transform.translation.x = CAM_MOUNT_X
+            ts.transform.translation.y = CAM_MOUNT_Y
+            ts.transform.translation.z = CAM_MOUNT_Z
+
+            # RPY -> quaternion
+            cr = math.cos(CAM_MOUNT_ROLL  / 2.0)
+            sr = math.sin(CAM_MOUNT_ROLL  / 2.0)
+            cp = math.cos(CAM_MOUNT_PITCH / 2.0)
+            sp = math.sin(CAM_MOUNT_PITCH / 2.0)
+            cy = math.cos(CAM_MOUNT_YAW   / 2.0)
+            sy = math.sin(CAM_MOUNT_YAW   / 2.0)
+
+            ts.transform.rotation.w = cr * cp * cy + sr * sp * sy
+            ts.transform.rotation.x = sr * cp * cy - cr * sp * sy
+            ts.transform.rotation.y = cr * sp * cy + sr * cp * sy
+            ts.transform.rotation.z = cr * cp * sy - sr * sp * cy
+
+            broadcaster.sendTransform(ts)
+            self.get_logger().info(
+                f'[TF] Static TF broadcast: gripper_tcp -> {CAMERA_FRAME}  '
+                f'x={CAM_MOUNT_X:.3f} y={CAM_MOUNT_Y:.3f} z={CAM_MOUNT_Z:.3f}  '
+                f'r={CAM_MOUNT_ROLL:.3f} p={CAM_MOUNT_PITCH:.3f} y={CAM_MOUNT_YAW:.3f}')
+
+        # ─────────────────────────────────────────────────────────────
+        # Transform a camera-frame point to world frame via TF2
+        # ─────────────────────────────────────────────────────────────
+
+        def _camera_to_world(self, x_cam, y_cam, z_cam):
+            """
+            Look up camera_color_optical_frame -> world through the full UR3e
+            TF tree:
+              camera_color_optical_frame -> gripper_tcp -> ... -> base_link -> world
+
+            The static TF from _broadcast_camera_static_tf provides the
+            camera->gripper_tcp link. The UR3e robot_state_publisher provides
+            the rest of the chain automatically.
+
+            Returns (x_w, y_w, z_w) in metres in the world frame,
+            or None if the TF tree is not yet complete (e.g. robot driver
+            not running yet).
+            """
+            try:
+                tf_stamped = self.tf_buffer.lookup_transform(
+                    'world',
+                    CAMERA_FRAME,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.1),
+                )
+            except (tf2_ros.LookupException,
+                    tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(
+                    f'[TF] camera->world lookup failed: {e}. '
+                    f'Is the robot driver running? '
+                    f'Falling back to camera frame coordinates.',
+                    throttle_duration_sec=5.0)
+                return None
+
+            t  = tf_stamped.transform.translation
+            r  = tf_stamped.transform.rotation
+            qx, qy, qz, qw = r.x, r.y, r.z, r.w
+
+            R = np.array([
+                [1 - 2*(qy*qy + qz*qz),   2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
+                [  2*(qx*qy + qz*qw), 1 - 2*(qx*qx + qz*qz),   2*(qy*qz - qx*qw)],
+                [  2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw), 1 - 2*(qx*qx + qy*qy)],
+            ])
+
+            p_world = R @ np.array([x_cam, y_cam, z_cam]) + np.array([t.x, t.y, t.z])
+            return (
+                round(float(p_world[0]), 4),
+                round(float(p_world[1]), 4),
+                round(float(p_world[2]), 4),
+            )
+
+        # ─────────────────────────────────────────────────────────────
+        # Publish gameboard_state (Connor's hl_control interface)
+        # Triggered on: SCANNING->IDLE mission transition AND spacebar toggle-off
+        # ─────────────────────────────────────────────────────────────
+
+        def _publish_gameboard_state(self):
+            """
+            Build and latch-publish hl_control/GameboardState on
+            /perception/gameboard_state.
+
+            Each confident detection becomes a LetterObject:
+              letter    — upper-case single character
+              object_id — "{LETTER}_object_{n}" unique per letter per scan
+              pose      — PoseStamped in world frame (TF2 transform applied)
+                          Falls back to camera frame if TF unavailable.
+            """
+            if self.pub_gameboard is None:
+                return
+
+            if not self.perception.last_detections:
+                self.get_logger().info('[gameboard_state] No detections — skipping publish.')
+                return
+
+            try:
+                from hl_control.msg import GameboardState, LetterObject
+            except ImportError:
+                return
+
+            board  = GameboardState()
+            now    = self.get_clock().now().to_msg()
+            counts = {}   # per-letter counter for unique object IDs
+
+            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.perception.last_detections:
+                if not letter:
+                    continue
+                if x_m is None:
+                    self.get_logger().warn(
+                        f'[gameboard_state] {letter} has no depth — skipping.')
+                    continue
+
+                counts[letter] = counts.get(letter, 0) + 1
+                object_id = f'{letter}_object_{counts[letter]}'
+
+                world_coords = self._camera_to_world(x_m, y_m, z_m)
+
+                ps              = PoseStamped()
+                ps.header.stamp = now
+
+                if world_coords is not None:
+                    wx, wy, wz = world_coords
+                    ps.header.frame_id    = 'world'
+                    ps.pose.position.x    = wx
+                    ps.pose.position.y    = wy
+                    ps.pose.position.z    = wz
+                    # Identity orientation — block is flat on the table.
+                    # Theta from the CNN is published separately in the
+                    # detections JSON and will feed into grasp yaw once
+                    # dot-based disambiguation is implemented.
+                    ps.pose.orientation.w = 1.0
+                    ps.pose.orientation.x = 0.0
+                    ps.pose.orientation.y = 0.0
+                    ps.pose.orientation.z = 0.0
+                else:
+                    # TF not yet available — fall back to camera frame
+                    ps.header.frame_id    = CAMERA_FRAME
+                    ps.pose.position.x    = x_m
+                    ps.pose.position.y    = y_m
+                    ps.pose.position.z    = z_m
+                    ps.pose.orientation.w = 1.0
+                    self.get_logger().warn(
+                        f'[gameboard_state] {object_id} published in camera frame (no TF).')
+
+                lo           = LetterObject()
+                lo.letter    = letter
+                lo.object_id = object_id
+                lo.pose      = ps
+                board.letters.append(lo)
+
+                self.get_logger().info(
+                    f'[gameboard_state] {object_id}: '
+                    f'frame={ps.header.frame_id} '
+                    f'x={ps.pose.position.x:.4f} '
+                    f'y={ps.pose.position.y:.4f} '
+                    f'z={ps.pose.position.z:.4f}')
+
+            if not board.letters:
+                self.get_logger().warn('[gameboard_state] No valid blocks to publish.')
+                return
+
+            self.pub_gameboard.publish(board)
+            self.get_logger().info(
+                f'[gameboard_state] Published {len(board.letters)} block(s) '
+                f'on /perception/gameboard_state (latched).')
 
         def destroy_node(self):
             self.perception.close()

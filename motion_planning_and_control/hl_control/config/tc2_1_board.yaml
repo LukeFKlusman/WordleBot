@@ -1,0 +1,69 @@
+# TC2.1 — CRANE, no letters in Wordle slots (C2-like board)
+#
+# Grid reference (robot space):
+#   spacing = 0.075 m, x = -0.45 + col*0.075, y = row*0.075
+#   Wordle zone: row 3 (y=0.225), cols 4-8 (x: -0.15 to 0.15)
+#
+# All five letters are in outer staging cells (cols 0-2 and 10-12, row 1)
+# which are safely outside the forbidden staging zone.
+# Raw poses are slightly offset from the grid centres to simulate perception noise.
+#
+# Cell mapping:
+#   C → col 0, row 1  cell_id 13  grid centre (-0.450, 0.075)
+#   R → col 1, row 1  cell_id 14  grid centre (-0.375, 0.075)
+#   A → col 2, row 1  cell_id 15  grid centre (-0.300, 0.075)
+#   N → col 11, row 1 cell_id 24  grid centre ( 0.375, 0.075)
+#   E → col 12, row 1 cell_id 25  grid centre ( 0.450, 0.075)
+
+word: CRANE
+
+letters:
+  - letter: C
+    object_id: C_object_1
+    x: -0.448
+    y:  0.072
+    z:  0.025
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+  - letter: R
+    object_id: R_object_1
+    x: -0.377
+    y:  0.1540
+    z:  0.025
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+  - letter: A
+    object_id: A_object_1
+    x: -0.302
+    y:  0.302
+    z:  0.025
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+  - letter: N
+    object_id: N_object_1
+    x:  0.373
+    y:  0.220
+    z:  0.025
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+  - letter: E
+    object_id: E_object_1
+    x:  0.157
+    y:  0.304
+    z:  0.025
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
