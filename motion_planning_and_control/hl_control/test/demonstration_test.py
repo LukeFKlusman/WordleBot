@@ -17,15 +17,22 @@ Cell ID reference (13×7 grid, 91 cells):
 """
 
 import os
+import sys
+import matplotlib
+matplotlib.use('Agg')
 import numpy as np
 import matplotlib.pyplot as plt
 
-from test import (
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'rl_task_optimiser'))
+
+from task_sequencer import (
     TaskSequencerEvaluator,
     WORDLE_CELL_IDS_SET,
     LOGS_DIR,
+    MODEL_DIR,
+    MODEL_NAME,
 )
-from train import custom_reward, MODEL_DIR, MODEL_NAME
+from reward import custom_reward
 from training_env.wordle_env import (
     ALL_POSITIONS,
     WORKSPACE_X_MIN, WORKSPACE_X_MAX,

@@ -1,0 +1,14 @@
+wordle_bot_control_node:
+  ros__parameters:
+    # Dwell time in seconds between each scan pose
+    scan_sweep_dwell_time: 1.5
+
+    # Four scan-and-sweep poses in the world frame.
+    # Format: [x, y, z, roll, pitch, yaw]  (metres / radians)
+    # pose_0 is reached via free-space (OMPL) planning — the starting position.
+    # poses 1-3 are reached via straight-line Cartesian moves — the sweep positions.
+    # All values are placeholders; fill in real values after physical testing.
+    scan_sweep_pose_0: [-0.30, 0.1, 0.05, 0.0, 3.14159, 0.0]
+    scan_sweep_pose_1: [-0.30, 0.30, 0.05, 0.0, 3.14159, 0.0]
+    scan_sweep_pose_2: [ 0.30, 0.30, 0.05, 0.0, 3.14159, 0.0]
+    scan_sweep_pose_3: [ 0.30, 0.1, 0.05, 0.0, 3.14159, 0.0]

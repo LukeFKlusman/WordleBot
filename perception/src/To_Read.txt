@@ -1,0 +1,433 @@
+================================================================================
+  SS3 — PERCEPTION AND MAPPING
+  Subsystem Lead: Luke Klusman
+  WordleBot | CELK RS2 | UTS FEIT/MME
+================================================================================
+
+OVERVIEW
+--------
+This subsystem detects letter blocks in the workspace using an Intel RealSense
+D435i RGB-D camera and a custom-trained CNN. It classifies each block, computes
+its 3D position, and publishes that information to the rest of the system.
+
+Two coordinate outputs are produced:
+  - Camera frame coordinates  ->  /perception/detections  (Kermit, Elijah)
+  - World frame coordinates   ->  /perception/gameboard_state  (Connor)
+
+The world frame transform is computed via the UR3e TF tree at runtime — no
+manual coordinate conversion is required.
+
+
+================================================================================
+HARDWARE DEPENDENCIES
+================================================================================
+
+  - Intel RealSense D435i camera (USB 3.0)
+      Mounted on the UR3e end-effector, approximately 5 cm back and 5 cm above
+      the gripper_tcp (tool centre point). Exact mount offsets are configured
+      via calibration variables at the top of realsense_camera_cnn.py.
+
+  - UR3e robotic arm with OnRobot RG2 gripper
+      Must be running and connected before the perception node attempts any
+      camera-to-world coordinate transforms.
+
+  - Letter blocks
+      5 cm x 5 cm wooden blocks with white paper labels glued to the face.
+      The white paper face is what the camera detects — CARD mode is used
+      because it finds white regions via brightness threshold, which works
+      correctly with this block design. The depth sensor reads the paper
+      surface to give the 3D position of each block.
+
+
+================================================================================
+DETECTION MODE EXPLAINED
+================================================================================
+
+  DETECTION_MODE = "CARD"   <-- correct setting for white-paper-on-block setup
+
+  CARD mode uses a white brightness threshold to find block faces. Any region
+  brighter than CARD_BRIGHTNESS (180/255) is treated as a potential block face.
+  This works because the white paper labels stand out clearly against the
+  workspace surface. The inner 90% of each detected region is then fed to the
+  CNN (CARD_MARGIN = 0.10 trims 10% from each edge to exclude the paper border).
+
+  BLOCK mode (not used) would use adaptive thresholding and a depth gate — this
+  was designed for bare wooden blocks without paper labels. Not needed here.
+
+
+================================================================================
+SOFTWARE DEPENDENCIES
+================================================================================
+
+  ROS2 (Humble or later)
+  |-- realsense2_camera         RealSense ROS2 driver
+  |-- tf2_ros                   TF2 transform library
+  |-- cv_bridge                 ROS2 <-> OpenCV image conversion
+  |-- sensor_msgs               Image message types
+  |-- std_msgs                  Bool, String message types
+  |-- geometry_msgs             PoseStamped message type
+  |-- hl_control                Connor's custom message package
+                                (see HL_CONTROL section below)
+
+  Python packages (pip install)
+  |-- torch / torchvision       CNN inference
+  |-- opencv-python             Image processing
+  |-- numpy                     Array maths
+  |-- mediapipe                 Human detection (disabled by default)
+
+
+================================================================================
+HL_CONTROL — WHAT IT IS AND WHY YOU NEED TO BUILD IT
+================================================================================
+
+  ROS2 uses strongly typed messages — every topic has a defined message type
+  that both the publisher and subscriber must agree on exactly. Standard types
+  like Bool, String, and Image come pre-built with ROS2. But Connor's
+  hl_control package defines two custom message types that don't exist in
+  standard ROS2:
+
+    hl_control/GameboardState   — a list of letter blocks with poses
+    hl_control/LetterObject     — a single block: letter + object_id + pose
+
+  These are defined in:
+    motion_planning_and_control/hl_control/msg/GameboardState.msg
+    motion_planning_and_control/hl_control/msg/LetterObject.msg
+
+  Because they are custom types, ROS2 needs to generate the Python and C++
+  code for them before any node can import or use them. That generation happens
+  when you run:
+
+    colcon build --packages-select hl_control
+
+  After building, the types become importable in Python:
+
+    from hl_control.msg import GameboardState, LetterObject
+
+  This is why the perception node does a try/except import at startup:
+
+    try:
+        from hl_control.msg import GameboardState, LetterObject
+        HL_CONTROL_AVAILABLE = True
+    except ImportError:
+        HL_CONTROL_AVAILABLE = False
+
+  If hl_control hasn't been built, the import fails gracefully — the node
+  still starts and all other topics work normally. It just logs a warning and
+  skips the /perception/gameboard_state publisher. Connor won't receive world
+  frame coordinates until hl_control is built.
+
+  To build it (run from your ROS2 workspace root, not perception/src):
+
+    cd ~/your_ws
+    colcon build --packages-select hl_control
+    source install/setup.bash
+
+  You only need to do this once per machine, or again if the message
+  definitions change.
+
+
+================================================================================
+WHAT "LATCHED" MEANS
+================================================================================
+
+  In ROS2, a normal publisher sends a message and it is gone. If a subscriber
+  starts up after that message was sent, it misses it and has to wait for the
+  next one. For topics that publish continuously (like camera frames or status
+  strings), this is fine — the next message arrives a fraction of a second
+  later anyway.
+
+  But /perception/gameboard_state is published ONCE per scan — there is no
+  "next message" coming soon. If Connor's hl_control_node starts up a few
+  seconds after the scan completes, it would miss the gameboard state entirely
+  and never know where the blocks are.
+
+  Latched (TRANSIENT_LOCAL) QoS solves this. A latched publisher stores its
+  last message. When a new subscriber connects — even minutes later — it
+  immediately receives that stored message as if it had been there all along.
+
+  In the code this is set up as:
+
+    LATCHED_QOS = QoSProfile(
+        depth=1,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        reliability=ReliabilityPolicy.RELIABLE,
+    )
+    self.pub_gameboard = self.create_publisher(
+        GameboardState, '/perception/gameboard_state', LATCHED_QOS)
+
+  Connor's subscriber also uses TRANSIENT_LOCAL so both ends agree on the
+  durability policy — this is required in ROS2. If only one end is latched,
+  the message is not delivered.
+
+  The same principle applies to /tf_static — the static TF the perception
+  node broadcasts at startup (gripper_tcp -> camera_color_optical_frame) is
+  also latched, which is why any node that starts later can still look up
+  that transform immediately.
+
+  Summary:
+    Normal topic  = publish and forget, subscriber must be ready
+    Latched topic = publish and remember, subscriber gets it whenever it connects
+
+
+================================================================================
+STARTUP ORDER
+================================================================================
+
+  Run each command in a separate terminal in this order:
+
+  TERMINAL 1 — RealSense camera driver
+  -------------------------------------
+  ros2 launch realsense2_camera rs_launch.py \
+      enable_depth:=true \
+      align_depth.enable:=true
+
+  Wait for: "RealSense camera started" in the terminal output.
+
+  TERMINAL 2 — UR3e robot driver (Connor's responsibility)
+  ---------------------------------------------------------
+  ros2 launch ur_onrobot_control start_robot.launch.py \
+      ur_type:=ur3e \
+      onrobot_type:=rg2 \
+      robot_ip:=192.168.0.191 \
+      launch_rviz:=false
+
+  This starts robot_state_publisher which broadcasts the full UR3e TF tree.
+  Required before world-frame coordinates will be accurate.
+
+  TERMINAL 3 — Perception node
+  -----------------------------
+  cd perception/src
+  python3 realsense_camera_cnn.py
+
+  On startup the node will:
+    1. Load the CNN model from ../outputs/letter_cnn.pt
+    2. Broadcast the static TF: gripper_tcp -> camera_color_optical_frame
+    3. Begin listening to camera topics
+    4. Open the live display window
+
+  TERMINAL 4 — (optional) Verify TF chain is complete
+  -----------------------------------------------------
+  ros2 run tf2_tools view_frames
+  # Generates frames.pdf — check camera_color_optical_frame appears under gripper_tcp
+
+  ros2 run tf2_ros tf2_echo world camera_color_optical_frame
+  # Prints live transform — values should reflect robot pose, not zeros
+
+
+================================================================================
+MANUAL CONTROLS (live display window)
+================================================================================
+
+  SPACEBAR    Toggle AT POSITION / MOVING
+                AT POSITION  ->  CNN scanning enabled, detections published
+                MOVING       ->  scanning paused, gameboard_state published
+
+  Q           Quit the node
+
+
+================================================================================
+CONFIGURATION (top of realsense_camera_cnn.py)
+================================================================================
+
+  DETECTION_MODE = "CARD"
+      Correct setting for white-paper-on-block setup. Do not change.
+
+  CNN_CONF_THRESHOLD = 32.0
+      Minimum confidence % to report a letter.
+      Lower = more guesses. Higher = fewer false reads.
+
+  FRAMES_TO_AVERAGE = 15
+      Temporal smoothing window. CNN must agree across this many frames
+      before reporting a letter. Reduces single-frame misreads.
+
+  CARD_BRIGHTNESS = 180
+      Brightness threshold (0-255) for white paper detection.
+      Increase if background is bright. Decrease if labels are not detected.
+
+  CARD_MARGIN = 0.10
+      Fraction trimmed from each edge of detected white region before
+      passing to CNN. Removes paper border. 0.10 = 10% per edge.
+
+  -- Camera intrinsics (replace with values from camera_info topic) ----------
+  CAM_FX = 615.0
+  CAM_FY = 615.0
+  CAM_CX = 320.0
+  CAM_CY = 240.0
+
+  To get exact values for your camera:
+    ros2 topic echo /camera/camera/color/camera_info --once
+  Look for: K: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+
+  -- Camera mount calibration (relative to gripper_tcp) ----------------------
+  CAM_MOUNT_X =  0.00   metres, left/right from gripper_tcp centreline
+  CAM_MOUNT_Y =  0.05   metres, upward from gripper_tcp (5 cm up)
+  CAM_MOUNT_Z = -0.05   metres, back toward wrist (5 cm back)
+
+  CAM_MOUNT_ROLL  = 0.0   radians — tune these until world coords align
+  CAM_MOUNT_PITCH = 0.0   radians   with real block positions in RViz
+  CAM_MOUNT_YAW   = 0.0   radians
+
+  Edit values and restart the node to apply. No other code changes needed.
+
+
+================================================================================
+PUBLISHERS
+================================================================================
+
+  /perception/human_detected      std_msgs/Bool
+      True if a human is detected in frame. Published every ~5 Hz.
+      Subscriber: Elijah's safety monitor (SS1)
+
+  /perception/status              std_msgs/String
+      "SCANNING" or "IDLE". Published every ~5 Hz.
+      Subscriber: Elijah's behaviour tree (SS1)
+
+  /perception/detections          std_msgs/String  (JSON)
+      Published every frame while AT POSITION. CAMERA FRAME coordinates.
+      Format:
+        {
+          "blocks": [
+            {
+              "letter":    "A",
+              "conf":      94.2,
+              "x_m":       0.04,    <- camera frame, metres
+              "y_m":      -0.02,    <- camera frame, metres
+              "z_m":       0.38,    <- depth from lens, metres
+              "theta_deg": 12.5     <- block rotation from minAreaRect
+            }
+          ]
+        }
+      Subscribers: Kermit word solver (SS4), Elijah behaviour tree (SS1)
+
+  /perception/gameboard_state     hl_control/GameboardState  (LATCHED)
+      Published ONCE when scanning ends (IDLE mission state or spacebar off).
+      WORLD FRAME coordinates — full camera->world TF applied.
+      Contains one LetterObject per detected block:
+        letter    : "A"
+        object_id : "A_object_1"   (two A blocks -> A_object_1, A_object_2)
+        pose      : PoseStamped, frame_id="world"
+      All detected blocks with valid depth are included in one message.
+      If 5 blocks are detected, all 5 world frame positions are published.
+      Subscriber: Connor's hl_control_node (SS2)
+      Latched: Connor receives this even if his node starts after publish.
+      Requires: colcon build --packages-select hl_control
+
+  /tf_static                      tf2_msgs/TFMessage  (LATCHED)
+      One static transform published at startup:
+        parent: gripper_tcp
+        child:  camera_color_optical_frame
+      Adds the final link to the TF chain for camera->world conversion.
+
+
+================================================================================
+SUBSCRIBERS
+================================================================================
+
+  /camera/camera/color/image_raw
+      sensor_msgs/Image — colour frames from RealSense driver
+
+  /camera/camera/aligned_depth_to_color/image_raw
+      sensor_msgs/Image — depth frames aligned to colour frame
+
+  /mission/state
+      std_msgs/String — from Elijah's behaviour tree (SS1)
+        "SCANNING"  ->  enables CNN scan (same as pressing SPACEBAR on)
+        "IDLE"      ->  disables scan, publishes gameboard_state snapshot
+
+  /tf  and  /tf_static
+      tf2_msgs/TFMessage — the full UR3e robot TF tree, broadcast by
+      robot_state_publisher in the robot driver. Subscribed to automatically
+      by tf2_ros.TransformListener — no explicit subscription needed in code.
+      Used to look up camera_color_optical_frame -> world at scan completion.
+      This is passive — the robot driver publishes it regardless of whether
+      this node or Connor's node is running.
+
+
+================================================================================
+COORDINATE FLOW (how a pixel becomes a world coordinate)
+================================================================================
+
+  1. RealSense produces pixel (px, py) and depth (metres) for each block centre
+
+  2. pixel_to_camera_frame(px, py, depth):
+       x_cam = (px - 320) x depth / 615
+       y_cam = (py - 240) x depth / 615
+       z_cam = depth
+     Result: block position relative to camera lens, in metres.
+     Published in /perception/detections (camera frame, every scan frame).
+
+  3. _camera_to_world(x_cam, y_cam, z_cam):
+       TF2 looks up: camera_color_optical_frame -> world
+       Chain used:   camera -> gripper_tcp -> wrist -> ... -> base_link -> world
+       Applies:      p_world = R x p_cam + t
+     Result: block position in robot world frame, in metres.
+     Published in /perception/gameboard_state (world frame, once per scan).
+
+
+================================================================================
+CNN MODEL
+================================================================================
+
+  Architecture:   3x Conv2d (32->64->128 filters) + 2x Linear
+                  Input: greyscale 64x64
+  Classes:        36 (A-Z, 0-9)
+  Training data:  ~400-500 images per class, collected with
+                  collect_training_data.py under lab lighting conditions
+  Test accuracy:  ~96-97%
+  Model file:     perception/outputs/letter_cnn.pt
+
+  To retrain:
+    cd perception/src
+    python3 collect_training_data.py   <- collect new images
+    python3 train_letter_cnn.py        <- train and save model
+
+  Key augmentations applied during training:
+    RandomRotation +-20 deg, ColorJitter, RandomPerspective, RandomAffine
+    Histogram equalisation (cv2.equalizeHist) applied at both collection
+    and inference time to handle lab overexposure.
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+  "WARNING: letter_cnn.pt not found"
+      Run train_letter_cnn.py first, or check the MODEL_PATH variable.
+      The node runs in fallback mode showing "?" for all detections.
+
+  "[TF] camera->world lookup failed"
+      Robot driver (Terminal 2) is not running. Start it first.
+      The node will keep trying — once the driver starts, lookups will work.
+      gameboard_state falls back to camera frame coordinates until then.
+
+  "hl_control package not found" warning at startup
+      Run: colcon build --packages-select hl_control
+      Then: source install/setup.bash
+      Then restart the perception node.
+
+  Blocks detected but labelled "?"
+      CNN confidence is below CNN_CONF_THRESHOLD (32%). Options:
+        - Check lighting (equalizeHist should handle most cases)
+        - Lower CNN_CONF_THRESHOLD temporarily to diagnose
+        - Retrain the model with more varied data for that class
+
+  gameboard_state published with frame_id = camera_color_optical_frame
+      TF was unavailable at time of publish — robot driver was not running.
+      World coordinates were not applied. Restart scan with robot driver up.
+
+  camera_color_optical_frame missing from view_frames output
+      Static TF broadcast failed or perception node is not running.
+      Check log line at startup: "[TF] Static TF broadcast: gripper_tcp -> ..."
+
+  World coordinates are offset from real block positions
+      CAM_MOUNT_ROLL/PITCH/YAW need calibration. Place a block at a known
+      world coordinate, scan it, compare published values to actual position,
+      adjust RPY values at the top of realsense_camera_cnn.py and restart.
+
+  White paper labels not being detected
+      Increase CARD_BRIGHTNESS if background is too bright.
+      Decrease CARD_BRIGHTNESS if labels are being missed.
+      Check MIN_BLOCK_AREA — if blocks appear small in frame, lower this value.
+
+
+================================================================================

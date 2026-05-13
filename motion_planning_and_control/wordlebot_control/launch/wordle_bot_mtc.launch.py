@@ -1,3 +1,5 @@
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import (
@@ -8,6 +10,7 @@ from launch.substitutions import (
 )
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from ament_index_python.packages import get_package_share_directory
 
 from ur_onrobot_moveit_config.launch_common import load_yaml
 
@@ -136,12 +139,16 @@ def launch_setup(context, *args, **kwargs):
     if ompl_yaml:
         ompl_planning_pipeline_config["ompl"].update(ompl_yaml)
 
+    pkg_share = get_package_share_directory("wordlebot_control")
+    scan_sweep_params = os.path.join(pkg_share, "config", "scan_sweep_poses.yaml")
+
     common_parameters = [
         robot_description,
         robot_description_semantic,
         robot_description_kinematics,
         robot_description_planning,
         ompl_planning_pipeline_config,
+        scan_sweep_params,
     ]
 
     mtc_demo_node = Node(
