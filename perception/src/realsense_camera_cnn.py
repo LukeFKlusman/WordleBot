@@ -10,15 +10,59 @@
 #   SPACEBAR  - Toggle "at position" (enables letter scanning)
 #   Q         - Quit
 #
-# ROS2 TOPICS PUBLISHED:
-#   /perception/human_detected    std_msgs/Bool    — streams every frame
-#   /perception/status            std_msgs/String  — "SCANNING" or "IDLE", every frame
-#   /perception/detections        std_msgs/String  — JSON block list, published each scan
+
+# ── COORDINATE FLOW ──────────────────────────────────────────────────────────
 #
-# ROS2 TOPICS SUBSCRIBED:
-#   /mission/state                std_msgs/String  — "SCANNING" enables CNN scan
-#                                                    "IDLE" disables scan
-#                                                    (replaces spacebar for robot operation)
+#  1. RealSense depth + pixel → camera frame (metres)
+#       pixel_to_camera_frame() converts block centre pixel + depth reading
+#       into (x_m, y_m, z_m) relative to the camera lens.
+#       Camera axes: x=right, y=down, z=forward into scene.
+#
+#  2. Camera frame → world frame (via TF2)
+#       At startup this node broadcasts a static TF:
+#         gripper_tcp → camera_color_optical_frame
+#       using the CAM_MOUNT_* calibration values at the top of this file.
+#       TF2 then chains:
+#         camera_color_optical_frame → gripper_tcp → ... → base_link → world
+#       using the live UR3e joint states from robot_state_publisher.
+#       _camera_to_world() performs this lookup and applies the transform.
+#
+# ── TOPICS SUBSCRIBED ────────────────────────────────────────────────────────
+#
+#   /camera/camera/color/image_raw          sensor_msgs/Image   — colour frames
+#   /camera/camera/aligned_depth_to_color/  sensor_msgs/Image   — aligned depth
+#     image_raw
+#   /mission/state                          std_msgs/String
+#       "SCANNING" → enables CNN scan (same as SPACEBAR on)
+#       "IDLE"     → disables scan, publishes gameboard_state snapshot
+#
+# ── TOPICS PUBLISHED ─────────────────────────────────────────────────────────
+#
+#   /perception/human_detected    std_msgs/Bool
+#       True/False every ~5 Hz. Used by Elijah's safety monitor.
+#
+#   /perception/status            std_msgs/String
+#       "SCANNING" or "IDLE" every ~5 Hz. Used by Elijah's behaviour tree.
+#
+#   /perception/detections        std_msgs/String  (JSON)
+#       Published every frame while scanning. CAMERA FRAME coordinates.
+#       Format: {"blocks": [{"letter":"A","conf":94.2,
+#                            "x_m":0.04,"y_m":-0.02,"z_m":0.38,
+#                            "theta_deg":12.5}]}
+#       Subscribers: Kermit (word solver), Elijah (behaviour tree)
+#
+#   /perception/gameboard_state   hl_control/GameboardState  (LATCHED)
+#       Published ONCE per completed scan (on IDLE mission state or spacebar off).
+#       WORLD FRAME coordinates — camera→world TF applied.
+#       Each detected block becomes a LetterObject:
+#         letter    : "A"
+#         object_id : "A_object_1"  (unique per letter, e.g. two A's → _1 and _2)
+#         pose      : PoseStamped, frame_id="world", position in robot world frame
+#       Subscriber: Connor's hl_control_node — triggers pick-and-place planning
+#                   once this AND /hl_control/word_request have both arrived.
+
+
+
 
 # ── Mode switch ───────────────────────────────────────────
 USE_ROS2 = True   # False = direct pyrealsense2 SDK, True = ROS2 topics
@@ -699,7 +743,30 @@ def run_ros2():
                     det_msg      = String()
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
-                    self.get_logger().info(f'[Detections] {det_msg.data}')
+
+                    # Log at ~1 Hz (every 30 frames) to avoid flooding the terminal.
+                    # Empty frames are silent — only logs when blocks are detected.
+                    if self.frame_count % 30 == 0:
+                        detections = self.perception.last_detections
+                        if detections:
+                            lines = []
+                            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in detections:
+                                if not letter:
+                                    continue
+                                cam_str = f'cam=({x_m:.3f}, {y_m:.3f}, {z_m:.3f})' \
+                                          if x_m is not None else 'cam=(no depth)'
+                                if x_m is not None:
+                                    world = self._camera_to_world(x_m, y_m, z_m)
+                                    world_str = f'world=({world[0]:.3f}, {world[1]:.3f}, {world[2]:.3f})' \
+                                                if world is not None else 'world=(no TF)'
+                                else:
+                                    world_str = 'world=(no depth)'
+                                lines.append(
+                                    f'  {letter} {conf:.0f}%  {cam_str}  {world_str}  theta={theta:.1f}deg'
+                                )
+                            if lines:
+                                self.get_logger().info(
+                                    '[Detections]\n' + '\n'.join(lines))
 
                 # ── Display ────────────────────────────────────────────
                 display = cv2.resize(display, (960, 540))
