@@ -24,7 +24,7 @@ import unittest
 import launch_testing
 import pytest
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseArray, PoseStamped
 from std_msgs.msg import Bool
 import tf2_ros
 from tf2_ros import TransformException
@@ -91,9 +91,12 @@ class TestAdvancedMotionControl(unittest.TestCase):
         rclpy.init()
         cls.node = rclpy.create_node("tc2_advanced_motion_control_node")
 
-        # Goal publisher
-        cls.goal_pub = cls.node.create_publisher(
-            PoseStamped, "/wordle_bot/goal_pose", 10
+        # Mission publishers
+        cls.set_mission_pub = cls.node.create_publisher(
+            PoseArray, "/wordle_bot/set_mission", 10
+        )
+        cls.start_mission_pub = cls.node.create_publisher(
+            Bool, "/wordle_bot/start_mission", 10
         )
 
         # Motion complete subscriber
@@ -145,24 +148,27 @@ class TestAdvancedMotionControl(unittest.TestCase):
     # Internal helpers
     # -----------------------------------------------------------------------
 
-    def _send_goal_and_wait(self, pose: PoseStamped) -> None:
-        """Publish a goal and block until /wordle_bot/motion_complete fires."""
+    def _send_mission_and_wait(self, poses: list) -> None:
+        """Queue goal poses via set_mission, arm with start_mission, wait for motion_complete."""
         TestAdvancedMotionControl.motion_complete = False
+        pa = PoseArray()
+        pa.header.frame_id = 'world'
+        pa.header.stamp = self.node.get_clock().now().to_msg()
+        pa.poses = [p.pose for p in poses]
+        self.set_mission_pub.publish(pa)
         time.sleep(0.5)
-        pose.header.stamp = self.node.get_clock().now().to_msg()
-        self.goal_pub.publish(pose)
+        start_msg = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
         self.node.get_logger().info(
-            f"Published goal: ({pose.pose.position.x:.3f}, "
-            f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
+            f"Mission sent with {len(poses)} goal(s). Waiting for motion_complete."
         )
-        deadline = time.time() + MOTION_TIMEOUT_S
+        deadline = time.time() + MOTION_TIMEOUT_S * len(poses)
         while not TestAdvancedMotionControl.motion_complete:
             rclpy.spin_once(self.node, timeout_sec=0.1)
             if time.time() > deadline:
                 self.fail(
-                    f"Motion did not complete within {MOTION_TIMEOUT_S}s "
-                    f"for goal ({pose.pose.position.x:.3f}, "
-                    f"{pose.pose.position.y:.3f}, {pose.pose.position.z:.3f})"
+                    f"Mission did not complete within {MOTION_TIMEOUT_S * len(poses):.0f} s"
                 )
 
     def _get_ee_transform(self):

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <thread>
 #include <moveit/planning_scene/planning_scene.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
@@ -14,26 +15,24 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   // ROS2 topic subscriptions and publications
   // ---------------------------------------------------------------------------
   // Publishers
-  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after each successful motion execution.
+  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after a successful mission execution.
   // - /wordle_bot/goal_reached (std_msgs/Bool): Published after reaching each individual goal in a mission.
   // - /wordle_bot/mission_complete (std_msgs/Bool): Published after completing all goals in a mission.
-  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING" to indicate current state.
+  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING".
 
   // Subscriptions
-  // - /wordle_bot/goal_pose (geometry_msgs/PoseStamped): Legacy single-goal interface for free-space motion.
-  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Set a multi-goal mission; execution starts on /start_mission.
-  // - /wordle_bot/start_mission (std_msgs/Bool): Start executing the currently set mission.
-  // - /wordle_bot/stop_mission (std_msgs/Bool): Request the robot to stop the current mission safely.
-  // - /wordle_bot/resume_mission (std_msgs/Bool): Request the robot to resume a stopped mission. (not yet implemented)
-  // - /wordle_bot/abort_mission (std_msgs/Bool): Request the robot to abort the current mission. (not yet implemented)
-  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object in the planning scene.
-  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger a pick-and-place task with pick_pose, place_pose, and object_id from hl_control.
-  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all tracked letter collision objects from the planning scene and reset the queue.
+  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Queue N goal poses; execution starts on /start_mission.
+  // - /wordle_bot/start_mission (std_msgs/Bool): Plan and execute the queued mission (goal poses or pick-and-place).
+  // - /wordle_bot/stop_mission (std_msgs/Bool): Stop the current mission safely.
+  // - /wordle_bot/resume_mission (std_msgs/Bool): Resume a stopped mission (not yet implemented).
+  // - /wordle_bot/abort_mission (std_msgs/Bool): Abort the current mission (not yet implemented).
+  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object.
+  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger pick-and-place mode.
+  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all letter collision objects and reset queue.
+  // - /wordle_bot/open_gripper (std_msgs/Bool): Open the gripper (IDLE only).
+  // - /wordle_bot/close_gripper (std_msgs/Bool): Close the gripper (IDLE only).
+  // - /wordle_bot/return_home (std_msgs/Bool): Return arm to home position (IDLE only).
   // ---------------------------------------------------------------------------
-  goal_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
-    "/wordle_bot/goal_pose", 10,
-    std::bind(&WordleBotControlNode::goalCallback, this, std::placeholders::_1));
-
   motion_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/motion_complete", 10);
 
@@ -78,6 +77,57 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/clear_letter_objects", 10,
     std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
 
+  open_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/open_gripper", 10,
+    std::bind(&WordleBotControlNode::openGripperCallback, this, std::placeholders::_1));
+
+  close_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/close_gripper", 10,
+    std::bind(&WordleBotControlNode::closeGripperCallback, this, std::placeholders::_1));
+
+  return_home_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/return_home", 10,
+    std::bind(&WordleBotControlNode::returnHomeCallback, this, std::placeholders::_1));
+
+  scan_and_sweep_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/scan_and_sweep", 10,
+    std::bind(&WordleBotControlNode::scanAndSweepCallback, this, std::placeholders::_1));
+
+  // Load scan-and-sweep parameters from config/scan_sweep_poses.yaml.
+  // Guard each declaration: if the YAML was loaded via --params-file the parameters
+  // are already declared by the time the constructor runs.
+  if (!node_->has_parameter("scan_sweep_dwell_time"))
+    node_->declare_parameter<double>("scan_sweep_dwell_time", 1.5);
+  if (!node_->has_parameter("scan_sweep_pose_0"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_0", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_1"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_1", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_2"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_2", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_3"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_3", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+
+  scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
+
+  auto load_pose = [&](const std::string & param_name) -> geometry_msgs::msg::Pose {
+    auto v = node_->get_parameter(param_name).as_double_array();
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = v[0];
+    pose.position.y = v[1];
+    pose.position.z = v[2];
+    tf2::Quaternion q;
+    q.setRPY(v[3], v[4], v[5]);
+    pose.orientation.x = q.x();
+    pose.orientation.y = q.y();
+    pose.orientation.z = q.z();
+    pose.orientation.w = q.w();
+    return pose;
+  };
+  scan_sweep_poses_[0] = load_pose("scan_sweep_pose_0");
+  scan_sweep_poses_[1] = load_pose("scan_sweep_pose_1");
+  scan_sweep_poses_[2] = load_pose("scan_sweep_pose_2");
+  scan_sweep_poses_[3] = load_pose("scan_sweep_pose_3");
+
   letter_object_counter_ = 0;
 
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
@@ -96,37 +146,16 @@ WordleBotControlNode::~WordleBotControlNode()
 }
 
 // ---------------------------------------------------------------------------
-// Subscriber callbacks
+// Mission Control Callbacks
+// Arms, starts, stops, resumes, and aborts missions in response to ROS2
+// topic messages on the /wordle_bot/ namespace.
 // ---------------------------------------------------------------------------
-// goalCallback
-// 
-// setMissionCallback
-// 
-// startMissionCallback
-// 
-// stopMissionCallback
-// 
-// resumeMissionCallback
-// 
-// abortMissionCallback
-// 
-// collisionObjectCallback
-//
-// letterObjectCallback
-//
-// clearLetterObjectsCallback
+// setMissionCallback    — queue N goal poses; arms the mission for /start_mission
+// startMissionCallback  — plan and execute the queued mission
+// stopMissionCallback   — safely halt current motion
+// resumeMissionCallback — resume a stopped mission (not yet implemented)
+// abortMissionCallback  — abort the current mission (not yet implemented)
 // ---------------------------------------------------------------------------
-
-void WordleBotControlNode::goalCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-{
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    goal_queue_.push_back(msg->pose);
-    mission_armed_ = true;
-  }
-  cv_.notify_one();
-  RCLCPP_INFO(LOGGER, "Goal enqueued and armed. Queue size: %zu", goal_queue_.size());
-}
 
 void WordleBotControlNode::setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
 {
@@ -196,6 +225,19 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
   if (!msg->data) return;
   RCLCPP_WARN(LOGGER, "abortMissionCallback: abort not yet implemented.");
 }
+
+// ---------------------------------------------------------------------------
+// Object & Scene Management Callbacks
+// Manage collision objects in the MoveIt planning scene, including generic
+// environment objects and the letter objects used in the pick-and-place workflow.
+// ---------------------------------------------------------------------------
+// collisionObjectCallback    — forward an ADD / REMOVE / MOVE operation directly
+//                              to the controller's planning scene interface
+// letterObjectCallback       — receive a pick/place task, register the letter
+//                              collision object, and queue the task
+// clearLetterObjectsCallback — remove all letter collision objects from the
+//                              planning scene and reset the task queue
+// ---------------------------------------------------------------------------
 
 void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
 {
@@ -289,10 +331,102 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
 }
 
 // ---------------------------------------------------------------------------
-// Mission loop
+// Arm Utility Callbacks
+// Standalone arm motions available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
-// 
-// 
+// returnHomeCallback   — return the arm to its SRDF "home" named state
+// openGripperCallback  — open the gripper to the SRDF "open" named state
+// closeGripperCallback — close the gripper to the SRDF "closed" named state
+// scanAndSweepCallback — execute the four-pose camera scan sweep sequence
+// ---------------------------------------------------------------------------
+
+void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "returnHomeCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "returnHomeCallback: returning to home.");
+  controller_->returnToHome();
+}
+
+void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "openGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
+  controller_->openGripper();
+}
+
+void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "closeGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
+  controller_->closeGripper();
+}
+
+void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "scanAndSweepCallback: mission running — ignoring.");
+      return;
+    }
+    mission_running_ = true;
+  }
+
+  RCLCPP_INFO(LOGGER, "scanAndSweepCallback: starting scan-and-sweep sequence.");
+
+  std_msgs::msg::String state_msg;
+  state_msg.data = "RUNNING";
+  robot_state_pub_->publish(state_msg);
+
+  auto poses = scan_sweep_poses_;
+  double dwell = scan_sweep_dwell_time_;
+
+  std::thread([this, poses, dwell]() {
+    controller_->runScanAndSweep(
+      std::vector<geometry_msgs::msg::Pose>(poses.begin(), poses.end()), dwell);
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      mission_running_ = false;
+    }
+    std_msgs::msg::String s;
+    s.data = "IDLE";
+    robot_state_pub_->publish(s);
+    RCLCPP_INFO(rclcpp::get_logger("WordleBotControlNode"),
+      "scanAndSweepCallback: sequence complete, returning to IDLE.");
+  }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// Mission Execution Loop
+// Background thread that wakes on mission_armed_, dispatches to either a
+// goal-pose mission or a pick-and-place batch, then publishes completion
+// signals. Uses a plan-then-execute strategy so all tasks are planned before
+// any motion begins, enabling planning scene chaining across tasks.
+// ---------------------------------------------------------------------------
+// missionLoop — blocks on condition variable; on wake dispatches to
+//               goal-pose execution or pick-and-place batch execution
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::missionLoop()
@@ -434,26 +568,78 @@ void WordleBotControlNode::missionLoop()
       }
 
     } else {
-      RCLCPP_INFO(LOGGER, "Mission thread: executing %zu waypoint goal(s).",
-        current_mission.size());
+      RCLCPP_INFO(LOGGER, "Goal mission: %zu goal(s) queued.", current_mission.size());
+
+      // ── Phase 1: Plan all goals sequentially, chaining via FixedState ────────
+      std::vector<WordleBotController::PlannedMoveToGoal> planned_goals;
+      planned_goals.reserve(current_mission.size());
+      bool planning_failed = false;
+
       for (std::size_t i = 0; i < current_mission.size(); ++i) {
         if (stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Waypoint mission stopped before goal %zu.", i + 1);
+          RCLCPP_INFO(LOGGER, "Goal planning: stop requested before goal %zu — aborting.", i + 1);
+          planning_failed = true;
           break;
         }
-        RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, current_mission.size());
-        const bool ok = controller_->moveToTarget(current_mission[i]);
-        if (!ok || stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Waypoint mission stopped at goal %zu.", i + 1);
+
+        const bool is_last = (i == current_mission.size() - 1);
+        planning_scene::PlanningScenePtr start_scene =
+            (i == 0) ? nullptr : planned_goals.back().end_scene;
+
+        RCLCPP_INFO(LOGGER, "Planning goal %zu of %zu (return_home=%s).",
+          i + 1, current_mission.size(), is_last ? "yes" : "no");
+
+        WordleBotController::PlannedMoveToGoal planned =
+            controller_->planMoveToGoal(current_mission[i], start_scene, is_last);
+
+        if (!planned.task) {
+          RCLCPP_ERROR(LOGGER, "Planning FAILED for goal %zu — aborting.", i + 1);
+          planning_failed = true;
           break;
         }
-        goal_reached_pub_->publish(signal);
-        motion_complete_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Goal %zu reached.", i + 1);
+
+        RCLCPP_INFO(LOGGER, "Planning succeeded for goal %zu of %zu.", i + 1, current_mission.size());
+        planned_goals.emplace_back(std::move(planned));
       }
-      if (!stop_requested_.load()) {
-        mission_complete_pub_->publish(signal);
-        RCLCPP_INFO(LOGGER, "Mission complete published.");
+
+      if (planned_goals.empty()) {
+        RCLCPP_ERROR(LOGGER, "Goal mission: no goals were successfully planned — aborting.");
+      } else {
+        if (planning_failed) {
+          RCLCPP_WARN(LOGGER, "Goal mission: %zu of %zu goals planned — executing partial mission.",
+            planned_goals.size(), current_mission.size());
+        } else {
+          RCLCPP_INFO(LOGGER, "Goal mission: all %zu goals planned — executing.", planned_goals.size());
+        }
+
+        // ── Phase 2: Execute all pre-planned goals in order ──────────────────
+        bool all_ok = true;
+        for (std::size_t i = 0; i < planned_goals.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER, "Goal execution: stop requested before goal %zu — aborting.", i + 1);
+            all_ok = false;
+            break;
+          }
+
+          RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, planned_goals.size());
+
+          if (!controller_->executePlannedMoveToGoal(planned_goals[i]) || stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER, "Execution FAILED at goal %zu — stopping.", i + 1);
+            all_ok = false;
+            break;
+          }
+
+          goal_reached_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Goal %zu of %zu reached.", i + 1, planned_goals.size());
+        }
+
+        if (all_ok && !planning_failed && !stop_requested_.load()) {
+          mission_complete_pub_->publish(signal);
+          motion_complete_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Goal mission fully complete.");
+        } else {
+          RCLCPP_ERROR(LOGGER, "Goal mission did not complete fully.");
+        }
       }
     }
 
@@ -471,7 +657,14 @@ void WordleBotControlNode::missionLoop()
 }
 
 // ---------------------------------------------------------------------------
-// Public interface
+// Public Interface
+// External entry points used by the ROS2 component wrapper and the
+// executable main() to query node internals and drive the node.
+// ---------------------------------------------------------------------------
+// getNodeBaseInterface — return the underlying rclcpp::Node base interface
+//                        required by the component manager
+// setupScene           — clear and rebuild the static collision scene
+// run                  — spin the node until ROS shutdown
 // ---------------------------------------------------------------------------
 
 rclcpp::node_interfaces::NodeBaseInterface::SharedPtr
