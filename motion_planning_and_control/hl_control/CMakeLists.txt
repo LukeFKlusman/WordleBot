@@ -11,14 +11,21 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs
 )
 
-# Install all Python scripts as executables.
-# rl_task_optimiser.py is co-installed so hl_control_node.py can import it
-# from the same directory via sys.path at runtime.
+# Install the two ROS2 node scripts as executables.
 install(PROGRAMS
   hl_control/hl_control_node.py
   hl_control/rl_task_optimiser.py
-  hl_control/test_env_publisher.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install the RL engine source so it is importable at runtime via sys.path.
+install(DIRECTORY rl_task_optimiser/
+  DESTINATION lib/${PROJECT_NAME}/rl_task_optimiser
+)
+
+# Install the trained model checkpoint.
+install(DIRECTORY models/
+  DESTINATION lib/${PROJECT_NAME}/models
 )
 
 install(DIRECTORY launch/

@@ -1,25 +1,39 @@
 """
-RLTaskOptimiser — wraps TaskSequencerEvaluator for ROS2 deployment.
+RLTaskOptimiser — bridges the ROS2 node and the RL task sequencer.
 
-Handles all coordinate conversion between robot space and RL model space:
-  - Robot space: grid 0.075 m, x in [-0.45, 0.45], y in [0.0, 0.45]
-  - RL space:    grid 0.75  m, x in [-4.5,  4.5],  y in [0.0, 4.5]
-  - Scale factor: RL = robot * 10
+Subclasses TaskSequencerEvaluator and adds coordinate conversion between
+robot space (physical metres) and RL grid space (training scale):
 
-Pick pose:  original raw robot-space XYZW is preserved for accuracy.
-Place pose: RL output cell centre / 10, with z=PLACE_Z and identity orientation.
+  Robot space:  grid 0.075 m, x in [-0.45, 0.45], y in [0.00, 0.45]
+  RL space:     grid 0.75  m, x in [-4.5,  4.5],  y in [0.00, 4.5]
+  Scale factor: RL = robot × 10
+
+Pick pose:  original raw robot-space XYZW preserved for perception accuracy.
+Place pose: RL output cell centre ÷ 10, z = PLACE_Z, identity orientation.
 """
 
 import os
 import sys
 
-import train as _train_module
-from test import TaskSequencerEvaluator
-from train import custom_reward, MODEL_DIR, MODEL_NAME
-from training_env.wordle_env import ALL_POSITIONS, WORKSPACE_X_MIN
+# Locate rl_task_optimiser/ relative to this file.
+# Installed layout: lib/hl_control/rl_task_optimiser/  (same directory as this script)
+# Source layout:    hl_control/rl_task_optimiser/       (one level up from hl_control/)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_RL_INSTALLED = os.path.join(_SCRIPT_DIR, 'rl_task_optimiser')
+_RL_SOURCE    = os.path.normpath(os.path.join(_SCRIPT_DIR, '..', 'rl_task_optimiser'))
+_RL_ROOT = _RL_INSTALLED if os.path.isdir(_RL_INSTALLED) else _RL_SOURCE
 
-# Root of the rl_task_optimiser package (where train.py lives).
-_RL_ROOT = os.path.dirname(os.path.abspath(_train_module.__file__))
+if _RL_ROOT not in sys.path:
+    sys.path.insert(0, _RL_ROOT)
+
+from task_sequencer import TaskSequencerEvaluator          # noqa: E402
+from reward import custom_reward                           # noqa: E402
+from training_env.wordle_env import ALL_POSITIONS, WORKSPACE_X_MIN  # noqa: E402
+
+_MODELS_INSTALLED = os.path.join(_SCRIPT_DIR, 'models')
+_MODELS_SOURCE    = os.path.normpath(os.path.join(_SCRIPT_DIR, '..', 'models'))
+_MODELS_DIR = _MODELS_INSTALLED if os.path.isdir(_MODELS_INSTALLED) else _MODELS_SOURCE
+MODEL_NAME = "wordle_ppo"
 
 ROBOT_SCALE = 10.0      # multiply robot coords by this to enter RL space
 GRID_STEP_RL = 0.75     # RL grid cell size in metres
@@ -35,7 +49,7 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
 
     def __init__(self, model_path: str | None = None):
         if model_path is None:
-            model_path = os.path.join(_RL_ROOT, MODEL_DIR, f"{MODEL_NAME}_latest")
+            model_path = os.path.join(_MODELS_DIR, f"{MODEL_NAME}_latest")
         super().__init__(model_path=model_path, reward_callback=custom_reward)
 
         # cell_id → original raw robot-space pose, populated per solve() call.
@@ -79,13 +93,11 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
         """
         self._raw_pick_poses = {}
         perception_blocks: dict[int, str] = {}
-        letter_counters: dict[str, int] = {}
 
         for item in letters:
             cell_id = self._robot_to_cell_id(item['x'], item['y'])
             perception_blocks[cell_id] = item['letter']
             self._raw_pick_poses[cell_id] = item
-            letter_counters[item['letter']] = letter_counters.get(item['letter'], 0) + 1
 
         env = self.build_env(stage=3, word=target_word, fixed_positions=perception_blocks)
         trajectory = self.run_episode(env)
@@ -128,13 +140,11 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
         Pick pose  → original raw robot-space pose from perception.
         Place pose → RL cell centre converted to robot space.
         """
-        # Build cell_id → letter item lookup for pick resolution
         cell_to_item: dict[int, dict] = {}
         for item in letters:
             cid = self._robot_to_cell_id(item['x'], item['y'])
             cell_to_item[cid] = item
 
-        # Track which cells have been visited (pick moves the letter)
         current_cell_to_item: dict[int, dict] = dict(cell_to_item)
 
         enriched = []
@@ -144,13 +154,10 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
 
             item = current_cell_to_item.get(src_id)
             if item is None:
-                # Letter was placed into this cell by a previous step — it keeps
-                # the same raw pose it was put there with (staging moves).
                 item = {'x': 0.0, 'y': 0.0, 'z': PLACE_Z,
                         'qx': 0.0, 'qy': 0.0, 'qz': 0.0, 'qw': 1.0,
                         'letter': step['letter'], 'object_id': ''}
 
-            # Place pose: convert RL cell centre to robot space
             dst_x_rl, dst_y_rl = ALL_POSITIONS[dst_id]
             place_x, place_y = self._rl_to_robot(dst_x_rl, dst_y_rl)
 
@@ -173,7 +180,6 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
                 'dest_cell_id':   dst_id,
             })
 
-            # Update the tracking map: item moves from src to dst
             current_cell_to_item[dst_id] = item
             current_cell_to_item.pop(src_id, None)
 
