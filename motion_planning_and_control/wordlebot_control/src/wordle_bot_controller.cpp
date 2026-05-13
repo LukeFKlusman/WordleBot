@@ -825,7 +825,10 @@ bool WordleBotController::moveToHome()
 // ---------------------------------------------------------------------------
 
 mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
-                                          const geometry_msgs::msg::Pose & place_pose)
+                                          const geometry_msgs::msg::Pose & place_pose,
+                                          const std::string & object_id,
+                                          const planning_scene::PlanningScenePtr & start_scene,
+                                          bool include_return_home)
 {
   RCLCPP_DEBUG(LOGGER, "createTask: initialising MTC task.");
   mtc::Task task;
@@ -861,13 +864,37 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   retreat_planner->setStepSize(0.001);
   retreat_planner->setMinFraction(0.0);
 
-  // ── Stage 1: capture current state ────────────────────────────────────────
+  // ── Stage 1: start state — CurrentState (task 1) or FixedState (tasks 2..N) ──
   mtc::Stage * current_state_ptr = nullptr;
   {
-    RCLCPP_DEBUG(LOGGER, "createTask: adding stage 1 — CurrentState.");
-    auto stage = std::make_unique<mtc::stages::CurrentState>("current");
-    current_state_ptr = stage.get();
-    task.add(std::move(stage));
+    if (start_scene == nullptr) {
+      RCLCPP_INFO(LOGGER, "createTask [%s]: Stage 1 = CurrentState (live robot state).",
+                  object_id.c_str());
+      auto stage = std::make_unique<mtc::stages::CurrentState>("current");
+      current_state_ptr = stage.get();
+      task.add(std::move(stage));
+    } else {
+      // Log the joint state embedded in the chained scene to verify correct threading.
+      const moveit::core::RobotState & rs = start_scene->getCurrentState();
+      const moveit::core::JointModelGroup * jmg =
+          rs.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+      if (jmg) {
+        std::vector<double> jv;
+        rs.copyJointGroupPositions(jmg, jv);
+        const auto & jnames = jmg->getVariableNames();
+        RCLCPP_INFO(LOGGER,
+          "createTask [%s]: Stage 1 = FixedState (chained from previous solution). "
+          "Start joints (%zu):", object_id.c_str(), jv.size());
+        for (std::size_t ji = 0; ji < jv.size() && ji < jnames.size(); ++ji) {
+          RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+            jnames[ji].c_str(), jv[ji], jv[ji] * 180.0 / M_PI);
+        }
+      }
+      auto stage = std::make_unique<mtc::stages::FixedState>("fixed start");
+      stage->setState(start_scene);
+      current_state_ptr = stage.get();
+      task.add(std::move(stage));
+    }
   }
 
   // ── Stage 2: open gripper ─────────────────────────────────────────────────
@@ -887,7 +914,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(10.0);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -902,14 +929,14 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 4a. Cartesian approach along gripper_tcp z-axis
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4a — MoveRelative 'approach object' "
-        "(link='%s', dist=[0.05, 0.10], dir=+z in %s).",
+        "(link='%s', dist=[0.05, 0.15], dir=+z in %s).",
         hand_frame.c_str(), hand_frame.c_str());
 
       auto stage = std::make_unique<mtc::stages::MoveRelative>("approach object", cartesian_planner);
       stage->properties().set("marker_ns", "approach_object");
       stage->properties().set("link", hand_frame);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.1, 0.15);
+      stage->setMinMaxDistance(0.05, 0.15);
 
       geometry_msgs::msg::Vector3Stamped vec;
       vec.header.frame_id = hand_frame;
@@ -922,19 +949,19 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4b — GenerateGraspPose for object '%s' "
         "(angle_delta=π/12, IK solutions=8, z_offset=0.08 m).",
-        LETTER_OBJECT_ID);
+        object_id.c_str());
       auto stage =
         std::make_unique<mtc::stages::GenerateGraspPose>("generate grasp pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
       stage->properties().set("marker_ns", "grasp_pose");
       stage->setPreGraspPose("open");
-      stage->setObject(LETTER_OBJECT_ID);
+      stage->setObject(object_id);
       stage->setAngleDelta(M_PI / 12);
       stage->setMonitoredStage(current_state_ptr);
 
       // Transform from gripper_tcp to the object centre when grasping top-down.
       // z=0.08 means gripper_tcp sits 80 mm above the object centre at grasp time.
-      constexpr double GRASP_Z_OFFSET = 0.01;
+      constexpr double GRASP_Z_OFFSET = 0.08;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
@@ -965,10 +992,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 4c. Allow collisions between gripper links and the object
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4c — ModifyPlanningScene allow collision "
-        "('%s', hand links).", LETTER_OBJECT_ID);
+        "('%s', hand links).", object_id.c_str());
       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
         "allow collision (hand,object)");
-      stage->allowCollisions( LETTER_OBJECT_ID,
+      stage->allowCollisions( object_id,
                               task.getRobotModel()
                                 ->getJointModelGroup(hand_group)
                                 ->getLinkModelNamesWithCollisionGeometry(),
@@ -988,10 +1015,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 4e. Attach object to the gripper link — GeneratePlacePose monitors this stage
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4e — ModifyPlanningScene attach '%s' to '%s'.",
-        LETTER_OBJECT_ID, hand_frame.c_str());
+        object_id.c_str(), hand_frame.c_str());
       auto stage =
         std::make_unique<mtc::stages::ModifyPlanningScene>("attach object");
-      stage->attachObject(LETTER_OBJECT_ID, hand_frame);
+      stage->attachObject(object_id, hand_frame);
       attach_object_stage = stage.get();
       grasp->insert(std::move(stage));
     }
@@ -1003,7 +1030,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       auto stage =
         std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.1, 0.15);
+      stage->setMinMaxDistance(0.05, 0.15);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "lift_object");
 
@@ -1027,7 +1054,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         {arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -1042,13 +1069,13 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     {
       RCLCPP_DEBUG(LOGGER, "\ncreateTask: 6a — GeneratePlacePose for '%s' "
         "target=(%.3f, %.3f, %.3f) world, IK solutions=4.",
-        LETTER_OBJECT_ID,
+        object_id.c_str(),
         place_pose.position.x, place_pose.position.y, place_pose.position.z);
       auto stage =
         std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
       stage->properties().set("marker_ns", "place_pose");
-      stage->setObject(LETTER_OBJECT_ID);
+      stage->setObject(object_id);
 
       geometry_msgs::msg::PoseStamped target_pose;
       target_pose.header.frame_id = "world";
@@ -1063,7 +1090,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
       wrapper->setMaxIKSolutions(4);
       wrapper->setMinSolutionDistance(1.0);
-      wrapper->setIKFrame(LETTER_OBJECT_ID);
+      wrapper->setIKFrame(object_id);
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
       place->insert(std::move(wrapper));
@@ -1081,11 +1108,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 6c. Restore collision checking between gripper and object
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 6c — ModifyPlanningScene forbid collision "
-        "('%s', hand links).", LETTER_OBJECT_ID);
+        "('%s', hand links).", object_id.c_str());
       auto stage = std::make_unique<mtc::stages::ModifyPlanningScene>(
         "forbid collision (hand,object)");
       stage->allowCollisions(
-        LETTER_OBJECT_ID,
+        object_id,
         task.getRobotModel()
           ->getJointModelGroup(hand_group)
           ->getLinkModelNamesWithCollisionGeometry(),
@@ -1096,10 +1123,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     // 6d. Detach object from gripper
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 6d — ModifyPlanningScene detach '%s' from '%s'.",
-        LETTER_OBJECT_ID, hand_frame.c_str());
+        object_id.c_str(), hand_frame.c_str());
       auto stage =
         std::make_unique<mtc::stages::ModifyPlanningScene>("detach object");
-      stage->detachObject(LETTER_OBJECT_ID, hand_frame);
+      stage->detachObject(object_id, hand_frame);
       place->insert(std::move(stage));
     }
 
@@ -1125,23 +1152,27 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     task.add(std::move(place));
   }
 
-  // ── Stage 7: return to named home state ───────────────────────────────────
-  {
-    RCLCPP_DEBUG(LOGGER, "createTask: adding stage 7 — MoveTo 'return home' (goal='home').");
+  // ── Stage 7: return home — only for the final task in a batch ────────────
+  if (include_return_home) {
+    RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return home'.", object_id.c_str());
     auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
     stage->setGoal("home");
     task.add(std::move(stage));
+  } else {
+    RCLCPP_DEBUG(LOGGER,
+      "createTask [%s]: skipping stage 7 — not the last task in the batch.", object_id.c_str());
   }
 
-  RCLCPP_DEBUG(LOGGER, "createTask: task construction complete (7 top-level stages).");
+  RCLCPP_DEBUG(LOGGER, "createTask [%s]: task construction complete.", object_id.c_str());
   return task;
 }
 
 bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
-                                         const geometry_msgs::msg::Pose & place_pose)
+                                         const geometry_msgs::msg::Pose & place_pose,
+                                         const std::string & object_id)
 {
-  RCLCPP_INFO(LOGGER, "doPickAndPlace: building MTC task.");
+  RCLCPP_INFO(LOGGER, "doPickAndPlace: building MTC task for object '%s'.", object_id.c_str());
 
   RCLCPP_INFO(LOGGER,
     "doPickAndPlace: object pose = (%.4f, %.4f, %.4f)  "
@@ -1153,7 +1184,7 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
     object_pose.orientation.z, object_pose.orientation.w,
     place_pose.position.x, place_pose.position.y, place_pose.position.z);
 
-  mtc::Task task = createTask(object_pose, place_pose);
+  mtc::Task task = createTask(object_pose, place_pose, object_id, nullptr, true);
 
   try {
     task.init();
@@ -1199,9 +1230,153 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
 }
 
 // ---------------------------------------------------------------------------
+// Two-phase pick-and-place: plan without executing, then execute separately
+// ---------------------------------------------------------------------------
+
+WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
+  const PickPlaceEntry & entry,
+  const planning_scene::PlanningScenePtr & start_scene,
+  bool include_return_home)
+{
+  PlannedPickPlace result;
+  result.object_id = entry.object_id;
+
+  RCLCPP_INFO(LOGGER,
+    "planPickAndPlace [%s]: building task (start=%s, return_home=%s).",
+    entry.object_id.c_str(),
+    start_scene ? "FixedState(chained)" : "CurrentState(live)",
+    include_return_home ? "yes" : "no");
+
+  // createTask() returns by value; Task has a move constructor so this move-constructs
+  // into the heap-allocated object without any copy.
+  result.task = std::make_unique<mtc::Task>(
+    createTask(entry.pick_pose, entry.place_pose, entry.object_id,
+               start_scene, include_return_home));
+
+  try {
+    result.task->init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER,
+      "planPickAndPlace [" << entry.object_id << "]: task init failed: " << e);
+    result.task.reset();
+    return result;
+  }
+
+  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (max 5 solutions)...",
+              entry.object_id.c_str());
+  moveit::core::MoveItErrorCode plan_result;
+  try {
+    plan_result = result.task->plan(5);
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER,
+      "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
+    result.task.reset();
+    return result;
+  }
+
+  if (!plan_result || result.task->solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "planPickAndPlace [%s]: no solutions found.", entry.object_id.c_str());
+    result.task.reset();
+    return result;
+  }
+
+  // best_solution is a raw pointer into the task's internal storage.
+  // It remains valid as long as result.task is alive — both live in PlannedPickPlace.
+  result.best_solution = result.task->solutions().front().get();
+
+  RCLCPP_INFO(LOGGER,
+    "planPickAndPlace [%s]: planning succeeded — %zu solution(s), best cost=%.3f.",
+    entry.object_id.c_str(),
+    result.task->solutions().size(),
+    result.best_solution->cost());
+
+  // Extract the terminal planning scene from the solution's end InterfaceState.
+  // PlanningScene::clone() produces a fully independent non-const copy, which is
+  // safe to pass to FixedState::setState() for the next task. Using const_pointer_cast
+  // would alias the Task's internal scene — risky if MTC mutates it later.
+  if (result.best_solution->end() == nullptr) {
+    RCLCPP_ERROR(LOGGER,
+      "planPickAndPlace [%s]: solution end state is null — cannot chain next task.",
+      entry.object_id.c_str());
+  } else {
+    result.end_scene = planning_scene::PlanningScene::clone(
+      result.best_solution->end()->scene());
+
+    // Debug: log terminal joint state so we can verify chaining is correct.
+    const moveit::core::RobotState & end_rs = result.end_scene->getCurrentState();
+    const moveit::core::JointModelGroup * jmg =
+        end_rs.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+    if (jmg) {
+      std::vector<double> end_jv;
+      end_rs.copyJointGroupPositions(jmg, end_jv);
+      const auto & jnames = jmg->getVariableNames();
+      RCLCPP_INFO(LOGGER,
+        "planPickAndPlace [%s]: terminal joint state (%zu joints) — "
+        "will be FixedState start for next task:",
+        entry.object_id.c_str(), end_jv.size());
+      for (std::size_t ji = 0; ji < end_jv.size() && ji < jnames.size(); ++ji) {
+        RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+          jnames[ji].c_str(), end_jv[ji], end_jv[ji] * 180.0 / M_PI);
+      }
+    }
+
+    // Debug: confirm all expected collision objects are still present in the terminal scene.
+    const std::vector<std::string> obj_ids = result.end_scene->getWorld()->getObjectIds();
+    RCLCPP_INFO(LOGGER,
+      "planPickAndPlace [%s]: terminal scene contains %zu world object(s):",
+      entry.object_id.c_str(), obj_ids.size());
+    for (const auto & oid : obj_ids) {
+      RCLCPP_INFO(LOGGER, "  object: %s", oid.c_str());
+    }
+  }
+
+  return result;
+}
+
+
+bool WordleBotController::executePlannedTask(PlannedPickPlace & planned)
+{
+  if (!planned.task || !planned.best_solution) {
+    RCLCPP_ERROR(LOGGER,
+      "executePlannedTask [%s]: task or solution is null — cannot execute.",
+      planned.object_id.c_str());
+    return false;
+  }
+
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER,
+      "executePlannedTask [%s]: stop requested before execute — aborting.",
+      planned.object_id.c_str());
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER,
+    "executePlannedTask [%s]: publishing solution for visualisation (cost=%.3f).",
+    planned.object_id.c_str(), planned.best_solution->cost());
+  planned.task->introspection().publishSolution(*planned.best_solution);
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: executing...", planned.object_id.c_str());
+  const auto result = planned.task->execute(*planned.best_solution);
+
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER,
+      "executePlannedTask [%s]: execution failed (error code %d).",
+      planned.object_id.c_str(), result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: execution succeeded.", planned.object_id.c_str());
+  return true;
+}
+
+
+// ---------------------------------------------------------------------------
 // Phase-split MTC tasks for stop/resume-aware pick-and-place
 // ---------------------------------------------------------------------------
 
+
+// Pick task and place task are not used, will be implemented later
 mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & object_pose)
 {
   // object_pose is available for future logging or geometric pre-checks;
@@ -1251,7 +1426,7 @@ mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & o
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -1267,7 +1442,7 @@ mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & o
       stage->properties().set("marker_ns", "approach_object");
       stage->properties().set("link", hand_frame);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.1, 0.15);
+      stage->setMinMaxDistance(0.05, 0.15);
       geometry_msgs::msg::Vector3Stamped vec;
       vec.header.frame_id = hand_frame;
       vec.vector.z = 1.0;
@@ -1285,7 +1460,7 @@ mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & o
       stage->setAngleDelta(M_PI / 12);
       stage->setMonitoredStage(current_state_ptr);
 
-      constexpr double GRASP_Z_OFFSET = 0.01;
+      constexpr double GRASP_Z_OFFSET = 0.08;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
@@ -1331,7 +1506,7 @@ mtc::Task WordleBotController::createPickTask(const geometry_msgs::msg::Pose & o
     {
       auto stage = std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.1, 0.15);
+      stage->setMinMaxDistance(0.05, 0.15);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "lift_object");
       geometry_msgs::msg::Vector3Stamped vec;
@@ -1386,7 +1561,7 @@ mtc::Task WordleBotController::createPlaceTask()
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage->setTimeout(10.0);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 

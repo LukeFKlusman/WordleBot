@@ -1007,9 +1007,8 @@ class TestKeyControlConcepts(unittest.TestCase):
             f"place_slot=P3."
         )
 
-        for _ in range(5):
-            self.letter_object_pub.publish(task_msg)
-            rclpy.spin_once(self.node, timeout_sec=0.1)
+        self.letter_object_pub.publish(task_msg)
+        rclpy.spin_once(self.node, timeout_sec=0.1)
 
         # Allow the planning scene to propagate the new collision object
         time.sleep(10)
@@ -1019,7 +1018,7 @@ class TestKeyControlConcepts(unittest.TestCase):
         # ------------------------------------------------------------------ #
         start_msg = Bool()
         start_msg.data = True
-        self.start_mission_pub.publish(start_msg)
+        # self.start_mission_pub.publish(start_msg)
         self.node.get_logger().info("[TC1.6] Mission armed — waiting for pick-and-place to complete.")
 
         # ------------------------------------------------------------------ #
@@ -1150,9 +1149,9 @@ class TestKeyControlConcepts(unittest.TestCase):
         # Task definitions: (pick_x, pick_y, pick_z, slot, expected_place_x)
         # ------------------------------------------------------------------ #
         TASKS = [
-            (0.20, 0.30, 0.05, 2, -0.075),   # P2
-            (0.00, 0.25, 0.05, 3,  0.000),   # P3
-            (-0.20, 0.30, 0.05, 4,  0.075),  # P4
+            (0.25, 0.10, 0.025, 2, -0.075),   # P2
+            (-0.35, 0.10, 0.025, 3,  0.000),   # P3
+            (-0.35, 0.20, 0.025, 4,  0.075),  # P4
         ]
         PLACE_REACH_TOLERANCE = 0.05  # 50 mm
 
@@ -1183,9 +1182,8 @@ class TestKeyControlConcepts(unittest.TestCase):
             task_msg.pick_pose.pose.orientation.w = 1.0
             task_msg.place_slot = slot
 
-            for _ in range(3):
-                self.letter_object_pub.publish(task_msg)
-                rclpy.spin_once(self.node, timeout_sec=0.1)
+            self.letter_object_pub.publish(task_msg)
+            rclpy.spin_once(self.node, timeout_sec=0.1)
 
             self.node.get_logger().info(
                 f"[TC1.7]   queued pick=({pick_x:.3f}, {pick_y:.3f}, {pick_z:.3f})  "
