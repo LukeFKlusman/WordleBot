@@ -60,6 +60,10 @@ private:
   // Clears all letter collision objects from the planning scene
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr clear_letter_objects_sub_;
 
+  // Standalone gripper open / close
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr open_gripper_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr close_gripper_sub_;
+
   // PickPlaceEntry is defined on WordleBotController (the controller owns planning).
   std::vector<WordleBotController::PickPlaceEntry> pick_place_queue_;
 
@@ -87,6 +91,8 @@ private:
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
   void letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg);
   void clearLetterObjectsCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg);
 
   // Mission loop (runs on mission_thread_)
   void missionLoop();

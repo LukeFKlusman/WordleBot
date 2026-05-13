@@ -78,6 +78,14 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/clear_letter_objects", 10,
     std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
 
+  open_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/open_gripper", 10,
+    std::bind(&WordleBotControlNode::openGripperCallback, this, std::placeholders::_1));
+
+  close_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/close_gripper", 10,
+    std::bind(&WordleBotControlNode::closeGripperCallback, this, std::placeholders::_1));
+
   letter_object_counter_ = 0;
 
   mission_thread_ = std::thread(&WordleBotControlNode::missionLoop, this);
@@ -286,6 +294,34 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
   RCLCPP_INFO(LOGGER,
     "clearLetterObjectsCallback: cleared %zu letter object(s) and reset queue.",
     ids_to_remove.size());
+}
+
+void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "openGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
+  controller_->openGripper();
+}
+
+void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "closeGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
+  controller_->closeGripper();
 }
 
 // ---------------------------------------------------------------------------

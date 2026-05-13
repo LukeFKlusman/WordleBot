@@ -111,6 +111,12 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
+  // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
+  bool openGripper();
+
+  // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
+  bool closeGripper();
+
   // Plan and execute a full MTC pick-and-place for the given object and place poses.
   bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
                       const geometry_msgs::msg::Pose & place_pose,

@@ -1233,6 +1233,94 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
 }
 
 // ---------------------------------------------------------------------------
+// Standalone gripper open / close
+// ---------------------------------------------------------------------------
+
+bool WordleBotController::openGripper()
+{
+  RCLCPP_INFO(LOGGER, "openGripper: building MTC task.");
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("open gripper");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal("open");
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "openGripper: task init failed: " << e);
+    return false;
+  }
+
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "openGripper: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "openGripper: succeeded.");
+  return true;
+}
+
+bool WordleBotController::closeGripper()
+{
+  RCLCPP_INFO(LOGGER, "closeGripper: building MTC task.");
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("close gripper");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal("closed");
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "closeGripper: task init failed: " << e);
+    return false;
+  }
+
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "closeGripper: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "closeGripper: succeeded.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Two-phase pick-and-place: plan without executing, then execute separately
 // ---------------------------------------------------------------------------
 
