@@ -2,35 +2,80 @@
 
 High-level decision-making package for the WordleBot UR3e system.
 
-Receives a target word and the current gameboard state, runs a trained RL policy (MaskablePPO) to sequence pick-and-place tasks, and forwards them to `wordlebot_control` for execution. Also visualises the letter objects in RViz by injecting them into the MoveIt planning scene.
+Receives a target word and the current gameboard state, runs a trained RL policy (MaskablePPO) to compute an optimal pick-and-place task sequence, and forwards the tasks to `wordlebot_control` for execution. Letter objects are also injected into the MoveIt planning scene for RViz visualisation.
+
+The package is entirely self-contained: the RL engine source and trained model checkpoint live inside this package alongside the ROS2 node.
+
+---
+
+## Package Structure
+
+```
+hl_control/
+├── CMakeLists.txt
+├── package.xml
+│
+├── config/
+│   └── tc2_1_board.yaml              # TC2.1 test scenario — CRANE board
+│
+├── launch/
+│   └── hl_control.launch.py          # Launches hl_control_node
+│
+├── models/
+│   └── wordle_ppo_latest.zip         # Trained MaskablePPO checkpoint
+│
+├── msg/
+│   ├── LetterObject.msg              # Per-letter perception message
+│   └── GameboardState.msg            # Full board state (array of LetterObject)
+│
+├── hl_control/                       # ROS2 Python package
+│   ├── __init__.py
+│   ├── hl_control_node.py            # ROS2 node — subscribes, solves, publishes tasks
+│   └── rl_task_optimiser.py          # Robot↔RL coordinate bridge (inherits TaskSequencerEvaluator)
+│
+├── rl_task_optimiser/                # RL execution engine (no training code)
+│   ├── reward.py                     # Reward function and shaping constants
+│   ├── task_sequencer.py             # TaskSequencerEvaluator — loads model, runs policy
+│   ├── dictionary.txt                # 5-letter word list
+│   └── training_env/
+│       └── wordle_env.py             # WordleSequencingEnv — Gymnasium MDP
+│
+└── test/
+    ├── test_sim.py                   # TC2.1 simulation publisher (replaces perception + solver)
+    └── demonstration_test.py         # Standalone RL demonstration (no ROS required)
+```
 
 ---
 
 ## System Integration
 
+### Full Stack
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Full Stack Overview                          │
 │                                                                     │
-│  [Wordle Solver]          [Perception Node]                         │
-│       │ /hl_control/word_request   │ /perception/gameboard_state    │
-│       │  (std_msgs/String)         │  (hl_control/GameboardState)   │
-│       └──────────────┬────────────┘                                 │
+│  [Wordle Solver]           [Perception Node]                        │
+│       │ /hl_control/word_request   │ /perception/gameboard_state   │
+│       │  (std_msgs/String)         │  (hl_control/GameboardState)  │
+│       └──────────────┬─────────────┘                               │
 │                      ▼                                              │
 │              [ hl_control_node ]                                    │
-│              ┌───────────────────────────┐                          │
-│              │ 1. Adds letters to RViz   │                          │
-│              │    (collision objects)    │                          │
-│              │ 2. Snaps poses → RL grid  │                          │
-│              │ 3. Runs RL model          │                          │
-│              │ 4. Converts back to robot │                          │
-│              │    space (÷10)            │                          │
-│              │ 5. Publishes task queue   │                          │
-│              └───────────────────────────┘                          │
+│              ┌────────────────────────────┐                         │
+│              │ 1. Adds letters to MoveIt  │                         │
+│              │    scene (collision cubes) │                         │
+│              │ 2. Snaps poses → RL grid   │                         │
+│              │ 3. Runs MaskablePPO policy │                         │
+│              │ 4. Converts back to robot  │                         │
+│              │    space (÷10)             │                         │
+│              │ 5. Publishes task sequence │                         │
+│              │ 6. Logs: send start_mission│                         │
+│              └────────────────────────────┘                         │
 │                      │                                              │
 │        /perception/letter_objects                                   │
 │        (wordlebot_control/PickPlaceTask)  ← one msg per task        │
-│        /wordle_bot/start_mission          ← arms execution          │
+│                      │                                              │
+│  [Operator / UI]  ──→  /wordle_bot/start_mission  ← arms execution  │
 │                      ▼                                              │
 │            [ wordlebot_control_node ]                               │
 │              Plans + executes pick-and-place via MoveIt MTC         │
@@ -39,28 +84,62 @@ Receives a target word and the current gameboard state, runs a trained RL policy
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### For TC2.1 (simulation / testing without real perception or solver)
+`hl_control_node` is a **passive background node** — it does nothing until both a word request and a board state have arrived. It has no internal timer and does not initiate execution. After publishing tasks it logs a ready message; execution is armed by publishing `start_mission` from an external source (UI, gamification package, or operator terminal).
 
-The `test_env_publisher` node replaces both the solver and the perception node. It reads a YAML file defining letter positions and publishes the board state and target word automatically on startup.
+### TC2.1 — Isolated Test (no full system)
+
+`test/test_sim.py` replaces both the solver and perception node. It reads `tc2_1_board.yaml` and publishes the board state and word request on startup.
 
 ```
-┌──────────────────────────────────────────────┐
-│  [test_env_publisher]                        │
-│    reads tc2_1_board.yaml                    │
-│    publishes gameboard_state (latched)       │
-│    publishes word_request                    │
-└──────────────────────┬───────────────────────┘
-                       │
-               [ hl_control_node ]
-                       │
-           [ wordlebot_control_node ]
+┌─────────────────────────────────────────┐
+│  python3 test/test_sim.py               │
+│    reads tc2_1_board.yaml               │
+│    publishes /perception/gameboard_state │
+│    publishes /hl_control/word_request   │
+└──────────────────┬──────────────────────┘
+                   │
+           [ hl_control_node ]
+           (solves + logs task sequence)
+                   │
+   /perception/letter_objects → [ wordlebot_control_node ]
+                   │
+   ros2 topic pub /wordle_bot/start_mission ...  ← operator
+```
+
+---
+
+## Class Hierarchy
+
+```
+TaskSequencerEvaluator          (rl_task_optimiser/task_sequencer.py)
+        │
+        │  build_env()      — create WordleEnv from perception inputs
+        │  run_episode()    — run policy, return trajectory
+        │  get_task_sequence() — convert trajectory to task list
+        │
+        ▼
+RLTaskOptimiser                 (hl_control/rl_task_optimiser.py)
+        │
+        │  solve()          — converts robot poses → RL grid, calls above, converts back
+        │  _robot_to_cell_id()
+        │  _rl_to_robot()
+        │  _enrich_sequence()
+        │
+        ▼
+HLControlNode(Node, RLTaskOptimiser)   (hl_control/hl_control_node.py)
+        │
+        │  _word_callback()    — receives target word
+        │  _board_callback()   — receives gameboard state
+        │  _try_solve()        — triggers when both inputs have arrived
+        │  _publish_tasks()    — sends PickPlaceTask msgs
+        │  _add_letters_to_scene() — injects collision objects into MoveIt
 ```
 
 ---
 
 ## Coordinate System
 
-The RL model was trained on a scaled workspace. All coordinate conversion is handled transparently inside `rl_task_optimiser.py`.
+The RL model was trained on a scaled workspace. All conversion is handled transparently inside `rl_task_optimiser.py`.
 
 | Space | Grid spacing | X range | Y range |
 |---|---|---|---|
@@ -69,19 +148,9 @@ The RL model was trained on a scaled workspace. All coordinate conversion is han
 
 **Scale factor: RL = robot × 10**
 
-**Pick pose:** The raw perceived pose is preserved exactly and passed to the robot unchanged (accuracy > grid alignment).
+**Pick pose:** The raw perceived pose is preserved exactly (accuracy > grid snapping).
 
-**Place pose:** The RL model's output cell centre is divided by 10 to give robot-space XY. Z is always 0.025 m and orientation is always identity (w=1).
-
-Example:
-```
-Perceived pick:  (0.22, 0.31, 0.025, w=1)   ← raw from perception
-Scaled to RL:    (2.20, 3.10)
-Snapped to grid: (2.25, 3.00)               → cell_id for model
-Model output place cell → RL centre: (−1.50, 2.25)
-Robot place pose:        (−0.15, 0.225, 0.025, w=1)
-Robot pick returned:     (0.22, 0.31, 0.025, w=1)   ← original preserved
-```
+**Place pose:** The RL model's output cell centre is divided by 10 to give robot-space XY. Z is always 0.025 m, orientation is always identity.
 
 **Wordle slots (robot space):**
 
@@ -100,31 +169,30 @@ Robot pick returned:     (0.22, 0.31, 0.025, w=1)   ← original preserved
 Everything from `wordlebot_control` (ROS 2 Humble+, MoveIt 2, UR driver) plus:
 
 - Python 3.10+
-- `sb3-contrib` (`pip install sb3-contrib`)
-- `stable-baselines3` (`pip install stable-baselines3`)
-- Trained model at `rl_task_optimiser/models/wordle_ppo_latest.zip`
-- `rl_task_optimiser` package at `/home/connorlindsell/git/AiRobotics/rl_task_optimiser`
+- `sb3-contrib` — `pip install sb3-contrib`
+- `stable-baselines3` — `pip install stable-baselines3`
+- Trained model at `models/wordle_ppo_latest.zip` (included in this package)
 
 ---
 
 ## How to Run
 
-### Step 1 — Build both packages
+### Step 1 — Build
 
-From the workspace root (`/home/connorlindsell/git/RS2/motion_planning_and_control`):
+From the workspace root:
 
 ```bash
 colcon build --packages-select wordlebot_control hl_control
 source install/setup.bash
 ```
 
-> `wordlebot_control` must be built first because `hl_control` depends on its `PickPlaceTask` message type. `colcon` resolves this automatically when both are listed together.
+> `wordlebot_control` must be built first as `hl_control` depends on its `PickPlaceTask` message. `colcon` resolves this automatically when both are listed.
 
 ---
 
 ### Step 2 — Launch the robot stack
 
-Follow the `wordlebot_control` README to bring up the robot driver, MoveIt, and RViz (Terminals 1–4). Then launch the control node:
+Follow the `wordlebot_control` README to bring up the robot driver, MoveIt, and RViz. Then:
 
 ```bash
 # Terminal 5
@@ -135,37 +203,39 @@ ros2 launch wordlebot_control wordle_bot_mtc.launch.py
 
 ### Step 3 — Launch hl_control
 
-#### TC2.1 — Full pipeline with test publisher (simulation)
-
-Launches `hl_control_node` and `test_env_publisher` together. The publisher reads `tc2_1_board.yaml` and fires after 2 seconds to let all nodes connect.
-
-```bash
-# Terminal 6
-ros2 launch hl_control hl_control.launch.py use_test_publisher:=true word:=CRANE
-```
-
-To test a different word (letters must exist on the board):
-
-```bash
-ros2 launch hl_control hl_control.launch.py use_test_publisher:=true word:=CRANE \
-  config_path:=/path/to/your_board.yaml
-```
-
-To point at a different model checkpoint:
-
-```bash
-ros2 launch hl_control hl_control.launch.py use_test_publisher:=true word:=CRANE \
-  model_path:=/home/connorlindsell/git/AiRobotics/rl_task_optimiser/models/wordle_ppo_v3
-```
-
-#### Standalone — Real perception / solver integration
-
 ```bash
 # Terminal 6
 ros2 launch hl_control hl_control.launch.py
 ```
 
-Then publish the board state and word separately (see Manual Control below).
+To use a different model checkpoint:
+
+```bash
+ros2 launch hl_control hl_control.launch.py model_path:=/path/to/wordle_ppo_v3
+```
+
+---
+
+### Step 4 — Provide inputs
+
+#### TC2.1 isolated test — use test_sim.py
+
+```bash
+# Terminal 7
+python3 test/test_sim.py --ros-args \
+  -p config_path:=$(pwd)/config/tc2_1_board.yaml \
+  -p word:=CRANE
+```
+
+The node will solve the sequence and log each step. Once satisfied:
+
+```bash
+ros2 topic pub /wordle_bot/start_mission std_msgs/msg/Bool "data: true" --once
+```
+
+#### Full system — inputs provided externally
+
+The perception node publishes to `/perception/gameboard_state` and the solver publishes to `/hl_control/word_request`. No further action needed — `hl_control_node` solves automatically when both arrive.
 
 ---
 
@@ -175,18 +245,25 @@ Then publish the board state and word separately (see Manual Control below).
 
 | Topic | Type | Description |
 |---|---|---|
-| `/hl_control/word_request` | `std_msgs/String` | Five-letter target word (upper-case). Solving triggers when both word and board state have been received. |
-| `/perception/gameboard_state` | `hl_control/GameboardState` | Array of `LetterObject` (letter + PoseStamped + object_id). Latched — can be published once at startup. |
+| `/hl_control/word_request` | `std_msgs/String` | Five-letter target word (upper-case). Latched. |
+| `/perception/gameboard_state` | `hl_control/GameboardState` | Array of `LetterObject` with perceived poses. Latched. |
 
 ### Published by `hl_control_node`
 
 | Topic | Type | Description |
 |---|---|---|
-| `/perception/letter_objects` | `wordlebot_control/PickPlaceTask` | One message per task, published sequentially. Each carries pick_pose, place_pose, and object_id. |
-| `/wordle_bot/add_collision_object` | `moveit_msgs/CollisionObject` | Adds 50 mm letter cubes to the MoveIt scene for RViz visualisation. Published once per letter on board-state receipt. |
-| `/wordle_bot/start_mission` | `std_msgs/Bool` | Published `true` after all tasks are queued to arm execution in `wordlebot_control`. |
+| `/perception/letter_objects` | `wordlebot_control/PickPlaceTask` | One message per task (pick pose, place pose, object_id). |
+| `/wordle_bot/add_collision_object` | `moveit_msgs/CollisionObject` | 50 mm letter cubes added to the MoveIt scene for RViz. |
 
-### Message Definitions
+### Sent externally to arm execution
+
+| Topic | Type | Publisher |
+|---|---|---|
+| `/wordle_bot/start_mission` | `std_msgs/Bool` | UI / gamification package (full system) or operator terminal (test) |
+
+---
+
+## Message Definitions
 
 **`hl_control/LetterObject`**
 ```
@@ -200,7 +277,7 @@ string object_id
 hl_control/LetterObject[] letters
 ```
 
-**`wordlebot_control/PickPlaceTask`** (updated)
+**`wordlebot_control/PickPlaceTask`**
 ```
 geometry_msgs/PoseStamped pick_pose
 geometry_msgs/Pose place_pose
@@ -209,11 +286,32 @@ string object_id
 
 ---
 
+## TC2.1 Board YAML Format
+
+Edit `config/tc2_1_board.yaml` to change the test scenario.
+
+```yaml
+word: CRANE
+
+letters:
+  - letter: C
+    object_id: C_object_1
+    x: -0.448     # robot-space X (metres)
+    y:  0.072     # robot-space Y (metres)
+    z:  0.025     # height — same for all letters
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0       # identity orientation
+```
+
+`object_id` follows the format `{LETTER}_object_{n}` and must be unique per letter. It is used as the MoveIt collision object ID throughout planning and execution.
+
+---
+
 ## Manual Terminal Control
 
-Use these to test the hl_control interface without the test publisher.
-
-### Publish a board state (latched)
+Publish a board state and word request manually without `test_sim.py`:
 
 ```bash
 ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
@@ -239,87 +337,26 @@ ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState 
             pose: {position: {x: 0.447, y: 0.074, z: 0.025},
                    orientation: {w: 1.0}}}}
   ]}"
-```
 
-### Send a word request
-
-```bash
 ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRANE'}"
 ```
 
-### Monitor the task sequence as it is published
+Monitor the published task sequence:
 
 ```bash
 ros2 topic echo /perception/letter_objects
 ```
 
-### Monitor mission state
+---
+
+## Standalone RL Demonstration (no ROS)
+
+`test/demonstration_test.py` runs the full RL evaluation loop without any ROS infrastructure. It loads the model, runs the policy against all four curriculum scenarios, and saves comparison figures and animated GIFs to `rl_task_optimiser/logs/`.
 
 ```bash
-ros2 topic echo /wordle_bot/robot_state
-ros2 topic echo /wordle_bot/mission_complete
+python3 test/demonstration_test.py
+python3 test/demonstration_test.py --no-animate   # skip GIF generation
 ```
-
----
-
-## TC2.1 Board YAML Format
-
-Edit `config/tc2_1_board.yaml` to change the test scenario. Each entry is one letter block with its raw perceived pose in robot space.
-
-```yaml
-word: CRANE
-
-letters:
-  - letter: C
-    object_id: C_object_1
-    x: -0.448     # robot-space X (metres)
-    y:  0.072     # robot-space Y (metres)
-    z:  0.025     # height — same for all letters
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0       # identity orientation
-```
-
-The `object_id` format is `{LETTER}_object_{n}` (1-indexed per letter type). It is used as the MoveIt collision object ID throughout planning and execution, so it must be unique per letter on the board.
-
----
-
-## Package Structure
-
-```
-hl_control/
-├── CMakeLists.txt
-├── package.xml
-├── config/
-│   └── tc2_1_board.yaml          # TC2.1 test scenario (CRANE)
-├── launch/
-│   └── hl_control.launch.py      # Main launch file
-├── msg/
-│   ├── LetterObject.msg           # Per-letter perception message
-│   └── GameboardState.msg         # Full board state (array of LetterObject)
-└── hl_control/
-    ├── __init__.py
-    ├── hl_control_node.py         # ROS2 node — orchestration
-    ├── rl_task_optimiser.py       # RL logic — wraps TaskSequencerEvaluator
-    └── test_env_publisher.py      # TC2.1 test publisher
-```
-
----
-
-## Integration with `rl_task_optimiser`
-
-`rl_task_optimiser.py` subclasses `TaskSequencerEvaluator` from `test.py` in the rl_task_optimiser repo. The three inherited methods used at runtime are:
-
-| Method | Role |
-|---|---|
-| `build_env(stage, word, fixed_positions)` | Creates a `WordleEnv` with the perceived board state |
-| `run_episode(env)` | Runs the MaskablePPO policy to completion, returns a trajectory |
-| `get_task_sequence(trajectory)` | Converts the trajectory into a list of pick/place cell pairs |
-
-The `RLTaskOptimiser.solve()` method wraps all three steps and handles coordinate conversion in and out of RL space. It always uses `stage=3` (C3 masking), which handles both C2-like boards (empty Wordle slots, TC2.1) and C3-like boards (some wrong letters already in slots, TC2.2+).
-
-The PYTHONPATH is set by the launch file to point at the `rl_task_optimiser` directory — no files are copied or installed from that repo.
 
 ---
 
@@ -327,7 +364,7 @@ The PYTHONPATH is set by the launch file to point at the `rl_task_optimiser` dir
 
 | Concern | How to wire it |
 |---|---|
-| Real perception | Replace `test_env_publisher` with a perception node that publishes `GameboardState` to `/perception/gameboard_state` |
-| Wordle solver | Publish the next guess to `/hl_control/word_request`; subscribe to `/wordle_bot/mission_complete` to know when to send the next word |
-| TC2.2 (letters in Wordle slots) | Same YAML format — add entries with XY coordinates in the Wordle zone. `rl_task_optimiser` uses stage=3 which handles clearing and re-placing |
-| Phase 2 model (loose masking) | Change `model_path` launch argument to point at `wordle_ppo_loose_latest` |
+| Real perception | Replace `test_sim.py` with a perception node publishing `GameboardState` to `/perception/gameboard_state` |
+| Wordle solver | Publish guesses to `/hl_control/word_request`; subscribe to `/wordle_bot/mission_complete` to trigger the next guess |
+| TC2.2 (wrong letters in Wordle slots) | Same YAML format — add entries with XY in the Wordle zone. `RLTaskOptimiser` always uses stage=3 which handles clear-and-replace automatically |
+| Different model checkpoint | Set `model_path` in the launch argument or pass `None` to use `models/wordle_ppo_latest.zip` |

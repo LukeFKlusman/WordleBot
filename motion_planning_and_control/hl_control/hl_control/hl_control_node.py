@@ -1,32 +1,36 @@
-#!/usr/bin/env python3 
+#!/usr/bin/env python3
 """
 HLControlNode — high-level Wordle-bot decision maker.
 
+Inherits RLTaskOptimiser and acts as a passive background node: it does
+nothing until both required inputs arrive, then plans and publishes the
+full task sequence. Execution is triggered externally via start_mission.
+
 Subscribes to:
-  /hl_control/word_request      (std_msgs/String)       — target word from solver/test
-  /perception/gameboard_state   (hl_control/GameboardState) — perceived letter poses
+  /hl_control/word_request      (std_msgs/String)              — target word
+  /perception/gameboard_state   (hl_control/GameboardState)    — letter poses
 
 Publishes to:
-  /perception/letter_objects    (wordlebot_control/PickPlaceTask) — one msg per task
-  /wordle_bot/add_collision_object (moveit_msgs/CollisionObject) — letters into MoveIt scene
-  /wordle_bot/start_mission     (std_msgs/Bool)          — arm execution after queuing
+  /perception/letter_objects       (wordlebot_control/PickPlaceTask)  — one per task
+  /wordle_bot/add_collision_object (moveit_msgs/CollisionObject)      — MoveIt scene objects
 
-Waits until both word and board state have arrived before solving.
-Re-solves on each new word request (board state is latched from last received).
+Once the task sequence is published, the node logs a ready message and
+waits for the operator (or another package) to send start_mission:
+  ros2 topic pub /wordle_bot/start_mission std_msgs/msg/Bool "data: true" --once
 """
 
 import sys
 import os
 
-# Allow sibling scripts (rl_task_optimiser.py) to be imported whether this node
-# is run installed (lib/hl_control/) or from source.
+# Allow the sibling rl_task_optimiser.py to be found whether this node
+# is run installed (lib/hl_control/) or from source (hl_control/).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 
-from std_msgs.msg import String, Bool
+from std_msgs.msg import String
 from geometry_msgs.msg import Pose
 from moveit_msgs.msg import CollisionObject
 from shape_msgs.msg import SolidPrimitive
@@ -36,23 +40,29 @@ from wordlebot_control.msg import PickPlaceTask
 
 from rl_task_optimiser import RLTaskOptimiser
 
-LETTER_CUBE_SIZE = 0.05     # 50 mm cube for collision objects
+LETTER_CUBE_SIZE = 0.05     # 50 mm collision cube for MoveIt scene
 SOLVE_STAGE = 3             # C3 masking handles both C2-like and C3-like boards
 
 
-class HLControlNode(Node):
+class HLControlNode(Node, RLTaskOptimiser):
+    """
+    High-level control node for the Wordle-bot.
+
+    Inherits RLTaskOptimiser so the RL solver is part of this node rather
+    than a separate object. On receiving both a word request and a board
+    state, it solves the task sequence and publishes each step.
+    """
+
     def __init__(self):
-        super().__init__('hl_control_node')
+        Node.__init__(self, 'hl_control_node')
 
         self.declare_parameter('model_path', '')
-
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
-        self._optimiser = RLTaskOptimiser(model_path or None)
+        RLTaskOptimiser.__init__(self, model_path or None)
 
         self._pending_word: str | None = None
         self._board_letters: list[dict] | None = None
 
-        # Latched QoS for board state so test publisher can publish once
         latched_qos = QoSProfile(depth=1,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -72,7 +82,6 @@ class HLControlNode(Node):
         self._task_pub = self.create_publisher(PickPlaceTask, '/perception/letter_objects', 10)
         self._collision_pub = self.create_publisher(
             CollisionObject, '/wordle_bot/add_collision_object', 10)
-        self._start_pub = self.create_publisher(Bool, '/wordle_bot/start_mission', 10)
 
         self.get_logger().info('HLControlNode ready — waiting for word request and board state.')
 
@@ -116,7 +125,7 @@ class HLControlNode(Node):
             return
         word = self._pending_word
         letters = self._board_letters
-        self._pending_word = None  # consume — next word request triggers a fresh solve
+        self._pending_word = None
 
         self.get_logger().info(
             f'Solving: word="{word}" with {len(letters)} letter(s) on board.')
@@ -124,7 +133,7 @@ class HLControlNode(Node):
         self._add_letters_to_scene(letters)
 
         try:
-            sequence = self._optimiser.solve(word, letters)
+            sequence = self.solve(word, letters)
         except Exception as e:
             self.get_logger().error(f'RL solver failed: {e}')
             return
@@ -144,10 +153,10 @@ class HLControlNode(Node):
 
         self._publish_tasks(sequence)
 
-        start_msg = Bool()
-        start_msg.data = True
-        self._start_pub.publish(start_msg)
-        self.get_logger().info('All tasks queued — start_mission published.')
+        self.get_logger().info(
+            'All tasks queued. To start execution, run:\n'
+            '  ros2 topic pub /wordle_bot/start_mission std_msgs/msg/Bool "data: true" --once'
+        )
 
     def _add_letters_to_scene(self, letters: list[dict]) -> None:
         for item in letters:
@@ -194,7 +203,7 @@ class HLControlNode(Node):
             msg.place_pose.position.x = task['place_x']
             msg.place_pose.position.y = task['place_y']
             msg.place_pose.position.z = task['place_z']
-            msg.place_pose.orientation.w = 1.0   # identity
+            msg.place_pose.orientation.w = 1.0
 
             msg.object_id = task['object_id']
 
