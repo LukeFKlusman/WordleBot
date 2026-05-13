@@ -9,7 +9,7 @@
 
 namespace
 {
-constexpr const char * kCameraTopic = "/camera/camera/color/image_raw_not";
+constexpr const char * kCameraTopicDefault = "/camera/camera/color/image_raw";
 }
 
 CameraView::CameraView(rclcpp::Node::SharedPtr node, QWidget * parent)
@@ -31,19 +31,20 @@ CameraView::CameraView(rclcpp::Node::SharedPtr node, QWidget * parent)
   auto * layout = new QVBoxLayout(this);
   layout->setContentsMargins(12, 12, 12, 12);
 
-  image_label_ = new QLabel("Waiting for /camera/camera/color/image_raw_not...", this);
+  image_label_ = new QLabel(QString("Waiting for %1...").arg(kCameraTopicDefault), this);
   image_label_->setAlignment(Qt::AlignCenter);
   image_label_->setMinimumSize(320, 240);
   layout->addWidget(image_label_);
 
+  current_topic_ = kCameraTopicDefault;
   image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
-    kCameraTopic,
+    current_topic_.toStdString(),
     rclcpp::SensorDataQoS(),
     [this](const sensor_msgs::msg::Image::SharedPtr msg) {
       handleImage(msg);
     });
 
-  RCLCPP_INFO(node_->get_logger(), "Camera tab subscribed to %s.", kCameraTopic);
+  RCLCPP_INFO(node_->get_logger(), "Camera tab subscribed to %s.", current_topic_.toStdString().c_str());
 }
 
 CameraView::~CameraView() = default;
@@ -70,7 +71,7 @@ void CameraView::handleImage(const sensor_msgs::msg::Image::SharedPtr msg)
       *node_->get_clock(),
       5000,
       "Failed to convert image from %s: %s",
-      kCameraTopic,
+      current_topic_.toStdString().c_str(),
       ex.what());
     return;
   }
@@ -109,4 +110,31 @@ void CameraView::showStatusMessage(const QString & message)
   current_pixmap_ = QPixmap();
   image_label_->setPixmap(QPixmap());
   image_label_->setText(message);
+}
+
+void CameraView::setTopic(const QString & topic_name)
+{
+  if (topic_name == current_topic_) {
+    return;  // Already subscribed to this topic
+  }
+
+  // Destroy old subscription
+  image_sub_.reset();
+
+  // Update label to show we're waiting for the new topic
+  showStatusMessage(QString("Switching to %1...").arg(topic_name));
+
+  // Create new subscription
+  current_topic_ = topic_name;
+  image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
+    current_topic_.toStdString(),
+    rclcpp::SensorDataQoS(),
+    [this](const sensor_msgs::msg::Image::SharedPtr msg) {
+      handleImage(msg);
+    });
+
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Camera view switched to topic: %s",
+    current_topic_.toStdString().c_str());
 }

@@ -9,12 +9,15 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
+class QAbstractAnimation;
 class QEvent;
 class QLabel;
 class QMoveEvent;
 class QPlainTextEdit;
 class QProcess;
+class QPushButton;
 class QResizeEvent;
+class QScrollArea;
 class QVBoxLayout;
 class CameraView;
 class RvizSimView;
@@ -49,6 +52,19 @@ private:
     ModeB
   };
 
+  enum class ActiveView
+  {
+    SimView,
+    MoveItView,
+    CameraView
+  };
+
+  enum class CameraMode
+  {
+    Raw,
+    ComputerVision
+  };
+
   struct MissionStepWidgets
   {
     QWidget * item{nullptr};
@@ -57,25 +73,28 @@ private:
   };
 
   bool eventFilter(QObject * watched, QEvent * event) override;
-  void setupTabs();
+  void setupDrawer();
+  void setupContentStack();
+  void setupCameraPage();
+  void setupMoveItPage();
   void setupVisualDesign();
   void setupDiagnosticsWindow();
   void setupVoiceControls();
   void setupSafetyControls();
   void setupGamificationBridge();
-  void setupMissionOverlay();
   void setupVoiceHelper();
+  void setupHelpDialog();
   void loadWordleDictionary();
   void reserveSidebarWidth();
   void appendDiagnosticsEvent(const QString & message);
-  void handleMainTabChanged(int index);
   void launchDiagnosticsWindow();
   void refreshDiagnosticsPanel();
-  void toggleMissionOverlay();
   void renderMissionProgress(const QString & payload);
-  void updateDiagnosticsTabAppearance();
-  void syncMissionOverlayGeometry();
-  void updateMissionTabAppearance();
+  void toggleDrawer();
+  void switchToView(ActiveView view);
+  void switchCameraMode(CameraMode mode);
+  void updateDrawerActiveState();
+  void updateDrawerLabelsVisibility();
   void handleVoiceHelperStdout();
   void handleVoiceHelperStderr();
   void handleVoiceHelperMessage(const QString & payload);
@@ -106,6 +125,24 @@ private:
   RvizSimView * rviz_view_{nullptr};
   WordleView * wordle_view_{nullptr};
   QWidget * diagnostics_window_{nullptr};
+
+  // Drawer navigation
+  QWidget * drawer_panel_{nullptr};
+  bool drawer_expanded_{true};
+  QPushButton * nav_sim_btn_{nullptr};
+  QPushButton * nav_moveit_btn_{nullptr};
+  QPushButton * nav_camera_btn_{nullptr};
+  QPushButton * help_btn_{nullptr};
+  QPushButton * diag_btn_{nullptr};
+  QList<QLabel*> drawer_section_labels_;
+
+  // Camera mode toggle
+  QPushButton * cam_raw_btn_{nullptr};
+  QPushButton * cam_cv_btn_{nullptr};
+  ActiveView active_view_{ActiveView::SimView};
+  CameraMode camera_mode_{CameraMode::Raw};
+
+  // Diagnostics window (includes mission visualization now)
   QLabel * diagnostics_mission_value_label_{nullptr};
   QLabel * diagnostics_safety_value_label_{nullptr};
   QLabel * diagnostics_perception_value_label_{nullptr};
@@ -113,17 +150,15 @@ private:
   QPlainTextEdit * diagnostics_event_log_{nullptr};
   QPlainTextEdit * diagnostics_mission_json_view_{nullptr};
   QPlainTextEdit * diagnostics_game_json_view_{nullptr};
-  QWidget * mission_overlay_{nullptr};
-  QLabel * mission_title_label_{nullptr};
-  QLabel * mission_summary_label_{nullptr};
-  QWidget * mission_steps_content_{nullptr};
-  QVBoxLayout * mission_steps_layout_{nullptr};
+
+  // Mission visualization (now integrated into diagnostics)
+  QScrollArea * diag_mission_scroll_{nullptr};
+  QLabel * diag_mission_title_{nullptr};
+  QLabel * diag_mission_summary_{nullptr};
+  QWidget * diag_mission_steps_content_{nullptr};
+  QVBoxLayout * diag_mission_steps_layout_{nullptr};
   QList<MissionStepWidgets> mission_step_widgets_;
   QString last_mission_progress_payload_;
-  QWidget * mission_tab_page_{nullptr};
-  int diagnostics_tab_index_{-1};
-  int mission_tab_index_{-1};
-  int last_content_tab_index_{0};
   SafetyControlMode safety_mode_{SafetyControlMode::Idle};
   QStringList wordle_dictionary_;
   QString coordinator_mission_state_{QStringLiteral("IDLE")};

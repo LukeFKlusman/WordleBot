@@ -18,6 +18,8 @@ public:
   explicit CameraView(rclcpp::Node::SharedPtr node, QWidget * parent = nullptr);
   ~CameraView() override;
 
+  void setTopic(const QString & topic_name);
+
 protected:
   void resizeEvent(QResizeEvent * event) override;
 
@@ -30,4 +32,5 @@ private:
   QLabel * image_label_{nullptr};
   QPixmap current_pixmap_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  QString current_topic_;
 };

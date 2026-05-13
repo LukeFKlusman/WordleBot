@@ -6,14 +6,18 @@
 #include "ui_rs2_concept.h"
 
 #include <algorithm>
+#include <QAbstractAnimation>
 #include <QFile>
 #include <QFileInfo>
 #include <QCloseEvent>
+#include <QEasingCurve>
+#include <QPropertyAnimation>
 #include <QDateTime>
 #include <QEvent>
 #include <QFrame>
 #include <QFontDatabase>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -139,14 +143,14 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
   ui_->setupUi(this);
   setupVisualDesign();
   loadWordleDictionary();
-  setupTabs();
+  setupDrawer();
+  setupContentStack();
+  setupDiagnosticsWindow();
   setupGamificationBridge();
   setupVoiceControls();
   setupVoiceHelper();
   setupSafetyControls();
   reserveSidebarWidth();
-  setupDiagnosticsWindow();
-  setupMissionOverlay();
 }
 
 MainWindow::~MainWindow()
@@ -214,130 +218,394 @@ void MainWindow::loadWordleDictionary()
 
 bool MainWindow::eventFilter(QObject * watched, QEvent * event)
 {
-  auto * tab_bar = ui_ != nullptr && ui_->mainTab != nullptr ? ui_->mainTab->tabBar() : nullptr;
-  if (watched == tab_bar && tab_bar != nullptr) {
-    if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
-      auto * mouse_event = static_cast<QMouseEvent *>(event);
-      const int clicked_tab = tab_bar->tabAt(mouse_event->pos());
-      if (clicked_tab == mission_tab_index_) {
-        if (event->type() == QEvent::MouseButtonRelease &&
-          mouse_event->button() == Qt::LeftButton)
-        {
-          toggleMissionOverlay();
-        }
-        return true;
-      }
-      if (clicked_tab == diagnostics_tab_index_) {
-        if (event->type() == QEvent::MouseButtonRelease &&
-          mouse_event->button() == Qt::LeftButton)
-        {
-          launchDiagnosticsWindow();
-        }
-        return true;
-      }
-    }
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Close) {
-    auto * close_event = static_cast<QCloseEvent *>(event);
-    close_event->ignore();
-    diagnostics_window_->hide();
-    updateDiagnosticsTabAppearance();
-    return true;
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::WindowActivate) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Hide) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Show) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::FocusIn) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::FocusOut) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::WindowDeactivate) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Move) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Resize) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::ZOrderChange) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::ActivationChange) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::WinIdChange) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::ParentChange) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::PlatformSurface) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Expose) {
-    updateDiagnosticsTabAppearance();
-  }
-
-  if (watched == diagnostics_window_ && event->type() == QEvent::Paint) {
-    if (diagnostics_window_->isVisible()) {
-      updateDiagnosticsTabAppearance();
-    }
-  }
-
+  (void)watched;
+  (void)event;
   return QMainWindow::eventFilter(watched, event);
 }
 
-void MainWindow::setupTabs()
+void MainWindow::setupDrawer()
 {
-  auto * sim_layout = new QVBoxLayout(ui_->tab);
+  // Style drawer wrapper
+  ui_->drawerWrapper->setStyleSheet(
+    "QWidget#drawerWrapper {"
+    "  background-color: #111820;"
+    "  border-right: 1px solid rgba(139, 148, 158, 0.18);"
+    "}");
+
+  // Style hamburger button with better polish
+  ui_->hamburgerButton->setStyleSheet(
+    "QPushButton#hamburgerButton {"
+    "  background-color: transparent;"
+    "  color: #79c0ff;"
+    "  border: 1px solid rgba(139, 148, 158, 0.3);"
+    "  border-radius: 6px;"
+    "  font-size: 14pt;"
+    "  font-weight: bold;"
+    "}"
+    "QPushButton#hamburgerButton:hover {"
+    "  background-color: rgba(121, 192, 255, 0.1);"
+    "  color: #a5d6ff;"
+    "}");
+
+  connect(ui_->hamburgerButton, &QPushButton::clicked, this, &MainWindow::toggleDrawer);
+
+  // Populate drawer panel with better structure
+  auto * drawer_layout = new QVBoxLayout(ui_->drawerPanel);
+  drawer_layout->setContentsMargins(12, 16, 12, 16);
+  drawer_layout->setSpacing(20);
+
+  // ===== VIEW SELECTOR SECTION =====
+  auto * view_section_label = new QLabel(tr("VIEW SELECTOR"));
+  view_section_label->setStyleSheet(
+    "QLabel {"
+    "  color: #79c0ff;"
+    "  font-size: 8pt;"
+    "  font-weight: 800;"
+    "  letter-spacing: 2px;"
+    "  margin-bottom: 4px;"
+    "}");
+  drawer_section_labels_.append(view_section_label);
+  drawer_layout->addWidget(view_section_label);
+
+  // Shared style function for drawer items
+  auto setup_nav_button = [this, drawer_layout](
+    QPushButton *& btn, const QString & text, const QString & emoji) {
+    btn = new QPushButton(emoji + " " + text);
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setStyleSheet(
+      "QPushButton {"
+      "  background-color: transparent;"
+      "  color: #8b949e;"
+      "  border: none;"
+      "  border-left: 3px solid transparent;"
+      "  padding: 10px 12px;"
+      "  text-align: left;"
+      "  font-size: 11pt;"
+      "  font-weight: 500;"
+      "}"
+      "QPushButton:hover {"
+      "  background-color: rgba(121, 192, 255, 0.1);"
+      "  color: #79c0ff;"
+      "}"
+      "QPushButton:pressed {"
+      "  background-color: rgba(31, 111, 235, 0.2);"
+      "}");
+    drawer_layout->addWidget(btn);
+  };
+
+  setup_nav_button(nav_sim_btn_, tr("Sim View"), "📺");
+  setup_nav_button(nav_moveit_btn_, tr("MoveIt View"), "🤖");
+  setup_nav_button(nav_camera_btn_, tr("Camera View"), "🎥");
+
+  connect(nav_sim_btn_, &QPushButton::clicked, this, [this]() {
+    switchToView(ActiveView::SimView);
+  });
+  connect(nav_moveit_btn_, &QPushButton::clicked, this, [this]() {
+    switchToView(ActiveView::MoveItView);
+  });
+  connect(nav_camera_btn_, &QPushButton::clicked, this, [this]() {
+    switchToView(ActiveView::CameraView);
+  });
+
+  // ===== HELP & INFO SECTION =====
+  // Spacer
+  drawer_layout->addStretch();
+
+  // Divider
+  auto * divider = new QFrame(ui_->drawerPanel);
+  divider->setFrameShape(QFrame::HLine);
+  divider->setStyleSheet(
+    "QFrame {"
+    "  background-color: rgba(139, 148, 158, 0.18);"
+    "  border: none;"
+    "  max-height: 1px;"
+    "}");
+  drawer_layout->addWidget(divider);
+
+  auto * info_section_label = new QLabel(tr("HELP & INFO"));
+  info_section_label->setStyleSheet(
+    "QLabel {"
+    "  color: #79c0ff;"
+    "  font-size: 8pt;"
+    "  font-weight: 800;"
+    "  letter-spacing: 2px;"
+    "  margin-top: 4px;"
+    "  margin-bottom: 4px;"
+    "}");
+  drawer_section_labels_.append(info_section_label);
+  drawer_layout->addWidget(info_section_label);
+
+  // Help button
+  help_btn_ = new QPushButton(tr("? View Help"));
+  help_btn_->setCursor(Qt::PointingHandCursor);
+  help_btn_->setStyleSheet(
+    "QPushButton {"
+    "  background-color: transparent;"
+    "  color: #8b949e;"
+    "  border: none;"
+    "  border-left: 3px solid transparent;"
+    "  padding: 10px 12px;"
+    "  text-align: left;"
+    "  font-size: 11pt;"
+    "  font-weight: 500;"
+    "}"
+    "QPushButton:hover {"
+    "  background-color: rgba(121, 192, 255, 0.1);"
+    "  color: #79c0ff;"
+    "}");
+  drawer_layout->addWidget(help_btn_);
+  connect(help_btn_, &QPushButton::clicked, this, &MainWindow::setupHelpDialog);
+
+  // Diagnostics button
+  diag_btn_ = new QPushButton(tr("📊 Diagnostics"));
+  diag_btn_->setCursor(Qt::PointingHandCursor);
+  diag_btn_->setStyleSheet(help_btn_->styleSheet());
+  drawer_layout->addWidget(diag_btn_);
+  connect(diag_btn_, &QPushButton::clicked, this, &MainWindow::launchDiagnosticsWindow);
+
+  updateDrawerActiveState();
+}
+
+void MainWindow::setupContentStack()
+{
+  // Sim View page
+  auto * sim_layout = new QVBoxLayout(ui_->pageSimView);
   sim_layout->setContentsMargins(0, 0, 0, 0);
-  rviz_view_ = new RvizSimView(node_, ui_->tab);
+  rviz_view_ = new RvizSimView(node_, ui_->pageSimView);
   sim_layout->addWidget(rviz_view_);
 
-  auto * camera_layout = new QVBoxLayout(ui_->tab_2);
-  camera_layout->setContentsMargins(0, 0, 0, 0);
-  camera_view_ = new CameraView(node_, ui_->tab_2);
-  camera_layout->addWidget(camera_view_);
+  // MoveIt View page (placeholder)
+  auto * moveit_layout = new QVBoxLayout(ui_->pageMoveItView);
+  auto * moveit_label = new QLabel(tr("MoveIt View — connect MoveIt2 to enable"));
+  moveit_label->setAlignment(Qt::AlignCenter);
+  moveit_label->setStyleSheet(
+    "QLabel {"
+    "  color: #6e7681;"
+    "  font-size: 12pt;"
+    "  background-color: #0f151c;"
+    "}");
+  moveit_layout->addWidget(moveit_label);
 
+  // Camera View page
+  setupCameraPage();
+
+  // Diagnostics page
+  setupDiagnosticsWindow();
+
+  // Wordle sidebar
   auto * wordle_layout = new QVBoxLayout(ui_->wordle);
   wordle_layout->setContentsMargins(0, 0, 0, 0);
   wordle_view_ = new WordleView(ui_->wordle);
   wordle_layout->addWidget(wordle_view_);
 
-  diagnostics_tab_index_ = ui_->mainTab->indexOf(ui_->tab_3);
-  ui_->mainTab->setTabIcon(diagnostics_tab_index_, makeLaunchIcon());
-  ui_->mainTab->setIconSize(QSize(14, 14));
+  ui_->contentStack->setCurrentIndex(0);
+}
 
-  mission_tab_page_ = new QWidget();
-  mission_tab_index_ = ui_->mainTab->addTab(mission_tab_page_, tr("Mission"));
-  last_content_tab_index_ = ui_->mainTab->currentIndex();
+void MainWindow::setupCameraPage()
+{
+  auto * layout = new QVBoxLayout(ui_->pageCameraView);
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->setSpacing(0);
 
-  ui_->mainTab->tabBar()->installEventFilter(this);
-  connect(ui_->mainTab, &QTabWidget::currentChanged, this, &MainWindow::handleMainTabChanged);
+  // Camera mode toggle bar
+  auto * toggle_bar = new QWidget();
+  toggle_bar->setFixedHeight(32);
+  toggle_bar->setStyleSheet(
+    "QWidget {"
+    "  background-color: #0f151c;"
+    "  border-bottom: 1px solid rgba(139, 148, 158, 0.18);"
+    "}");
+  auto * toggle_layout = new QHBoxLayout(toggle_bar);
+  toggle_layout->setContentsMargins(12, 4, 12, 4);
+  toggle_layout->setSpacing(6);
+
+  auto * mode_label = new QLabel(tr("Camera:"));
+  mode_label->setStyleSheet("QLabel { font-size: 9pt; color: #8b949e; }");
+  toggle_layout->addWidget(mode_label);
+
+  cam_raw_btn_ = new QPushButton(tr("Raw"));
+  cam_cv_btn_ = new QPushButton(tr("CV"));
+
+  auto style_camera_btn = [](QPushButton * btn, bool active) {
+    if (active) {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: rgba(31, 111, 235, 0.3);"
+        "  color: #79c0ff;"
+        "  border: 1px solid rgba(121, 192, 255, 0.3);"
+        "  padding: 4px 8px;"
+        "  border-radius: 4px;"
+        "  font-weight: 600;"
+        "  font-size: 9pt;"
+        "}");
+    } else {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #161f29;"
+        "  color: #8b949e;"
+        "  border: 1px solid rgba(139, 148, 158, 0.2);"
+        "  padding: 4px 8px;"
+        "  border-radius: 4px;"
+        "  font-size: 9pt;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: #1f2937;"
+        "}");
+    }
+  };
+
+  style_camera_btn(cam_raw_btn_, true);  // Raw is default
+  style_camera_btn(cam_cv_btn_, false);
+
+  toggle_layout->addWidget(cam_raw_btn_);
+  toggle_layout->addWidget(cam_cv_btn_);
+  toggle_layout->addStretch();
+
+  layout->addWidget(toggle_bar);
+
+  // Camera view
+  camera_view_ = new CameraView(node_, ui_->pageCameraView);
+  layout->addWidget(camera_view_);
+
+  connect(cam_raw_btn_, &QPushButton::clicked, this, [this]() {
+    switchCameraMode(CameraMode::Raw);
+  });
+  connect(cam_cv_btn_, &QPushButton::clicked, this, [this]() {
+    switchCameraMode(CameraMode::ComputerVision);
+  });
+}
+
+void MainWindow::setupMoveItPage()
+{
+  // Placeholder - can be expanded later
+}
+
+void MainWindow::switchToView(ActiveView view)
+{
+  active_view_ = view;
+  switch (view) {
+    case ActiveView::SimView:
+      ui_->contentStack->setCurrentIndex(0);
+      break;
+    case ActiveView::MoveItView:
+      ui_->contentStack->setCurrentIndex(1);
+      break;
+    case ActiveView::CameraView:
+      ui_->contentStack->setCurrentIndex(2);
+      break;
+  }
+  updateDrawerActiveState();
+}
+
+void MainWindow::switchCameraMode(CameraMode mode)
+{
+  camera_mode_ = mode;
+  const QString topic = (mode == CameraMode::Raw)
+    ? "/camera/camera/color/image_raw"
+    : "/perception/image_annotated";
+
+  camera_view_->setTopic(topic);
+
+  // Update button styling
+  auto style_camera_btn = [](QPushButton * btn, bool active) {
+    if (active) {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: rgba(31, 111, 235, 0.3);"
+        "  color: #79c0ff;"
+        "  border: 1px solid rgba(121, 192, 255, 0.3);"
+        "  padding: 6px 12px;"
+        "  border-radius: 4px;"
+        "  font-weight: 600;"
+        "}");
+    } else {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: #161f29;"
+        "  color: #8b949e;"
+        "  border: 1px solid rgba(139, 148, 158, 0.2);"
+        "  padding: 6px 12px;"
+        "  border-radius: 4px;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: #1f2937;"
+        "}");
+    }
+  };
+
+  style_camera_btn(cam_raw_btn_, mode == CameraMode::Raw);
+  style_camera_btn(cam_cv_btn_, mode == CameraMode::ComputerVision);
+}
+
+void MainWindow::toggleDrawer()
+{
+  drawer_expanded_ = !drawer_expanded_;
+  const int target_width = drawer_expanded_ ? 220 : 44;
+
+  auto * anim = new QPropertyAnimation(ui_->drawerWrapper, "maximumWidth", this);
+  anim->setDuration(200);
+  anim->setEasingCurve(QEasingCurve::InOutQuad);
+  anim->setStartValue(ui_->drawerWrapper->maximumWidth());
+  anim->setEndValue(target_width);
+  anim->start(QAbstractAnimation::DeleteWhenStopped);
+
+  updateDrawerLabelsVisibility();
+}
+
+void MainWindow::updateDrawerActiveState()
+{
+  auto set_button_active = [](QPushButton * btn, bool active) {
+    if (active) {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: rgba(31, 111, 235, 0.25);"
+        "  color: #79c0ff;"
+        "  border: none;"
+        "  border-left: 3px solid #1f6feb;"
+        "  padding: 10px 9px;"
+        "  text-align: left;"
+        "  font-size: 11pt;"
+        "  font-weight: 500;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: rgba(31, 111, 235, 0.3);"
+        "}");
+    } else {
+      btn->setStyleSheet(
+        "QPushButton {"
+        "  background-color: transparent;"
+        "  color: #8b949e;"
+        "  border: none;"
+        "  border-left: 3px solid transparent;"
+        "  padding: 10px 12px;"
+        "  text-align: left;"
+        "  font-size: 11pt;"
+        "  font-weight: 500;"
+        "}"
+        "QPushButton:hover {"
+        "  background-color: rgba(121, 192, 255, 0.1);"
+        "  color: #79c0ff;"
+        "}");
+    }
+  };
+
+  set_button_active(nav_sim_btn_, active_view_ == ActiveView::SimView);
+  set_button_active(nav_moveit_btn_, active_view_ == ActiveView::MoveItView);
+  set_button_active(nav_camera_btn_, active_view_ == ActiveView::CameraView);
+}
+
+void MainWindow::updateDrawerLabelsVisibility()
+{
+  // Hide all drawer content when collapsed except hamburger button
+  for (auto * label : drawer_section_labels_) {
+    label->setVisible(drawer_expanded_);
+  }
+
+  if (nav_sim_btn_) nav_sim_btn_->setVisible(drawer_expanded_);
+  if (nav_moveit_btn_) nav_moveit_btn_->setVisible(drawer_expanded_);
+  if (nav_camera_btn_) nav_camera_btn_->setVisible(drawer_expanded_);
+  if (help_btn_) help_btn_->setVisible(drawer_expanded_);
+  if (diag_btn_) diag_btn_->setVisible(drawer_expanded_);
 }
 
 void MainWindow::setupVisualDesign()
@@ -353,46 +621,15 @@ void MainWindow::setupVisualDesign()
     "  background-color: #0b0f14;"
     "}");
 
-  ui_->mainTab->setStyleSheet(
-    "QTabWidget {"
+  ui_->drawerWrapper->setStyleSheet(
+    "QWidget#drawerWrapper {"
     "  background-color: #111820;"
-    "}"
-    "QTabWidget::pane {"
+    "  border-right: 1px solid rgba(139, 148, 158, 0.18);"
+    "}");
+
+  ui_->contentStack->setStyleSheet(
+    "QWidget {"
     "  background-color: #0f151c;"
-    "  border: none;"
-    "  border-top: 1px solid rgba(139, 148, 158, 0.18);"
-    "  margin: 0px;"
-    "  padding: 0px;"
-    "}"
-    "QWidget#tab,"
-    "QWidget#tab_2,"
-    "QWidget#tab_3 {"
-    "  background-color: #0f151c;"
-    "}"
-    "QTabWidget::tab-bar {"
-    "  alignment: left;"
-    "}"
-    "QTabBar {"
-    "  background-color: #111820;"
-    "}"
-    "QTabBar::tab {"
-    "  background-color: transparent;"
-    "  color: #8b949e;"
-    "  padding: 11px 22px;"
-    "  font-size: 9pt;"
-    "  font-weight: 700;"
-    "  border: none;"
-    "  border-bottom: 3px solid transparent;"
-    "  min-width: 92px;"
-    "}"
-    "QTabBar::tab:selected {"
-    "  color: #f0f6fc;"
-    "  border-bottom-color: #f2cc60;"
-    "  background-color: #161f29;"
-    "}"
-    "QTabBar::tab:hover:!selected {"
-    "  color: #c9d1d9;"
-    "  background-color: rgba(240, 246, 252, 0.05);"
     "}");
 
   ui_->wordle->setStyleSheet(
@@ -529,11 +766,8 @@ void MainWindow::setupVisualDesign()
 
 void MainWindow::setupDiagnosticsWindow()
 {
-  diagnostics_window_ = new QWidget(nullptr, Qt::Window);
-  diagnostics_window_->setAttribute(Qt::WA_DeleteOnClose, false);
-  diagnostics_window_->setWindowTitle(tr("Diagnostics"));
-  diagnostics_window_->installEventFilter(this);
-  diagnostics_window_->setStyleSheet(
+  // Use pageDiagnostics instead of creating a separate window
+  ui_->pageDiagnostics->setStyleSheet(
     "QWidget {"
     "  background-color: #0b0f14;"
     "  color: #e6edf3;"
@@ -569,11 +803,65 @@ void MainWindow::setupDiagnosticsWindow()
     "  padding: 8px;"
     "}");
 
-  auto * root_layout = new QVBoxLayout(diagnostics_window_);
+  auto * root_layout = new QVBoxLayout(ui_->pageDiagnostics);
   root_layout->setContentsMargins(18, 18, 18, 18);
   root_layout->setSpacing(14);
 
-  auto * summary_label = new QLabel(tr("SYSTEM SUMMARY"), diagnostics_window_);
+  // ── MISSION SECTION ──────────────────────
+  auto * mission_header = new QLabel(tr("CURRENT MISSION"));
+  mission_header->setObjectName("diagnosticsSectionLabel");
+  root_layout->addWidget(mission_header);
+
+  diag_mission_title_ = new QLabel(tr("Wordle Game Pick and Place"));
+  diag_mission_title_->setStyleSheet(
+    "QLabel {"
+    "  color: #f0f6fc;"
+    "  font-size: 13pt;"
+    "  font-weight: 800;"
+    "}");
+  diag_mission_title_->setWordWrap(true);
+  root_layout->addWidget(diag_mission_title_);
+
+  diag_mission_summary_ = new QLabel(tr("Awaiting mission progress from coordinator."));
+  diag_mission_summary_->setStyleSheet(
+    "QLabel {"
+    "  color: #c9d1d9;"
+    "  font-size: 9pt;"
+    "}");
+  diag_mission_summary_->setWordWrap(true);
+  root_layout->addWidget(diag_mission_summary_);
+
+  diag_mission_scroll_ = new QScrollArea();
+  diag_mission_scroll_->setWidgetResizable(true);
+  diag_mission_scroll_->setFrameShape(QFrame::NoFrame);
+  diag_mission_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  diag_mission_scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  diag_mission_scroll_->setStyleSheet(
+    "QScrollArea { background: transparent; }"
+    "QScrollArea > QWidget > QWidget { background: transparent; }"
+    "QScrollBar:vertical { background: transparent; width: 8px; }"
+    "QScrollBar::handle:vertical { background: rgba(139, 148, 158, 0.40); border-radius: 4px; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }");
+
+  diag_mission_steps_content_ = new QWidget(diag_mission_scroll_);
+  diag_mission_steps_layout_ = new QVBoxLayout(diag_mission_steps_content_);
+  diag_mission_steps_layout_->setContentsMargins(0, 0, 0, 0);
+  diag_mission_steps_layout_->setSpacing(10);
+  diag_mission_steps_layout_->addStretch();
+  diag_mission_scroll_->setWidget(diag_mission_steps_content_);
+  diag_mission_scroll_->setMinimumHeight(100);
+  diag_mission_scroll_->setMaximumHeight(150);
+  root_layout->addWidget(diag_mission_scroll_);
+
+  // Divider
+  auto * divider = new QFrame();
+  divider->setFrameShape(QFrame::HLine);
+  divider->setStyleSheet("QFrame { background-color: rgba(139, 148, 158, 0.18); border: none; }");
+  root_layout->addWidget(divider);
+
+  // ──────────────────────────────────────────
+
+  auto * summary_label = new QLabel(tr("SYSTEM SUMMARY"));
   summary_label->setObjectName("diagnosticsSectionLabel");
   root_layout->addWidget(summary_label);
 
@@ -582,18 +870,18 @@ void MainWindow::setupDiagnosticsWindow()
   cards_layout->setVerticalSpacing(12);
 
   const auto create_card = [this](const QString & title, QLabel ** value_label) {
-    auto * card = new QFrame(diagnostics_window_);
+    auto * card = new QFrame();
     card->setObjectName("diagnosticsCard");
 
     auto * layout = new QVBoxLayout(card);
     layout->setContentsMargins(14, 12, 14, 12);
     layout->setSpacing(6);
 
-    auto * title_label = new QLabel(title, card);
+    auto * title_label = new QLabel(title);
     title_label->setObjectName("diagnosticsCardTitle");
     layout->addWidget(title_label);
 
-    auto * value = new QLabel(tr("Waiting for data"), card);
+    auto * value = new QLabel(tr("Waiting for data"));
     value->setObjectName("diagnosticsCardValue");
     value->setWordWrap(true);
     value->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
@@ -613,33 +901,33 @@ void MainWindow::setupDiagnosticsWindow()
   lower_layout->setHorizontalSpacing(12);
   lower_layout->setVerticalSpacing(12);
 
-  auto * events_label = new QLabel(tr("RECENT EVENTS"), diagnostics_window_);
+  auto * events_label = new QLabel(tr("RECENT EVENTS"));
   events_label->setObjectName("diagnosticsSectionLabel");
   lower_layout->addWidget(events_label, 0, 0);
 
-  diagnostics_event_log_ = new QPlainTextEdit(diagnostics_window_);
+  diagnostics_event_log_ = new QPlainTextEdit();
   diagnostics_event_log_->setObjectName("diagnosticsTextPane");
   diagnostics_event_log_->setReadOnly(true);
   diagnostics_event_log_->setMinimumHeight(180);
   diagnostics_event_log_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   lower_layout->addWidget(diagnostics_event_log_, 1, 0);
 
-  auto * mission_json_label = new QLabel(tr("MISSION PROGRESS JSON"), diagnostics_window_);
+  auto * mission_json_label = new QLabel(tr("MISSION PROGRESS JSON"));
   mission_json_label->setObjectName("diagnosticsSectionLabel");
   lower_layout->addWidget(mission_json_label, 0, 1);
 
-  diagnostics_mission_json_view_ = new QPlainTextEdit(diagnostics_window_);
+  diagnostics_mission_json_view_ = new QPlainTextEdit();
   diagnostics_mission_json_view_->setObjectName("diagnosticsTextPane");
   diagnostics_mission_json_view_->setReadOnly(true);
   diagnostics_mission_json_view_->setMinimumHeight(180);
   diagnostics_mission_json_view_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
   lower_layout->addWidget(diagnostics_mission_json_view_, 1, 1);
 
-  auto * game_json_label = new QLabel(tr("WORDLE DIAGNOSTICS JSON"), diagnostics_window_);
+  auto * game_json_label = new QLabel(tr("WORDLE DIAGNOSTICS JSON"));
   game_json_label->setObjectName("diagnosticsSectionLabel");
   lower_layout->addWidget(game_json_label, 2, 0, 1, 2);
 
-  diagnostics_game_json_view_ = new QPlainTextEdit(diagnostics_window_);
+  diagnostics_game_json_view_ = new QPlainTextEdit();
   diagnostics_game_json_view_->setObjectName("diagnosticsTextPane");
   diagnostics_game_json_view_->setReadOnly(true);
   diagnostics_game_json_view_->setMinimumHeight(180);
@@ -649,10 +937,22 @@ void MainWindow::setupDiagnosticsWindow()
   root_layout->addLayout(lower_layout);
   root_layout->addStretch();
 
+  // Mission progress subscription
+  mission_progress_sub_ = node_->create_subscription<std_msgs::msg::String>(
+    kMissionProgressTopic,
+    rclcpp::QoS(1).reliable().transient_local(),
+    [this](const std_msgs::msg::String::SharedPtr msg) {
+      if (msg == nullptr) {
+        return;
+      }
+      renderMissionProgress(QString::fromStdString(msg->data));
+    });
+
+  // Initialize mission progress
+  renderMissionProgress(QStringLiteral(
+    "{\"title\":\"Wordle Game Pick and Place\",\"summary\":\"Awaiting mission progress from coordinator.\",\"steps\":[]}"));
+
   refreshDiagnosticsPanel();
-  diagnostics_window_->resize(620, 760);
-  diagnostics_window_->hide();
-  updateDiagnosticsTabAppearance();
 }
 
 void MainWindow::setupVoiceControls()
@@ -1595,131 +1895,39 @@ void MainWindow::updateSafetyBanner(const QString & text, const QString & color_
     "}").arg(color_hex));
 }
 
-void MainWindow::setupMissionOverlay()
+void MainWindow::setupHelpDialog()
 {
-  mission_overlay_ = new QFrame(this, Qt::Tool | Qt::FramelessWindowHint | Qt::BypassWindowManagerHint);
-  mission_overlay_->setObjectName("missionOverlay");
-  mission_overlay_->setAttribute(Qt::WA_StyledBackground, true);
-  mission_overlay_->setAttribute(Qt::WA_ShowWithoutActivating, true);
-  mission_overlay_->setFocusPolicy(Qt::StrongFocus);
-  mission_overlay_->setStyleSheet(
-    "QFrame#missionOverlay {"
-    "  background-color: rgba(11, 15, 20, 242);"
-    "  border-left: 1px solid rgba(139, 148, 158, 0.24);"
-    "}"
-    "QLabel#missionHeader {"
-    "  color: #f0f6fc;"
-    "  font-size: 13pt;"
-    "  font-weight: 800;"
-    "  letter-spacing: 0px;"
-    "}"
-    "QLabel#missionSubheader {"
-    "  color: #79c0ff;"
-    "  font-size: 8pt;"
-    "  font-weight: 800;"
-    "  letter-spacing: 1.5px;"
-    "}"
-    "QLabel#missionSummary {"
-    "  color: #c9d1d9;"
-    "  font-size: 8.5pt;"
-    "  line-height: 1.35;"
-    "}"
-    "QFrame#missionItem {"
-    "  background-color: #111820;"
-    "  border: 1px solid rgba(139, 148, 158, 0.18);"
-    "  border-radius: 8px;"
-    "}"
-    "QFrame#missionItem[stepStatus=\"active\"] {"
-    "  background-color: rgba(31, 111, 235, 0.22);"
-    "  border: 1px solid rgba(121, 192, 255, 0.42);"
-    "}"
-    "QFrame#missionItem[stepStatus=\"done\"] {"
-    "  background-color: rgba(35, 134, 54, 0.22);"
-    "  border: 1px solid rgba(86, 211, 100, 0.34);"
-    "}"
-    "QFrame#missionItem[stepStatus=\"blocked\"] {"
-    "  background-color: rgba(218, 54, 51, 0.22);"
-    "  border: 1px solid rgba(248, 81, 73, 0.40);"
-    "}"
-    "QLabel#missionStep {"
-    "  color: #f0f6fc;"
-    "  font-size: 10pt;"
-    "  font-weight: 800;"
-    "}"
-    "QLabel#missionStep[stepStatus=\"done\"] {"
-    "  color: #aff5b4;"
-    "}"
-    "QLabel#missionStep[stepStatus=\"blocked\"] {"
-    "  color: #ffdcd7;"
-    "}"
-    "QLabel#missionDetail {"
-    "  color: #8b949e;"
-    "  font-size: 8.5pt;"
-    "}"
-    "QLabel#missionDetail[stepStatus=\"active\"] {"
-    "  color: #cae8ff;"
-    "}"
-    "QLabel#missionDetail[stepStatus=\"done\"] {"
-    "  color: #dcffe4;"
-    "}"
-    "QLabel#missionDetail[stepStatus=\"blocked\"] {"
-    "  color: #ffdcd7;"
-    "}");
+  QString help_text =
+    tr("WORDLEBOT USER GUIDE\n\n"
+       "VIEW NAVIGATION\n"
+       "Use the left drawer to switch between:\n"
+       "  • Sim View: 3D robot simulation (RViz)\n"
+       "  • MoveIt View: Motion planning controls\n"
+       "  • Camera View: Live camera feed\n\n"
+       "CAMERA MODE\n"
+       "When viewing the camera:\n"
+       "  • Raw Footage: Direct camera stream from RealSense\n"
+       "  • Computer Vision: Processed image with letter detection\n\n"
+       "VOICE CONTROL\n"
+       "Available in Wordle Mode B only:\n"
+       "  • Record: Start voice input for letter guesses\n"
+       "  • Confirm: Accept the recognized letter\n"
+       "  • Retry: Try voice input again\n\n"
+       "SAFETY CONTROLS\n"
+       "  • START: Begin mission (only when IDLE)\n"
+       "  • STOP: Halt all motion immediately\n"
+       "  • RESUME: Continue from pause point\n"
+       "  • HOME: Return robot to home position\n\n"
+       "DIAGNOSTICS\n"
+       "Access from the drawer to view:\n"
+       "  • Current mission progress\n"
+       "  • System status (Safety, Perception, Wordle)\n"
+       "  • Event logs and detailed JSON data\n\n"
+       "WORDLE GAME\n"
+       "  • Mode A: Robot guesses letters\n"
+       "  • Mode B: You guess via voice or typing\n");
 
-  auto * overlay_layout = new QVBoxLayout(mission_overlay_);
-  overlay_layout->setContentsMargins(18, 18, 18, 18);
-  overlay_layout->setSpacing(12);
-
-  auto * header = new QLabel(tr("CURRENT MISSION"), mission_overlay_);
-  header->setObjectName("missionSubheader");
-  overlay_layout->addWidget(header);
-
-  mission_title_label_ = new QLabel(tr("Wordle Game Pick and Place"), mission_overlay_);
-  mission_title_label_->setObjectName("missionHeader");
-  mission_title_label_->setWordWrap(true);
-  overlay_layout->addWidget(mission_title_label_);
-
-  mission_summary_label_ = new QLabel(tr("Awaiting mission progress from coordinator."), mission_overlay_);
-  mission_summary_label_->setObjectName("missionSummary");
-  mission_summary_label_->setWordWrap(true);
-  overlay_layout->addWidget(mission_summary_label_);
-
-  auto * scroll = new QScrollArea(mission_overlay_);
-  scroll->setWidgetResizable(true);
-  scroll->setFrameShape(QFrame::NoFrame);
-  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-  scroll->setStyleSheet(
-    "QScrollArea { background: transparent; }"
-    "QScrollArea > QWidget > QWidget { background: transparent; }"
-    "QScrollBar:vertical { background: transparent; width: 8px; }"
-    "QScrollBar::handle:vertical { background: rgba(139, 148, 158, 0.40); border-radius: 4px; }"
-    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }");
-
-  mission_steps_content_ = new QWidget(scroll);
-  mission_steps_layout_ = new QVBoxLayout(mission_steps_content_);
-  mission_steps_layout_->setContentsMargins(0, 0, 0, 0);
-  mission_steps_layout_->setSpacing(10);
-  mission_steps_layout_->addStretch();
-  scroll->setWidget(mission_steps_content_);
-  overlay_layout->addWidget(scroll);
-
-  mission_progress_sub_ = node_->create_subscription<std_msgs::msg::String>(
-    kMissionProgressTopic,
-    rclcpp::QoS(1).reliable().transient_local(),
-    [this](const std_msgs::msg::String::SharedPtr msg) {
-      if (msg == nullptr) {
-        return;
-      }
-
-      renderMissionProgress(QString::fromStdString(msg->data));
-    });
-
-  renderMissionProgress(QStringLiteral(
-    "{\"title\":\"Wordle Game Pick and Place\",\"summary\":\"Awaiting mission progress from coordinator.\",\"steps\":[]}"));
-
-  mission_overlay_->hide();
-  syncMissionOverlayGeometry();
-  updateMissionTabAppearance();
+  QMessageBox::information(this, tr("How to Use WordleBot"), help_text);
 }
 
 void MainWindow::renderMissionProgress(const QString & payload)
@@ -1729,23 +1937,23 @@ void MainWindow::renderMissionProgress(const QString & payload)
   }
 
   const QJsonDocument document = QJsonDocument::fromJson(payload.toUtf8());
-  if (!document.isObject() || mission_steps_layout_ == nullptr) {
+  if (!document.isObject() || diag_mission_steps_layout_ == nullptr) {
     return;
   }
 
   const QJsonObject object = document.object();
   last_mission_progress_payload_ = payload;
 
-  mission_title_label_->setText(object.value("title").toString(tr("Wordle Game Pick and Place")));
-  mission_summary_label_->setText(
+  diag_mission_title_->setText(object.value("title").toString(tr("Wordle Game Pick and Place")));
+  diag_mission_summary_->setText(
     object.value("summary").toString(tr("Awaiting mission progress from coordinator.")));
   if (diagnostics_mission_json_view_ != nullptr) {
     diagnostics_mission_json_view_->setPlainText(
       QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Indented)));
   }
 
-  while (mission_steps_layout_->count() > 0) {
-    QLayoutItem * item = mission_steps_layout_->takeAt(0);
+  while (diag_mission_steps_layout_->count() > 0) {
+    QLayoutItem * item = diag_mission_steps_layout_->takeAt(0);
     if (item == nullptr) {
       continue;
     }
@@ -1765,7 +1973,7 @@ void MainWindow::renderMissionProgress(const QString & payload)
     const QString detail = step_object.value("detail").toString();
     const QString status = step_object.value("status").toString(QStringLiteral("pending"));
 
-    auto * item = new QFrame(mission_steps_content_);
+    auto * item = new QFrame(diag_mission_steps_content_);
     item->setObjectName("missionItem");
     item->setProperty("stepStatus", status);
 
@@ -1792,11 +2000,11 @@ void MainWindow::renderMissionProgress(const QString & payload)
     detail_label->style()->unpolish(detail_label);
     detail_label->style()->polish(detail_label);
 
-    mission_steps_layout_->addWidget(item);
+    diag_mission_steps_layout_->addWidget(item);
     mission_step_widgets_.append({item, step_label, detail_label});
   }
 
-  mission_steps_layout_->addStretch();
+  diag_mission_steps_layout_->addStretch();
   refreshDiagnosticsPanel();
 }
 
@@ -1825,20 +2033,8 @@ void MainWindow::appendDiagnosticsEvent(const QString & message)
 
 void MainWindow::launchDiagnosticsWindow()
 {
-  if (diagnostics_window_ == nullptr) {
-    return;
-  }
-
-  if (!diagnostics_window_->isVisible()) {
-    diagnostics_window_->move(frameGeometry().topRight() + QPoint(16, 0));
-    diagnostics_window_->show();
-  } else if (diagnostics_window_->isMinimized()) {
-    diagnostics_window_->showNormal();
-  }
-
-  diagnostics_window_->raise();
-  diagnostics_window_->activateWindow();
-  updateDiagnosticsTabAppearance();
+  // Switch to diagnostics page (index 3)
+  ui_->contentStack->setCurrentIndex(3);
 }
 
 void MainWindow::refreshDiagnosticsPanel()
@@ -1898,115 +2094,13 @@ void MainWindow::refreshDiagnosticsPanel()
   }
 }
 
-void MainWindow::updateDiagnosticsTabAppearance()
-{
-  auto * tab_bar = ui_->mainTab->tabBar();
-  if (tab_bar == nullptr || diagnostics_tab_index_ < 0) {
-    return;
-  }
-
-  const bool window_visible = diagnostics_window_ != nullptr && diagnostics_window_->isVisible();
-  tab_bar->setTabTextColor(
-    diagnostics_tab_index_,
-    window_visible ? QColor("#67e8f9") : QColor("#64748b"));
-}
-
-void MainWindow::handleMainTabChanged(int index)
-{
-  if (index == diagnostics_tab_index_) {
-    QTimer::singleShot(0, this, [this]() {
-      if (last_content_tab_index_ >= 0) {
-        ui_->mainTab->setCurrentIndex(last_content_tab_index_);
-        launchDiagnosticsWindow();
-      }
-    });
-    return;
-  }
-
-  if (index == mission_tab_index_) {
-    QTimer::singleShot(0, this, [this]() {
-      if (last_content_tab_index_ >= 0) {
-        ui_->mainTab->setCurrentIndex(last_content_tab_index_);
-      }
-    });
-    return;
-  }
-
-  last_content_tab_index_ = index;
-  QTimer::singleShot(0, this, [this]() {
-    syncMissionOverlayGeometry();
-  });
-}
-
-void MainWindow::toggleMissionOverlay()
-{
-  if (mission_overlay_ == nullptr) {
-    return;
-  }
-
-  if (mission_overlay_->isVisible()) {
-    mission_overlay_->hide();
-  } else {
-    syncMissionOverlayGeometry();
-    mission_overlay_->show();
-    mission_overlay_->raise();
-  }
-
-  updateMissionTabAppearance();
-}
-
-void MainWindow::syncMissionOverlayGeometry()
-{
-  if (mission_overlay_ == nullptr || last_content_tab_index_ < 0) {
-    return;
-  }
-
-  QWidget * content_page = ui_->mainTab->widget(last_content_tab_index_);
-  if (content_page == nullptr) {
-    return;
-  }
-
-  const QRect content_rect = content_page->rect();
-  const int overlay_width = std::clamp(content_rect.width() / 3, 280, 360);
-  const QPoint overlay_top_left = content_page->mapToGlobal(
-    QPoint(content_rect.width() - overlay_width, 0));
-
-  mission_overlay_->setGeometry(
-    overlay_top_left.x(),
-    overlay_top_left.y(),
-    overlay_width,
-    content_rect.height());
-
-  if (mission_overlay_->isVisible()) {
-    mission_overlay_->raise();
-  }
-}
-
-void MainWindow::updateMissionTabAppearance()
-{
-  auto * tab_bar = ui_->mainTab->tabBar();
-  if (tab_bar == nullptr || mission_tab_index_ < 0) {
-    return;
-  }
-
-  tab_bar->setTabTextColor(
-    mission_tab_index_,
-    mission_overlay_ != nullptr && mission_overlay_->isVisible() ?
-      QColor("#a5b4fc") : QColor("#64748b"));
-}
 
 void MainWindow::moveEvent(QMoveEvent * event)
 {
   QMainWindow::moveEvent(event);
-  QTimer::singleShot(0, this, [this]() {
-    syncMissionOverlayGeometry();
-  });
 }
 
 void MainWindow::resizeEvent(QResizeEvent * event)
 {
   QMainWindow::resizeEvent(event);
-  QTimer::singleShot(0, this, [this]() {
-    syncMissionOverlayGeometry();
-  });
 }

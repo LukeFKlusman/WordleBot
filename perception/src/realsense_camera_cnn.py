@@ -549,6 +549,12 @@ def run_ros2():
             self.pub_detections = self.create_publisher(
                 String, '/perception/detections', 10)
 
+            # CHECK WITH LEAD BEFORE IMPLEMENTING
+            # Annotated image — Image, every frame, for Elijah's GUI camera view (CV mode)
+            # Shows pose landmarks, bounding boxes, and HUD text
+            self.pub_annotated = self.create_publisher(
+                Image, '/perception/image_annotated', 10)
+
             self.get_logger().info(
                 '\nCNN perception node ready.'
                 '\n  Subscribing: /camera/camera/color/image_raw'
@@ -557,6 +563,7 @@ def run_ros2():
                 '\n  Publishing:  /perception/human_detected  (Bool, every frame)'
                 '\n               /perception/status          (String, every frame)'
                 '\n               /perception/detections      (String JSON, when scanning)'
+                '\n               /perception/image_annotated (Image, for GUI CV mode)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
 
@@ -597,6 +604,17 @@ def run_ros2():
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
                     self.get_logger().info(f'[Detections] {det_msg.data}')
+
+                # CHECK WITH LEAD BEFORE IMPLEMENTING
+                # ── Publish annotated image (every frame) ──
+                # For Elijah's GUI camera view when in "Computer Vision" mode
+                try:
+                    ann_msg = self.bridge.cv2_to_imgmsg(display, encoding='bgr8')
+                    ann_msg.header = color_msg.header
+                    self.pub_annotated.publish(ann_msg)
+                except Exception as e:
+                    self.get_logger().warn(f'annotated publish failed: {e}',
+                                           throttle_duration_sec=5.0)
 
                 # ── Display ───────────────────────────────
                 cv2.imshow("RealSense CNN Vision", display)

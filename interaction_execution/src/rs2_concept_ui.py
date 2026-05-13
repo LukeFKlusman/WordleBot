@@ -17,14 +17,14 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QMainWindow, QPushButton, QSizePolicy,
-    QTabWidget, QVBoxLayout, QWidget)
+    QStackedWidget, QVBoxLayout, QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1126, 641)
-        MainWindow.setMinimumSize(QSize(1126, 641))
+        MainWindow.resize(1280, 720)
+        MainWindow.setMinimumSize(QSize(1280, 720))
         font = QFont()
         font.setFamilies([u"Ubuntu"])
         font.setPointSize(10)
@@ -42,63 +42,51 @@ class Ui_MainWindow(object):
         self.horizontalLayout.setSpacing(0)
         self.horizontalLayout.setObjectName(u"horizontalLayout")
         self.horizontalLayout.setContentsMargins(0, 0, 0, 0)
-        self.mainTab = QTabWidget(self.centralwidget)
-        self.mainTab.setObjectName(u"mainTab")
-        self.mainTab.setMinimumSize(QSize(680, 0))
-        self.mainTab.setStyleSheet(u"QTabWidget {\n"
-"    background-color: #1a1f2e;\n"
-"}\n"
-"QTabWidget::pane {\n"
-"    background-color: #1a1f2e;\n"
-"    border: none;\n"
-"    border-top: 8px solid #1a1f2e;\n"
-"    margin: 0px;\n"
-"    padding: 0px;\n"
-"    top: -8px;\n"
-"}\n"
-"QWidget#tab,\n"
-"QWidget#tab_2,\n"
-"QWidget#tab_3 {\n"
-"    background-color: #0d1018;\n"
-"}\n"
-"QTabWidget::tab-bar {\n"
-"    alignment: left;\n"
-"}\n"
-"QTabBar {\n"
-"    background-color: #1a1f2e;\n"
-"}\n"
-"QTabBar::tab {\n"
-"    background-color: transparent;\n"
-"    color: #64748b;\n"
-"    padding: 8px 20px;\n"
-"    font-size: 9pt;\n"
-"    font-weight: 600;\n"
-"    border-bottom: 2px solid transparent;\n"
-"    border-top: none;\n"
-"    border-left: none;\n"
-"    border-right: none;\n"
-"    min-width: 80px;\n"
-"}\n"
-"QTabBar::tab:selected {\n"
-"    color: #a5b4fc;\n"
-"    border-bottom: 2px solid #6366f1;\n"
-"    background-color: transparent;\n"
-"}\n"
-"QTabBar::tab:hover:!selected {\n"
-"    color: #94a3b8;\n"
-"    background-color: rgba(255, 255, 255, 0.04);\n"
-"}")
-        self.tab = QWidget()
-        self.tab.setObjectName(u"tab")
-        self.mainTab.addTab(self.tab, "")
-        self.tab_2 = QWidget()
-        self.tab_2.setObjectName(u"tab_2")
-        self.mainTab.addTab(self.tab_2, "")
-        self.tab_3 = QWidget()
-        self.tab_3.setObjectName(u"tab_3")
-        self.mainTab.addTab(self.tab_3, "")
+        self.drawerWrapper = QWidget(self.centralwidget)
+        self.drawerWrapper.setObjectName(u"drawerWrapper")
+        self.drawerWrapper.setMinimumSize(QSize(44, 0))
+        self.drawerWrapper.setMaximumSize(QSize(220, 16777215))
+        self.drawerLayout = QVBoxLayout(self.drawerWrapper)
+        self.drawerLayout.setSpacing(0)
+        self.drawerLayout.setObjectName(u"drawerLayout")
+        self.drawerLayout.setContentsMargins(0, 0, 0, 0)
+        self.hamburgerButton = QPushButton(self.drawerWrapper)
+        self.hamburgerButton.setObjectName(u"hamburgerButton")
+        self.hamburgerButton.setMinimumSize(QSize(44, 44))
+        self.hamburgerButton.setMaximumSize(QSize(44, 44))
 
-        self.horizontalLayout.addWidget(self.mainTab)
+        self.drawerLayout.addWidget(self.hamburgerButton)
+
+        self.drawerPanel = QWidget(self.drawerWrapper)
+        self.drawerPanel.setObjectName(u"drawerPanel")
+
+        self.drawerLayout.addWidget(self.drawerPanel)
+
+
+        self.horizontalLayout.addWidget(self.drawerWrapper)
+
+        self.contentStack = QStackedWidget(self.centralwidget)
+        self.contentStack.setObjectName(u"contentStack")
+        self.contentStack.setMinimumSize(QSize(680, 0))
+        sizePolicy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        sizePolicy.setHorizontalStretch(1)
+        sizePolicy.setVerticalStretch(0)
+        sizePolicy.setHeightForWidth(self.contentStack.sizePolicy().hasHeightForWidth())
+        self.contentStack.setSizePolicy(sizePolicy)
+        self.pageSimView = QWidget()
+        self.pageSimView.setObjectName(u"pageSimView")
+        self.contentStack.addWidget(self.pageSimView)
+        self.pageMoveItView = QWidget()
+        self.pageMoveItView.setObjectName(u"pageMoveItView")
+        self.contentStack.addWidget(self.pageMoveItView)
+        self.pageCameraView = QWidget()
+        self.pageCameraView.setObjectName(u"pageCameraView")
+        self.contentStack.addWidget(self.pageCameraView)
+        self.pageDiagnostics = QWidget()
+        self.pageDiagnostics.setObjectName(u"pageDiagnostics")
+        self.contentStack.addWidget(self.pageDiagnostics)
+
+        self.horizontalLayout.addWidget(self.contentStack)
 
         self.wordleColumnLayout = QVBoxLayout()
         self.wordleColumnLayout.setSpacing(0)
@@ -106,11 +94,11 @@ class Ui_MainWindow(object):
         self.wordleColumnLayout.setContentsMargins(0, 0, 0, 0)
         self.wordle = QWidget(self.centralwidget)
         self.wordle.setObjectName(u"wordle")
-        sizePolicy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        sizePolicy.setHorizontalStretch(0)
-        sizePolicy.setVerticalStretch(1)
-        sizePolicy.setHeightForWidth(self.wordle.sizePolicy().hasHeightForWidth())
-        self.wordle.setSizePolicy(sizePolicy)
+        sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        sizePolicy1.setHorizontalStretch(0)
+        sizePolicy1.setVerticalStretch(1)
+        sizePolicy1.setHeightForWidth(self.wordle.sizePolicy().hasHeightForWidth())
+        self.wordle.setSizePolicy(sizePolicy1)
         self.wordle.setMinimumSize(QSize(230, 0))
         self.wordle.setStyleSheet(u"QWidget#wordle {\n"
 "    background-color: #0f1117;\n"
@@ -121,11 +109,11 @@ class Ui_MainWindow(object):
 
         self.voiceControls = QWidget(self.centralwidget)
         self.voiceControls.setObjectName(u"voiceControls")
-        sizePolicy1 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        sizePolicy1.setHorizontalStretch(0)
-        sizePolicy1.setVerticalStretch(0)
-        sizePolicy1.setHeightForWidth(self.voiceControls.sizePolicy().hasHeightForWidth())
-        self.voiceControls.setSizePolicy(sizePolicy1)
+        sizePolicy2 = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        sizePolicy2.setHorizontalStretch(0)
+        sizePolicy2.setVerticalStretch(0)
+        sizePolicy2.setHeightForWidth(self.voiceControls.sizePolicy().hasHeightForWidth())
+        self.voiceControls.setSizePolicy(sizePolicy2)
         self.voiceControls.setMinimumSize(QSize(0, 176))
         self.voiceControls.setMaximumSize(QSize(16777215, 176))
         self.voiceControls.setStyleSheet(u"QWidget#voiceControls {\n"
@@ -250,8 +238,8 @@ class Ui_MainWindow(object):
 
         self.safetyControls = QWidget(self.centralwidget)
         self.safetyControls.setObjectName(u"safetyControls")
-        sizePolicy1.setHeightForWidth(self.safetyControls.sizePolicy().hasHeightForWidth())
-        self.safetyControls.setSizePolicy(sizePolicy1)
+        sizePolicy2.setHeightForWidth(self.safetyControls.sizePolicy().hasHeightForWidth())
+        self.safetyControls.setSizePolicy(sizePolicy2)
         self.safetyControls.setMinimumSize(QSize(0, 130))
         self.safetyControls.setMaximumSize(QSize(16777215, 130))
         self.safetyControls.setStyleSheet(u"QWidget#safetyControls {\n"
@@ -353,7 +341,8 @@ class Ui_MainWindow(object):
         self.horizontalLayout.addLayout(self.wordleColumnLayout)
 
         MainWindow.setCentralWidget(self.centralwidget)
-        self.mainTab.raise_()
+        self.drawerWrapper.raise_()
+        self.contentStack.raise_()
         self.wordle.raise_()
         self.pushButton.raise_()
         self.pushButton_2.raise_()
@@ -362,17 +351,12 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
 
-        self.mainTab.setCurrentIndex(0)
-
-
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
 
     def retranslateUi(self, MainWindow):
         MainWindow.setWindowTitle(QCoreApplication.translate("MainWindow", u"WordleBot", None))
-        self.mainTab.setTabText(self.mainTab.indexOf(self.tab), QCoreApplication.translate("MainWindow", u"Sim View", None))
-        self.mainTab.setTabText(self.mainTab.indexOf(self.tab_2), QCoreApplication.translate("MainWindow", u"Camera", None))
-        self.mainTab.setTabText(self.mainTab.indexOf(self.tab_3), QCoreApplication.translate("MainWindow", u"Diagnostics", None))
+        self.hamburgerButton.setText(QCoreApplication.translate("MainWindow", u"\u2261", None))
         self.voiceLabel.setText(QCoreApplication.translate("MainWindow", u"VOICE CONTROL", None))
         self.voiceTranscriptValue.setText(QCoreApplication.translate("MainWindow", u"Awaiting input...", None))
         self.voiceRecordButton.setText(QCoreApplication.translate("MainWindow", u"Record", None))
