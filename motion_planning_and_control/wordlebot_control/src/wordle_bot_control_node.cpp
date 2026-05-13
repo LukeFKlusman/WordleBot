@@ -146,25 +146,15 @@ WordleBotControlNode::~WordleBotControlNode()
 }
 
 // ---------------------------------------------------------------------------
-// Subscriber callbacks
+// Mission Control Callbacks
+// Arms, starts, stops, resumes, and aborts missions in response to ROS2
+// topic messages on the /wordle_bot/ namespace.
 // ---------------------------------------------------------------------------
-// goalCallback
-// 
-// setMissionCallback
-// 
-// startMissionCallback
-// 
-// stopMissionCallback
-// 
-// resumeMissionCallback
-// 
-// abortMissionCallback
-// 
-// collisionObjectCallback
-//
-// letterObjectCallback
-//
-// clearLetterObjectsCallback
+// setMissionCallback    — queue N goal poses; arms the mission for /start_mission
+// startMissionCallback  — plan and execute the queued mission
+// stopMissionCallback   — safely halt current motion
+// resumeMissionCallback — resume a stopped mission (not yet implemented)
+// abortMissionCallback  — abort the current mission (not yet implemented)
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
@@ -235,6 +225,19 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
   if (!msg->data) return;
   RCLCPP_WARN(LOGGER, "abortMissionCallback: abort not yet implemented.");
 }
+
+// ---------------------------------------------------------------------------
+// Object & Scene Management Callbacks
+// Manage collision objects in the MoveIt planning scene, including generic
+// environment objects and the letter objects used in the pick-and-place workflow.
+// ---------------------------------------------------------------------------
+// collisionObjectCallback    — forward an ADD / REMOVE / MOVE operation directly
+//                              to the controller's planning scene interface
+// letterObjectCallback       — receive a pick/place task, register the letter
+//                              collision object, and queue the task
+// clearLetterObjectsCallback — remove all letter collision objects from the
+//                              planning scene and reset the task queue
+// ---------------------------------------------------------------------------
 
 void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
 {
@@ -327,6 +330,16 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
     ids_to_remove.size());
 }
 
+// ---------------------------------------------------------------------------
+// Arm Utility Callbacks
+// Standalone arm motions available while no mission is running (IDLE state).
+// ---------------------------------------------------------------------------
+// returnHomeCallback   — return the arm to its SRDF "home" named state
+// openGripperCallback  — open the gripper to the SRDF "open" named state
+// closeGripperCallback — close the gripper to the SRDF "closed" named state
+// scanAndSweepCallback — execute the four-pose camera scan sweep sequence
+// ---------------------------------------------------------------------------
+
 void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if (!msg->data) return;
@@ -339,6 +352,34 @@ void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedP
   }
   RCLCPP_INFO(LOGGER, "returnHomeCallback: returning to home.");
   controller_->returnToHome();
+}
+
+void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "openGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
+  controller_->openGripper();
+}
+
+void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
+{
+  if (!msg->data) return;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER, "closeGripperCallback: mission running — ignoring.");
+      return;
+    }
+  }
+  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
+  controller_->closeGripper();
 }
 
 void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -377,39 +418,15 @@ void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::Share
   }).detach();
 }
 
-void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
-{
-  if (!msg->data) return;
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (mission_running_) {
-      RCLCPP_WARN(LOGGER, "openGripperCallback: mission running — ignoring.");
-      return;
-    }
-  }
-  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
-  controller_->openGripper();
-}
-
-void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
-{
-  if (!msg->data) return;
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (mission_running_) {
-      RCLCPP_WARN(LOGGER, "closeGripperCallback: mission running — ignoring.");
-      return;
-    }
-  }
-  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
-  controller_->closeGripper();
-}
-
 // ---------------------------------------------------------------------------
-// Mission loop
+// Mission Execution Loop
+// Background thread that wakes on mission_armed_, dispatches to either a
+// goal-pose mission or a pick-and-place batch, then publishes completion
+// signals. Uses a plan-then-execute strategy so all tasks are planned before
+// any motion begins, enabling planning scene chaining across tasks.
 // ---------------------------------------------------------------------------
-// 
-// 
+// missionLoop — blocks on condition variable; on wake dispatches to
+//               goal-pose execution or pick-and-place batch execution
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::missionLoop()
@@ -640,7 +657,14 @@ void WordleBotControlNode::missionLoop()
 }
 
 // ---------------------------------------------------------------------------
-// Public interface
+// Public Interface
+// External entry points used by the ROS2 component wrapper and the
+// executable main() to query node internals and drive the node.
+// ---------------------------------------------------------------------------
+// getNodeBaseInterface — return the underlying rclcpp::Node base interface
+//                        required by the component manager
+// setupScene           — clear and rebuild the static collision scene
+// run                  — spin the node until ROS shutdown
 // ---------------------------------------------------------------------------
 
 rclcpp::node_interfaces::NodeBaseInterface::SharedPtr

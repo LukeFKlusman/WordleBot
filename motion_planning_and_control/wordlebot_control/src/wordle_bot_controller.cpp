@@ -46,6 +46,22 @@ WordleBotController::~WordleBotController()
 {
 }
 
+// ---------------------------------------------------------------------------
+// Collision Scene Management
+// Builds and tears down the static environment (floor, sensor guard) and
+// manages dynamic collision objects added at runtime.
+// ---------------------------------------------------------------------------
+// setupCollisionScene       — add the floor plane and attach the sensor guard
+//                             cylinder to the end effector
+// clearCollisionScene       — remove all static objects and detach the sensor guard
+// addCollisionObject        — apply an ADD / REMOVE / MOVE collision object
+//                             to the live planning scene
+// clearLetterObjects        — remove a list of letter objects by ID from the scene
+// attachSensorCollisionObject — attach a protective cylinder to tool0 so the
+//                               planner treats the sensor as part of the robot
+// detachSensorCollisionObject — detach the sensor guard cylinder from tool0
+// ---------------------------------------------------------------------------
+
 void WordleBotController::setupCollisionScene()
 {
   moveit_msgs::msg::CollisionObject collision_object;
@@ -77,7 +93,7 @@ void WordleBotController::setupCollisionScene()
 
   shape_msgs::msg::SolidPrimitive floor_shape;
   floor_shape.type = shape_msgs::msg::SolidPrimitive::BOX;
-  floor_shape.dimensions = {2.0, 2.0, 0.01};  
+  floor_shape.dimensions = {2.0, 2.0, 0.01};
 
   geometry_msgs::msg::Pose floor_pose;
   floor_pose.position.x = 0.0;
@@ -177,222 +193,20 @@ void WordleBotController::detachSensorCollisionObject()
   RCLCPP_INFO(LOGGER, "Sensor guard collision cylinder detached from tool0.");
 }
 
-
-geometry_msgs::msg::Pose WordleBotController::buildPose(
-  double x, double y, double z,
-  double roll, double pitch, double yaw)
-{
-  tf2::Quaternion quat;
-  quat.setRPY(roll, pitch, yaw);
-  quat.normalize();
-
-  geometry_msgs::msg::Pose pose;
-  pose.position.x = x;
-  pose.position.y = y;
-  pose.position.z = z;
-  pose.orientation.x = quat.x();
-  pose.orientation.y = quat.y();
-  pose.orientation.z = quat.z();
-  pose.orientation.w = quat.w();
-
-  return pose;
-}
-
-
-double WordleBotController::computeTotalJointDisplacement(
-  const moveit::planning_interface::MoveGroupInterface::Plan & plan)
-{
-  const auto & points = plan.trajectory_.joint_trajectory.points;
-  double total = 0.0;
-  for (std::size_t i = 1; i < points.size(); ++i) {
-    const auto & prev = points[i - 1].positions;
-    const auto & curr = points[i].positions;
-    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
-      total += std::abs(curr[j] - prev[j]);
-    }
-  }
-  return total;
-}
-
-moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
-{
-  moveit_msgs::msg::Constraints constraints;
-  return constraints;
-}
-
 // ---------------------------------------------------------------------------
-// Stop helpers
+// Pick and Place
+// Build, plan, and execute MTC pick-and-place tasks. The primary workflow is
+// the two-phase plan-then-execute path (createTask → planPickAndPlace →
+// executePlannedTask). doPickAndPlace is a single-call convenience wrapper
+// that plans and executes in one shot.
 // ---------------------------------------------------------------------------
-
-void WordleBotController::stop()
-{
-  stop_requested_.store(true);
-  move_group_.stop();
-  RCLCPP_INFO(LOGGER, "stop(): trajectory cancelled.");
-}
-
-void WordleBotController::clearStopFlag()
-{
-  stop_requested_.store(false);
-}
-
-// ---------------------------------------------------------------------------
-// MTC move-to-goal: plan + execute (mirrors planPickAndPlace / executePlannedTask)
-// ---------------------------------------------------------------------------
-
-WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
-  const geometry_msgs::msg::Pose & goal_pose,
-  const planning_scene::PlanningScenePtr & start_scene,
-  bool include_return_home)
-{
-  PlannedMoveToGoal result;
-
-  RCLCPP_INFO(LOGGER,
-    "planMoveToGoal: building task (start=%s, return_home=%s).",
-    start_scene ? "FixedState(chained)" : "CurrentState(live)",
-    include_return_home ? "yes" : "no");
-
-  const std::string arm_group = "ur_onrobot_manipulator";
-
-  constexpr int NUM_PLANNING_ATTEMPTS = 5;
-  std::unique_ptr<mtc::Task> best_task;
-  const mtc::SolutionBase * best_solution_ptr = nullptr;
-  double best_cost = std::numeric_limits<double>::infinity();
-
-  for (int attempt = 1; attempt <= NUM_PLANNING_ATTEMPTS; ++attempt) {
-    auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
-    auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
-
-    auto task = std::make_unique<mtc::Task>();
-    task->stages()->setName("move to goal");
-    task->loadRobotModel(node_);
-    task->setProperty("group", arm_group);
-
-    if (start_scene == nullptr) {
-      task->add(std::make_unique<mtc::stages::CurrentState>("current state"));
-    } else {
-      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed state");
-      fixed->setState(start_scene);
-      task->add(std::move(fixed));
-    }
-
-    auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
-    stage->setGroup(arm_group);
-    geometry_msgs::msg::PoseStamped goal_stamped;
-    goal_stamped.header.frame_id = "world";
-    goal_stamped.pose = goal_pose;
-    stage->setGoal(goal_stamped);
-    stage->setPathConstraints(buildPathConstraints());
-    task->add(std::move(stage));
-
-    if (include_return_home) {
-      auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-      home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      home->setGoal("home");
-      task->add(std::move(home));
-    }
-
-    try {
-      task->init();
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": task init failed: " << e);
-      continue;
-    }
-
-    moveit::core::MoveItErrorCode plan_result;
-    try {
-      plan_result = task->plan(1);
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": planning threw: " << e);
-      continue;
-    }
-
-    if (!plan_result || task->solutions().empty()) {
-      RCLCPP_WARN(LOGGER, "planMoveToGoal attempt %d/%d: no solution found.",
-        attempt, NUM_PLANNING_ATTEMPTS);
-      continue;
-    }
-
-    double cost = task->solutions().front()->cost();
-    RCLCPP_INFO(LOGGER, "planMoveToGoal attempt %d/%d: solution found, cost=%.3f.",
-      attempt, NUM_PLANNING_ATTEMPTS, cost);
-
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_task = std::move(task);
-      best_solution_ptr = best_task->solutions().front().get();
-    }
-  }
-
-  if (!best_task) {
-    RCLCPP_ERROR(LOGGER, "planMoveToGoal: no solutions found across %d attempts.",
-      NUM_PLANNING_ATTEMPTS);
-    return result;
-  }
-
-  result.task = std::move(best_task);
-  result.best_solution = best_solution_ptr;
-
-  RCLCPP_INFO(LOGGER,
-    "planMoveToGoal: planning succeeded — best cost=%.3f across %d attempts.",
-    result.best_solution->cost(), NUM_PLANNING_ATTEMPTS);
-
-  if (result.best_solution->end() != nullptr) {
-    result.end_scene = planning_scene::PlanningScene::clone(
-      result.best_solution->end()->scene());
-  } else {
-    RCLCPP_WARN(LOGGER, "planMoveToGoal: solution end state is null — chaining may fail.");
-  }
-
-  return result;
-}
-
-bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
-{
-  if (!planned.task || !planned.best_solution) {
-    RCLCPP_ERROR(LOGGER, "executePlannedMoveToGoal: task or solution is null.");
-    return false;
-  }
-
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: stop requested — aborting.");
-    return false;
-  }
-
-  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: publishing solution (cost=%.3f).",
-    planned.best_solution->cost());
-  planned.task->introspection().publishSolution(*planned.best_solution);
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: executing...");
-  const auto result = planned.task->execute(*planned.best_solution);
-
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "executePlannedMoveToGoal: execution failed (error code %d).", result.val);
-    return false;
-  }
-
-  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: execution succeeded.");
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Pick-and-place: MTC task creation, planning, execution
-// ---------------------------------------------------------------------------
-// createTask() 
-//  - Inputs: pick/place poses, object ID, optional start scene for chaining
-//  - Output: MTC Task with stages for pick and place, ready for planning
-// 
-// planTask()
-//  - Input: MTC Task from createTask()
-//  - Output: MTC Solution with planned trajectories for all stages
-// 
-// executeTask()
-//  - Input: MTC Solution from planTask() 
+// createTask          — build an MTC task with all pick-and-place stages;
+//                       accepts an optional chained start scene for batching
+// planPickAndPlace    — plan one pick-and-place task without executing it;
+//                       returns a PlannedPickPlace with the terminal scene for
+//                       chaining to the next task
+// executePlannedTask  — execute a previously planned pick-and-place task
+// doPickAndPlace      — convenience wrapper: plan and execute in one call
 // ---------------------------------------------------------------------------
 
 mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
@@ -739,6 +553,143 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   return task;
 }
 
+WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
+  const PickPlaceEntry & entry,
+  const planning_scene::PlanningScenePtr & start_scene,
+  bool include_return_home)
+{
+  PlannedPickPlace result;
+  result.object_id = entry.object_id;
+
+  RCLCPP_INFO(LOGGER,
+    "planPickAndPlace [%s]: building task (start=%s, return_home=%s).",
+    entry.object_id.c_str(),
+    start_scene ? "FixedState(chained)" : "CurrentState(live)",
+    include_return_home ? "yes" : "no");
+
+  // createTask() returns by value; Task has a move constructor so this move-constructs
+  // into the heap-allocated object without any copy.
+  result.task = std::make_unique<mtc::Task>(
+    createTask(entry.pick_pose, entry.place_pose, entry.object_id,
+               start_scene, include_return_home));
+
+  try {
+    result.task->init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER,
+      "planPickAndPlace [" << entry.object_id << "]: task init failed: " << e);
+    result.task.reset();
+    return result;
+  }
+
+  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (max 5 solutions)...",
+              entry.object_id.c_str());
+  moveit::core::MoveItErrorCode plan_result;
+  try {
+    plan_result = result.task->plan(5);
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER,
+      "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
+    result.task.reset();
+    return result;
+  }
+
+  if (!plan_result || result.task->solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "planPickAndPlace [%s]: no solutions found.", entry.object_id.c_str());
+    result.task.reset();
+    return result;
+  }
+
+  // best_solution is a raw pointer into the task's internal storage.
+  // It remains valid as long as result.task is alive — both live in PlannedPickPlace.
+  result.best_solution = result.task->solutions().front().get();
+
+  RCLCPP_INFO(LOGGER,
+    "planPickAndPlace [%s]: planning succeeded — %zu solution(s), best cost=%.3f.",
+    entry.object_id.c_str(),
+    result.task->solutions().size(),
+    result.best_solution->cost());
+
+  // Extract the terminal planning scene from the solution's end InterfaceState.
+  // PlanningScene::clone() produces a fully independent non-const copy, which is
+  // safe to pass to FixedState::setState() for the next task. Using const_pointer_cast
+  // would alias the Task's internal scene — risky if MTC mutates it later.
+  if (result.best_solution->end() == nullptr) {
+    RCLCPP_ERROR(LOGGER,
+      "planPickAndPlace [%s]: solution end state is null — cannot chain next task.",
+      entry.object_id.c_str());
+  } else {
+    result.end_scene = planning_scene::PlanningScene::clone(
+      result.best_solution->end()->scene());
+
+    // Debug: log terminal joint state so we can verify chaining is correct.
+    const moveit::core::RobotState & end_rs = result.end_scene->getCurrentState();
+    const moveit::core::JointModelGroup * jmg =
+        end_rs.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+    if (jmg) {
+      std::vector<double> end_jv;
+      end_rs.copyJointGroupPositions(jmg, end_jv);
+      const auto & jnames = jmg->getVariableNames();
+      RCLCPP_INFO(LOGGER,
+        "planPickAndPlace [%s]: terminal joint state (%zu joints) — "
+        "will be FixedState start for next task:",
+        entry.object_id.c_str(), end_jv.size());
+      for (std::size_t ji = 0; ji < end_jv.size() && ji < jnames.size(); ++ji) {
+        RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+          jnames[ji].c_str(), end_jv[ji], end_jv[ji] * 180.0 / M_PI);
+      }
+    }
+
+    // Debug: confirm all expected collision objects are still present in the terminal scene.
+    const std::vector<std::string> obj_ids = result.end_scene->getWorld()->getObjectIds();
+    RCLCPP_INFO(LOGGER,
+      "planPickAndPlace [%s]: terminal scene contains %zu world object(s):",
+      entry.object_id.c_str(), obj_ids.size());
+    for (const auto & oid : obj_ids) {
+      RCLCPP_INFO(LOGGER, "  object: %s", oid.c_str());
+    }
+  }
+
+  return result;
+}
+
+
+bool WordleBotController::executePlannedTask(PlannedPickPlace & planned)
+{
+  if (!planned.task || !planned.best_solution) {
+    RCLCPP_ERROR(LOGGER,
+      "executePlannedTask [%s]: task or solution is null — cannot execute.",
+      planned.object_id.c_str());
+    return false;
+  }
+
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER,
+      "executePlannedTask [%s]: stop requested before execute — aborting.",
+      planned.object_id.c_str());
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER,
+    "executePlannedTask [%s]: publishing solution for visualisation (cost=%.3f).",
+    planned.object_id.c_str(), planned.best_solution->cost());
+  planned.task->introspection().publishSolution(*planned.best_solution);
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: executing...", planned.object_id.c_str());
+  const auto result = planned.task->execute(*planned.best_solution);
+
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER,
+      "executePlannedTask [%s]: execution failed (error code %d).",
+      planned.object_id.c_str(), result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: execution succeeded.", planned.object_id.c_str());
+  return true;
+}
+
 bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
                                          const geometry_msgs::msg::Pose & place_pose,
                                          const std::string & object_id)
@@ -801,142 +752,166 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
 }
 
 // ---------------------------------------------------------------------------
-// Standalone return to home / gripper open / close
+// Goal Navigation
+// Plan and execute free-space goal-pose moves using the OMPL sampling planner.
+// Supports scene chaining so multiple goals can be planned sequentially before
+// any motion begins.
+// ---------------------------------------------------------------------------
+// planMoveToGoal         — plan a move to an absolute goal pose; accepts an
+//                          optional chained start scene for multi-goal missions
+// executePlannedMoveToGoal — execute a previously planned move-to-goal task
 // ---------------------------------------------------------------------------
 
-bool WordleBotController::returnToHome()
+WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
+  const geometry_msgs::msg::Pose & goal_pose,
+  const planning_scene::PlanningScenePtr & start_scene,
+  bool include_return_home)
 {
-  RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
+  PlannedMoveToGoal result;
 
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+  RCLCPP_INFO(LOGGER,
+    "planMoveToGoal: building task (start=%s, return_home=%s).",
+    start_scene ? "FixedState(chained)" : "CurrentState(live)",
+    include_return_home ? "yes" : "no");
 
-  mtc::Task task;
-  task.stages()->setName("return home");
-  task.loadRobotModel(node_);
-  task.setProperty("group", std::string("ur_onrobot_manipulator"));
+  const std::string arm_group = "ur_onrobot_manipulator";
 
-  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+  constexpr int NUM_PLANNING_ATTEMPTS = 5;
+  std::unique_ptr<mtc::Task> best_task;
+  const mtc::SolutionBase * best_solution_ptr = nullptr;
+  double best_cost = std::numeric_limits<double>::infinity();
 
-  auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-  stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-  stage->setGoal("home");
-  task.add(std::move(stage));
+  for (int attempt = 1; attempt <= NUM_PLANNING_ATTEMPTS; ++attempt) {
+    auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+    auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "returnToHome: task init failed: " << e);
+    auto task = std::make_unique<mtc::Task>();
+    task->stages()->setName("move to goal");
+    task->loadRobotModel(node_);
+    task->setProperty("group", arm_group);
+
+    if (start_scene == nullptr) {
+      task->add(std::make_unique<mtc::stages::CurrentState>("current state"));
+    } else {
+      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed state");
+      fixed->setState(start_scene);
+      task->add(std::move(fixed));
+    }
+
+    auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
+    stage->setGroup(arm_group);
+    geometry_msgs::msg::PoseStamped goal_stamped;
+    goal_stamped.header.frame_id = "world";
+    goal_stamped.pose = goal_pose;
+    stage->setGoal(goal_stamped);
+    stage->setPathConstraints(buildPathConstraints());
+    task->add(std::move(stage));
+
+    if (include_return_home) {
+      auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+      home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+      home->setGoal("home");
+      task->add(std::move(home));
+    }
+
+    try {
+      task->init();
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER,
+        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
+        << ": task init failed: " << e);
+      continue;
+    }
+
+    moveit::core::MoveItErrorCode plan_result;
+    try {
+      plan_result = task->plan(1);
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER,
+        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
+        << ": planning threw: " << e);
+      continue;
+    }
+
+    if (!plan_result || task->solutions().empty()) {
+      RCLCPP_WARN(LOGGER, "planMoveToGoal attempt %d/%d: no solution found.",
+        attempt, NUM_PLANNING_ATTEMPTS);
+      continue;
+    }
+
+    double cost = task->solutions().front()->cost();
+    RCLCPP_INFO(LOGGER, "planMoveToGoal attempt %d/%d: solution found, cost=%.3f.",
+      attempt, NUM_PLANNING_ATTEMPTS, cost);
+
+    if (cost < best_cost) {
+      best_cost = cost;
+      best_task = std::move(task);
+      best_solution_ptr = best_task->solutions().front().get();
+    }
+  }
+
+  if (!best_task) {
+    RCLCPP_ERROR(LOGGER, "planMoveToGoal: no solutions found across %d attempts.",
+      NUM_PLANNING_ATTEMPTS);
+    return result;
+  }
+
+  result.task = std::move(best_task);
+  result.best_solution = best_solution_ptr;
+
+  RCLCPP_INFO(LOGGER,
+    "planMoveToGoal: planning succeeded — best cost=%.3f across %d attempts.",
+    result.best_solution->cost(), NUM_PLANNING_ATTEMPTS);
+
+  if (result.best_solution->end() != nullptr) {
+    result.end_scene = planning_scene::PlanningScene::clone(
+      result.best_solution->end()->scene());
+  } else {
+    RCLCPP_WARN(LOGGER, "planMoveToGoal: solution end state is null — chaining may fail.");
+  }
+
+  return result;
+}
+
+bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
+{
+  if (!planned.task || !planned.best_solution) {
+    RCLCPP_ERROR(LOGGER, "executePlannedMoveToGoal: task or solution is null.");
     return false;
   }
 
-  if (!task.plan(5) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: stop requested — aborting.");
     return false;
   }
 
-  task.introspection().publishSolution(*task.solutions().front());
+  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: publishing solution (cost=%.3f).",
+    planned.best_solution->cost());
+  planned.task->introspection().publishSolution(*planned.best_solution);
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  auto result = task.execute(*task.solutions().front());
+  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: executing...");
+  const auto result = planned.task->execute(*planned.best_solution);
+
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
+    RCLCPP_ERROR(LOGGER, "executePlannedMoveToGoal: execution failed (error code %d).", result.val);
     return false;
   }
 
-  RCLCPP_INFO(LOGGER, "returnToHome: succeeded.");
+  RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: execution succeeded.");
   return true;
 }
 
 // ---------------------------------------------------------------------------
-// Standalone gripper open / close
+// Scan and Sweep
+// Cartesian move-to-goal planning and the four-pose camera scan sequence.
+// Pose 0 is reached via free-space OMPL planning; poses 1-3 are Cartesian
+// straight-line moves chained from the previous pose's terminal scene.
 // ---------------------------------------------------------------------------
-
-bool WordleBotController::openGripper()
-{
-  RCLCPP_INFO(LOGGER, "openGripper: building MTC task.");
-
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
-
-  mtc::Task task;
-  task.stages()->setName("open gripper");
-  task.loadRobotModel(node_);
-
-  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
-
-  auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
-  stage->setGroup("ur_onrobot_gripper");
-  stage->setGoal("open");
-  task.add(std::move(stage));
-
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "openGripper: task init failed: " << e);
-    return false;
-  }
-
-  if (!task.plan(5) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
-    return false;
-  }
-
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  auto result = task.execute(*task.solutions().front());
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "openGripper: execution failed (error code %d).", result.val);
-    return false;
-  }
-
-  RCLCPP_INFO(LOGGER, "openGripper: succeeded.");
-  return true;
-}
-
-bool WordleBotController::closeGripper()
-{
-  RCLCPP_INFO(LOGGER, "closeGripper: building MTC task.");
-
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
-
-  mtc::Task task;
-  task.stages()->setName("close gripper");
-  task.loadRobotModel(node_);
-
-  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
-
-  auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
-  stage->setGroup("ur_onrobot_gripper");
-  stage->setGoal("closed");
-  task.add(std::move(stage));
-
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "closeGripper: task init failed: " << e);
-    return false;
-  }
-
-  if (!task.plan(5) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
-    return false;
-  }
-
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  auto result = task.execute(*task.solutions().front());
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "closeGripper: execution failed (error code %d).", result.val);
-    return false;
-  }
-
-  RCLCPP_INFO(LOGGER, "closeGripper: succeeded.");
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Scan-and-sweep: Cartesian move-to-goal planning + scan sequence execution
+// planMoveToGoalCartesian — plan a Cartesian (straight-line) move to a goal
+//                           pose using the CartesianPath solver
+// runScanAndSweep         — execute the full four-pose scan sequence with a
+//                           configurable dwell time at each pose
 // ---------------------------------------------------------------------------
 
 WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoalCartesian(
@@ -1119,143 +1094,214 @@ bool WordleBotController::runScanAndSweep(
 }
 
 // ---------------------------------------------------------------------------
-// Two-phase pick-and-place: plan without executing, then execute separately
+// Standalone Arm Motions
+// Simple one-shot MTC tasks for moving the arm to known named states.
+// These are available while no mission is running (IDLE state).
+// ---------------------------------------------------------------------------
+// returnToHome  — move the arm to the SRDF "home" named state
+// openGripper   — move the gripper to the SRDF "open" named state
+// closeGripper  — move the gripper to the SRDF "closed" named state
 // ---------------------------------------------------------------------------
 
-WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
-  const PickPlaceEntry & entry,
-  const planning_scene::PlanningScenePtr & start_scene,
-  bool include_return_home)
+bool WordleBotController::returnToHome()
 {
-  PlannedPickPlace result;
-  result.object_id = entry.object_id;
+  RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
 
-  RCLCPP_INFO(LOGGER,
-    "planPickAndPlace [%s]: building task (start=%s, return_home=%s).",
-    entry.object_id.c_str(),
-    start_scene ? "FixedState(chained)" : "CurrentState(live)",
-    include_return_home ? "yes" : "no");
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  // createTask() returns by value; Task has a move constructor so this move-constructs
-  // into the heap-allocated object without any copy.
-  result.task = std::make_unique<mtc::Task>(
-    createTask(entry.pick_pose, entry.place_pose, entry.object_id,
-               start_scene, include_return_home));
+  mtc::Task task;
+  task.stages()->setName("return home");
+  task.loadRobotModel(node_);
+  task.setProperty("group", std::string("ur_onrobot_manipulator"));
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+  stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+  stage->setGoal("home");
+  task.add(std::move(stage));
 
   try {
-    result.task->init();
+    task.init();
   } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER,
-      "planPickAndPlace [" << entry.object_id << "]: task init failed: " << e);
-    result.task.reset();
-    return result;
-  }
-
-  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (max 5 solutions)...",
-              entry.object_id.c_str());
-  moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = result.task->plan(5);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER,
-      "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
-    result.task.reset();
-    return result;
-  }
-
-  if (!plan_result || result.task->solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "planPickAndPlace [%s]: no solutions found.", entry.object_id.c_str());
-    result.task.reset();
-    return result;
-  }
-
-  // best_solution is a raw pointer into the task's internal storage.
-  // It remains valid as long as result.task is alive — both live in PlannedPickPlace.
-  result.best_solution = result.task->solutions().front().get();
-
-  RCLCPP_INFO(LOGGER,
-    "planPickAndPlace [%s]: planning succeeded — %zu solution(s), best cost=%.3f.",
-    entry.object_id.c_str(),
-    result.task->solutions().size(),
-    result.best_solution->cost());
-
-  // Extract the terminal planning scene from the solution's end InterfaceState.
-  // PlanningScene::clone() produces a fully independent non-const copy, which is
-  // safe to pass to FixedState::setState() for the next task. Using const_pointer_cast
-  // would alias the Task's internal scene — risky if MTC mutates it later.
-  if (result.best_solution->end() == nullptr) {
-    RCLCPP_ERROR(LOGGER,
-      "planPickAndPlace [%s]: solution end state is null — cannot chain next task.",
-      entry.object_id.c_str());
-  } else {
-    result.end_scene = planning_scene::PlanningScene::clone(
-      result.best_solution->end()->scene());
-
-    // Debug: log terminal joint state so we can verify chaining is correct.
-    const moveit::core::RobotState & end_rs = result.end_scene->getCurrentState();
-    const moveit::core::JointModelGroup * jmg =
-        end_rs.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
-    if (jmg) {
-      std::vector<double> end_jv;
-      end_rs.copyJointGroupPositions(jmg, end_jv);
-      const auto & jnames = jmg->getVariableNames();
-      RCLCPP_INFO(LOGGER,
-        "planPickAndPlace [%s]: terminal joint state (%zu joints) — "
-        "will be FixedState start for next task:",
-        entry.object_id.c_str(), end_jv.size());
-      for (std::size_t ji = 0; ji < end_jv.size() && ji < jnames.size(); ++ji) {
-        RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
-          jnames[ji].c_str(), end_jv[ji], end_jv[ji] * 180.0 / M_PI);
-      }
-    }
-
-    // Debug: confirm all expected collision objects are still present in the terminal scene.
-    const std::vector<std::string> obj_ids = result.end_scene->getWorld()->getObjectIds();
-    RCLCPP_INFO(LOGGER,
-      "planPickAndPlace [%s]: terminal scene contains %zu world object(s):",
-      entry.object_id.c_str(), obj_ids.size());
-    for (const auto & oid : obj_ids) {
-      RCLCPP_INFO(LOGGER, "  object: %s", oid.c_str());
-    }
-  }
-
-  return result;
-}
-
-
-bool WordleBotController::executePlannedTask(PlannedPickPlace & planned)
-{
-  if (!planned.task || !planned.best_solution) {
-    RCLCPP_ERROR(LOGGER,
-      "executePlannedTask [%s]: task or solution is null — cannot execute.",
-      planned.object_id.c_str());
+    RCLCPP_ERROR_STREAM(LOGGER, "returnToHome: task init failed: " << e);
     return false;
   }
 
-  if (stop_requested_.load()) {
-    RCLCPP_INFO(LOGGER,
-      "executePlannedTask [%s]: stop requested before execute — aborting.",
-      planned.object_id.c_str());
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
     return false;
   }
 
-  RCLCPP_INFO(LOGGER,
-    "executePlannedTask [%s]: publishing solution for visualisation (cost=%.3f).",
-    planned.object_id.c_str(), planned.best_solution->cost());
-  planned.task->introspection().publishSolution(*planned.best_solution);
+  task.introspection().publishSolution(*task.solutions().front());
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: executing...", planned.object_id.c_str());
-  const auto result = planned.task->execute(*planned.best_solution);
-
+  auto result = task.execute(*task.solutions().front());
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER,
-      "executePlannedTask [%s]: execution failed (error code %d).",
-      planned.object_id.c_str(), result.val);
+    RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
     return false;
   }
 
-  RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: execution succeeded.", planned.object_id.c_str());
+  RCLCPP_INFO(LOGGER, "returnToHome: succeeded.");
   return true;
 }
 
+bool WordleBotController::openGripper()
+{
+  RCLCPP_INFO(LOGGER, "openGripper: building MTC task.");
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("open gripper");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal("open");
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "openGripper: task init failed: " << e);
+    return false;
+  }
+
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "openGripper: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "openGripper: succeeded.");
+  return true;
+}
+
+bool WordleBotController::closeGripper()
+{
+  RCLCPP_INFO(LOGGER, "closeGripper: building MTC task.");
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("close gripper");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal("closed");
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "closeGripper: task init failed: " << e);
+    return false;
+  }
+
+  if (!task.plan(5) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "closeGripper: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "closeGripper: succeeded.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Motion Control
+// Interrupt and reset helpers for the stop/resume lifecycle.
+// ---------------------------------------------------------------------------
+// stop          — cancel the in-progress trajectory and set the stop flag;
+//                 any blocking execute() call will return a non-SUCCESS code
+// clearStopFlag — clear the stop flag before issuing a new motion so the
+//                 motion is not immediately rejected
+// ---------------------------------------------------------------------------
+
+void WordleBotController::stop()
+{
+  stop_requested_.store(true);
+  move_group_.stop();
+  RCLCPP_INFO(LOGGER, "stop(): trajectory cancelled.");
+}
+
+void WordleBotController::clearStopFlag()
+{
+  stop_requested_.store(false);
+}
+
+// ---------------------------------------------------------------------------
+// Helper Functions
+// Stateless utility functions used across planning and scene management.
+// ---------------------------------------------------------------------------
+// buildPose                    — construct a geometry_msgs::Pose from XYZ
+//                                position and RPY orientation
+// computeTotalJointDisplacement — compute Σ|Δq| across all joints and
+//                                 trajectory steps (L1 joint-space path length)
+// buildPathConstraints         — return the MoveIt path constraints used by
+//                                MTC planning stages
+// ---------------------------------------------------------------------------
+
+geometry_msgs::msg::Pose WordleBotController::buildPose(
+  double x, double y, double z,
+  double roll, double pitch, double yaw)
+{
+  tf2::Quaternion quat;
+  quat.setRPY(roll, pitch, yaw);
+  quat.normalize();
+
+  geometry_msgs::msg::Pose pose;
+  pose.position.x = x;
+  pose.position.y = y;
+  pose.position.z = z;
+  pose.orientation.x = quat.x();
+  pose.orientation.y = quat.y();
+  pose.orientation.z = quat.z();
+  pose.orientation.w = quat.w();
+
+  return pose;
+}
+
+
+double WordleBotController::computeTotalJointDisplacement(
+  const moveit::planning_interface::MoveGroupInterface::Plan & plan)
+{
+  const auto & points = plan.trajectory_.joint_trajectory.points;
+  double total = 0.0;
+  for (std::size_t i = 1; i < points.size(); ++i) {
+    const auto & prev = points[i - 1].positions;
+    const auto & curr = points[i].positions;
+    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
+      total += std::abs(curr[j] - prev[j]);
+    }
+  }
+  return total;
+}
+
+moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
+{
+  moveit_msgs::msg::Constraints constraints;
+  return constraints;
+}

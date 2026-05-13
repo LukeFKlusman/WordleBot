@@ -32,6 +32,10 @@ public:
   explicit WordleBotController(rclcpp::Node::SharedPtr node);
   ~WordleBotController();
 
+  // ---------------------------------------------------------------------------
+  // Data structures shared with the control node
+  // ---------------------------------------------------------------------------
+
   // One entry per queued pick-and-place task. Moved here from the control node
   // so the controller's planning methods can accept it directly.
   struct PickPlaceEntry {
@@ -57,6 +61,10 @@ public:
     std::string object_id;
   };
 
+  // ---------------------------------------------------------------------------
+  // Collision Scene Management
+  // ---------------------------------------------------------------------------
+
   // Add floor collision and attach a sensor guard cylinder to the end effector.
   void setupCollisionScene();
 
@@ -78,57 +86,15 @@ public:
   // Detach the sensor guard cylinder from tool0.
   void detachSensorCollisionObject();
 
-  // Cancel the in-progress trajectory. Sets stop_requested_ and calls move_group_.stop().
-  // Any blocking execute() or task.execute() call will return a non-SUCCESS error code.
-  void stop();
+  // ---------------------------------------------------------------------------
+  // Pick and Place
+  // ---------------------------------------------------------------------------
 
-  // Clear the stop flag before issuing a new motion so the motion is not immediately rejected.
-  void clearStopFlag();
-
-  // Execute MTC stages 1-4: open gripper → move to pick → grasp → lift.
-  // Returns true on success; false if stopped, planning failed, or execution failed.
-  bool doPickPhase(const geometry_msgs::msg::Pose & object_pose);
-
-  // Execute MTC stages 5-7: move to place → place → retreat → return home.
-  // Must be called after a successful doPickPhase() so the object is attached in the planning scene.
-  // Returns true on success; false if stopped, planning failed, or execution failed.
-  bool doPlacePhase();
-
-  // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
-  static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
-                                            double roll, double pitch, double yaw);
-
-  // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
-  static moveit_msgs::msg::Constraints buildPathConstraints();
-
-  // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
-  // This is the L1 path length in joint space — used to validate motion efficiency.
-  static double computeTotalJointDisplacement(
-    const moveit::planning_interface::MoveGroupInterface::Plan & plan);
-
-  // Plan a move-to-goal MTC task without executing it.
-  // start_scene: nullptr → CurrentState (first goal); non-null → FixedState (chained).
-  // include_return_home: true only for the last goal in the mission.
-  PlannedMoveToGoal planMoveToGoal(const geometry_msgs::msg::Pose & goal_pose,
-                                    const planning_scene::PlanningScenePtr & start_scene,
-                                    bool include_return_home);
-
-  // Execute a previously planned move-to-goal task. Returns true on SUCCESS.
-  bool executePlannedMoveToGoal(PlannedMoveToGoal & planned);
-
-  // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
-  bool returnToHome();
-
-  // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
-  bool openGripper();
-
-  // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
-  bool closeGripper();
-
-  // Plan and execute a full MTC pick-and-place for the given object and place poses.
-  bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
-                      const geometry_msgs::msg::Pose & place_pose,
-                      const std::string & object_id);
+  // Build an MTC task for one pick-and-place operation.
+  // start_scene == nullptr → Stage 1 is CurrentState (reads live robot).
+  // start_scene != nullptr → Stage 1 is FixedState seeded from start_scene.
+  // include_return_home controls whether Stage 7 ("return home") is appended.
+  // (Called internally by planPickAndPlace and doPickAndPlace.)
 
   // Plan one pick-and-place task without executing it.
   // start_scene: nullptr → use CurrentState (live robot, first task).
@@ -143,6 +109,29 @@ public:
   // then calls task.execute(). Returns true on SUCCESS.
   bool executePlannedTask(PlannedPickPlace & planned);
 
+  // Plan and execute a full MTC pick-and-place for the given object and place poses.
+  bool doPickAndPlace(const geometry_msgs::msg::Pose & object_pose,
+                      const geometry_msgs::msg::Pose & place_pose,
+                      const std::string & object_id);
+
+  // ---------------------------------------------------------------------------
+  // Goal Navigation
+  // ---------------------------------------------------------------------------
+
+  // Plan a move-to-goal MTC task without executing it.
+  // start_scene: nullptr → CurrentState (first goal); non-null → FixedState (chained).
+  // include_return_home: true only for the last goal in the mission.
+  PlannedMoveToGoal planMoveToGoal(const geometry_msgs::msg::Pose & goal_pose,
+                                    const planning_scene::PlanningScenePtr & start_scene,
+                                    bool include_return_home);
+
+  // Execute a previously planned move-to-goal task. Returns true on SUCCESS.
+  bool executePlannedMoveToGoal(PlannedMoveToGoal & planned);
+
+  // ---------------------------------------------------------------------------
+  // Scan and Sweep
+  // ---------------------------------------------------------------------------
+
   // Plan a Cartesian (straight-line) move to an absolute goal pose using the CartesianPath solver.
   // Mirrors planMoveToGoal but replaces the OMPL sampling planner with CartesianPath.
   // start_scene: nullptr → CurrentState; non-null → FixedState (chained).
@@ -154,6 +143,50 @@ public:
   // Dwells dwell_time_seconds at each pose, then returns to home.
   bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses,
                        double dwell_time_seconds);
+
+  // ---------------------------------------------------------------------------
+  // Standalone Arm Motions
+  // ---------------------------------------------------------------------------
+
+  // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
+  bool returnToHome();
+
+  // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
+  bool openGripper();
+
+  // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
+  bool closeGripper();
+
+  // ---------------------------------------------------------------------------
+  // Motion Control
+  // ---------------------------------------------------------------------------
+
+  // Cancel the in-progress trajectory. Sets stop_requested_ and calls move_group_.stop().
+  // Any blocking execute() or task.execute() call will return a non-SUCCESS error code.
+  void stop();
+
+  // Clear the stop flag before issuing a new motion so the motion is not immediately rejected.
+  void clearStopFlag();
+
+  // ---------------------------------------------------------------------------
+  // Helper Functions
+  // ---------------------------------------------------------------------------
+
+  // Build a geometry_msgs::Pose from XYZ position and RPY orientation.
+  static geometry_msgs::msg::Pose buildPose(double x, double y, double z,
+                                            double roll, double pitch, double yaw);
+
+  // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
+  static moveit_msgs::msg::Constraints buildPathConstraints();
+
+  // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
+  // This is the L1 path length in joint space — used to validate motion efficiency.
+  static double computeTotalJointDisplacement(
+    const moveit::planning_interface::MoveGroupInterface::Plan & plan);
+
+  // ---------------------------------------------------------------------------
+  // Constants
+  // ---------------------------------------------------------------------------
 
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
@@ -169,6 +202,10 @@ public:
   }};
 
 private:
+  // ---------------------------------------------------------------------------
+  // Internal MTC task builders
+  // ---------------------------------------------------------------------------
+
   // Build an MTC task for one pick-and-place operation.
   // start_scene == nullptr → Stage 1 is CurrentState (reads live robot).
   // start_scene != nullptr → Stage 1 is FixedState seeded from start_scene.
@@ -183,8 +220,11 @@ private:
   moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);
   moveit::task_constructor::Task createPlaceTask();
 
-  rclcpp::Node::SharedPtr node_;
+  // ---------------------------------------------------------------------------
+  // Member variables
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters
+  // ---------------------------------------------------------------------------
+  rclcpp::Node::SharedPtr node_;
   moveit::planning_interface::MoveGroupInterface move_group_;
   moveit::planning_interface::PlanningSceneInterface planning_scene_;
   moveit_visual_tools::MoveItVisualTools visual_tools_;
