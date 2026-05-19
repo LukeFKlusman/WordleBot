@@ -146,10 +146,12 @@ public:
     const planning_scene::PlanningScenePtr & start_scene);
 
   // Execute the full scan-and-sweep sequence.
-  // poses[0] is reached via free-space OMPL planning; poses[1..3] via a single
-  // unified MTC task with IK solving between each Cartesian segment.
-  // Returns home after the sweep completes.
-  bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses);
+  // When USE_MTC_FOR_SCAN_SWEEP == false (default): poses[0] via moveToGoal, poses[1..3] via
+  // computeCartesianPath with moveToGoal fallback, then returnToHome.
+  // When USE_MTC_FOR_SCAN_SWEEP == true: existing MTC plan-all-then-execute path.
+  // dwell_secs: how long to pause at each scan pose (0 = no dwell).
+  bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses,
+                       double dwell_secs = 0.0);
 
   // ---------------------------------------------------------------------------
   // Standalone Arm Motions
@@ -198,6 +200,14 @@ public:
   // Change to false to use MoveGroupInterface sequential plan+execute per goal.
   // Change to true  to use MTC plan-all-then-execute-all (existing behaviour).
   static constexpr bool USE_MTC_FOR_GOALS = false;
+
+  // Change to false to use MoveGroupInterface Cartesian path for scan-and-sweep.
+  // Change to true  to use MTC plan-all-then-execute-all (existing behaviour).
+  static constexpr bool USE_MTC_FOR_SCAN_SWEEP = false;
+
+  static constexpr double kCartesianEefStep       = 0.01;  // 1 cm max step between waypoints
+  static constexpr double kCartesianJumpThreshold = 0.0;   // disable joint-space jump check
+  static constexpr double kCartesianMinFraction   = 0.95;  // fallback to moveToGoal below this
 
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
@@ -251,6 +261,10 @@ private:
   moveit::planning_interface::MoveGroupInterface::Plan
   selectBestPlan(
     const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans);
+
+  // Move the end-effector to target_pose via computeCartesianPath.
+  // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
+  bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
 
   // ---------------------------------------------------------------------------
   // Member variables

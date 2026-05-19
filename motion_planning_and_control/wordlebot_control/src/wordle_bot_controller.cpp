@@ -1155,13 +1155,46 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
 
 // ---------------------------------------------------------------------------
 // Scan and Sweep
-// Four-pose camera scan sequence. Pose 1 is reached via free-space OMPL
-// (Connect + ComputeIK). Poses 2-4 are straight-line Cartesian sweeps
-// (MoveRelative) along the world-frame delta between consecutive scan poses.
+// Four-pose camera scan sequence.
+// MGI path (USE_MTC_FOR_SCAN_SWEEP == false):
+//   Pose 0 via moveToGoal; poses 1-3 via computeCartesianPath with moveToGoal
+//   fallback; then returnToHome.
+// MTC path (USE_MTC_FOR_SCAN_SWEEP == true):
+//   Pose 1 via free-space OMPL (Connect + ComputeIK); poses 2-4 via straight-
+//   line Cartesian sweeps (MoveRelative).
 // ---------------------------------------------------------------------------
-// createScanAndSweepTask — build the unified MTC task
-// runScanAndSweep        — execute the full four-pose scan sequence
+// moveCartesianToWaypoint — single Cartesian segment with moveToGoal fallback
+// createScanAndSweepTask  — build the unified MTC task
+// runScanAndSweep         — execute the full four-pose scan sequence
 // ---------------------------------------------------------------------------
+
+bool WordleBotController::moveCartesianToWaypoint(
+  const geometry_msgs::msg::Pose & target_pose)
+{
+  move_group_.setStartStateToCurrentState();
+  moveit_msgs::msg::RobotTrajectory trajectory;
+  const double fraction = move_group_.computeCartesianPath(
+    {target_pose}, kCartesianEefStep, kCartesianJumpThreshold, trajectory);
+
+  RCLCPP_INFO(LOGGER,
+    "moveCartesianToWaypoint: fraction=%.3f  target xyz=(%.3f, %.3f, %.3f)",
+    fraction,
+    target_pose.position.x, target_pose.position.y, target_pose.position.z);
+
+  if (fraction >= kCartesianMinFraction) {
+    const auto result = move_group_.execute(trajectory);
+    if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_ERROR(LOGGER, "moveCartesianToWaypoint: execution failed (%d).", result.val);
+      return false;
+    }
+    return true;
+  }
+
+  RCLCPP_WARN(LOGGER,
+    "moveCartesianToWaypoint: fraction=%.3f < %.3f — falling back to moveToGoal.",
+    fraction, kCartesianMinFraction);
+  return moveToGoal(target_pose);
+}
 
 mtc::Task WordleBotController::createScanAndSweepTask(
   const std::vector<geometry_msgs::msg::Pose> & scan_poses,
@@ -1267,7 +1300,7 @@ mtc::Task WordleBotController::createScanAndSweepTask(
 }
 
 bool WordleBotController::runScanAndSweep(
-  const std::vector<geometry_msgs::msg::Pose> & poses)
+  const std::vector<geometry_msgs::msg::Pose> & poses, double dwell_secs)
 {
   if (poses.size() != 4) {
     RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 4 poses, got %zu.", poses.size());
@@ -1284,54 +1317,96 @@ bool WordleBotController::runScanAndSweep(
       poses[i].orientation.z, poses[i].orientation.w);
   }
 
-  // ── All 4 poses: unified MTC scan-and-sweep task from current robot state ─
-  if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: building scan task.");
-  auto sweep_task = createScanAndSweepTask(poses, nullptr);
+  if constexpr (USE_MTC_FOR_SCAN_SWEEP) {
+    // ── MTC path (original behaviour) ──────────────────────────────────────
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): building scan task.");
+    auto sweep_task = createScanAndSweepTask(poses, nullptr);
 
-  try {
-    sweep_task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep: sweep task init failed: " << e);
-    return false;
+    try {
+      sweep_task.init();
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep (MTC): sweep task init failed: " << e);
+      return false;
+    }
+
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep (all 4 poses).");
+    moveit::core::MoveItErrorCode plan_result;
+    try {
+      plan_result = sweep_task.plan(15);
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep (MTC): sweep task planning threw: " << e);
+      return false;
+    }
+
+    if (!plan_result || sweep_task.solutions().empty()) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MTC): planning failed — no solutions found.");
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MTC): check above MTC stage tree for the failing stage.");
+      return false;
+    }
+
+    RCLCPP_INFO(LOGGER,
+      "runScanAndSweep (MTC): sweep task planned — %zu solution(s), best cost=%.3f. Executing.",
+      sweep_task.solutions().size(), sweep_task.solutions().front()->cost());
+
+    sweep_task.introspection().publishSolution(*sweep_task.solutions().front());
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+    if (stop_requested_.load()) { return false; }
+    const auto exec_result = sweep_task.execute(*sweep_task.solutions().front());
+    if (exec_result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MTC): sweep execution failed (error code %d).",
+        exec_result.val);
+      return false;
+    }
+
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): returning to home.");
+    returnToHome();
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): complete.");
+    return true;
+
+  } else {
+    // ── MGI Cartesian path ─────────────────────────────────────────────────
+    if (stop_requested_.load()) { return false; }
+
+    // 1. Joint-space move to poses[0].
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moving to pose 0.");
+    if (!moveToGoal(poses[0])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 0.");
+      return false;
+    }
+    if (dwell_secs > 0.0) {
+      RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): dwelling %.2f s at pose 0.", dwell_secs);
+      rclcpp::sleep_for(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::duration<double>(dwell_secs)));
+    }
+
+    // 2. Cartesian sweeps: poses[0]→[1], [1]→[2], [2]→[3].
+    for (size_t i = 0; i < 3; ++i) {
+      if (stop_requested_.load()) { return false; }
+      RCLCPP_INFO(LOGGER,
+        "runScanAndSweep (MGI): Cartesian move pose %zu → %zu.", i, i + 1);
+      if (!moveCartesianToWaypoint(poses[i + 1])) {
+        RCLCPP_ERROR(LOGGER,
+          "runScanAndSweep (MGI): failed to reach pose %zu.", i + 1);
+        return false;
+      }
+      if (dwell_secs > 0.0) {
+        RCLCPP_INFO(LOGGER,
+          "runScanAndSweep (MGI): dwelling %.2f s at pose %zu.", dwell_secs, i + 1);
+        rclcpp::sleep_for(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::duration<double>(dwell_secs)));
+      }
+    }
+
+    // 3. Return home.
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to home.");
+    returnToHome();
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): complete.");
+    return true;
   }
-
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning sweep (all 4 poses).");
-  moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = sweep_task.plan(15);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep: sweep task planning threw: " << e);
-    return false;
-  }
-
-  if (!plan_result || sweep_task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning failed — no solutions found.");
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: check above MTC stage tree for the failing stage.");
-    return false;
-  }
-
-  RCLCPP_INFO(LOGGER,
-    "runScanAndSweep: sweep task planned — %zu solution(s), best cost=%.3f. Executing.",
-    sweep_task.solutions().size(), sweep_task.solutions().front()->cost());
-
-  sweep_task.introspection().publishSolution(*sweep_task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  if (stop_requested_.load()) { return false; }
-  const auto exec_result = sweep_task.execute(*sweep_task.solutions().front());
-  if (exec_result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: sweep execution failed (error code %d).",
-      exec_result.val);
-    return false;
-  }
-
-  // ── Return home ───────────────────────────────────────────────────────────
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: returning to home.");
-  returnToHome();
-
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: complete.");
-  return true;
 }
 
 // ---------------------------------------------------------------------------
