@@ -1,0 +1,14 @@
+wordle_bot_control_node:
+  ros__parameters:
+    # IK warm start: joint angles (radians) used to bias IK solution selection.
+    # MTC ComputeIK will prefer solutions closest to this configuration,
+    # avoiding large joint excursions and unnecessary spinning.
+    # Edit these values to match a known good working position for the robot.
+    # Degrees: shoulder_pan=65, shoulder_lift=-90, elbow=90, wrist_1=-90, wrist_2=-90, wrist_3=65
+    ik_warm_start_joints:
+      shoulder_pan_joint:   1.1345   # 65 deg
+      shoulder_lift_joint: -1.5708   # -90 deg
+      elbow_joint:          1.5708   #  90 deg
+      wrist_1_joint:       -1.5708   # -90 deg
+      wrist_2_joint:       -1.5708   # -90 deg
+      wrist_3_joint:        1.1345   # 65 deg

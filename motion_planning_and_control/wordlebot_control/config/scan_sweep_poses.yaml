@@ -8,7 +8,9 @@ wordle_bot_control_node:
     # pose_0 is reached via free-space (OMPL) planning — the starting position.
     # poses 1-3 are reached via straight-line Cartesian moves — the sweep positions.
     # All values are placeholders; fill in real values after physical testing.
-    scan_sweep_pose_0: [-0.30, 0.1, 0.05, 0.0, 3.14159, 0.0]
-    scan_sweep_pose_1: [-0.30, 0.30, 0.05, 0.0, 3.14159, 0.0]
-    scan_sweep_pose_2: [ 0.30, 0.30, 0.05, 0.0, 3.14159, 0.0]
-    scan_sweep_pose_3: [ 0.30, 0.1, 0.05, 0.0, 3.14159, 0.0]
+    # roll=pi rotates the gripper Z-axis to point straight down (face-down orientation)
+    # Matches the pick-and-place grasp_frame_transform (AngleAxisd(M_PI, UnitX)).
+    scan_sweep_pose_0: [-0.30, 0.10, 0.1, 3.14159, 0.0, 0.0]
+    scan_sweep_pose_1: [-0.30, 0.30, 0.1, 3.14159, 0.0, 0.0]
+    scan_sweep_pose_2: [ 0.30, 0.30, 0.1, 3.14159, 0.0, 0.0]
+    scan_sweep_pose_3: [ 0.30, 0.10, 0.1, 3.14159, 0.0, 0.0]
