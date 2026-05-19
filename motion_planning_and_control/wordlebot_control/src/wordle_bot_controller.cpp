@@ -875,13 +875,11 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
 
 // ---------------------------------------------------------------------------
 // Scan and Sweep
-// Four-pose camera scan sequence using a unified MTC task for poses 1-3.
-// Pose 0 is reached via free-space OMPL planning. Poses 1-3 are planned as a
-// single MTC task with ComputeIK(GeneratePose) generator stages interleaved
-// with Connect(CartesianPath) connector stages, giving the planner multiple
-// IK configurations to try at each scan pose (same pattern as pick-and-place).
+// Four-pose camera scan sequence. Pose 1 is reached via free-space OMPL
+// (Connect + ComputeIK). Poses 2-4 are straight-line Cartesian sweeps
+// (MoveRelative) along the world-frame delta between consecutive scan poses.
 // ---------------------------------------------------------------------------
-// createScanAndSweepTask — build the unified MTC task for poses 1-3
+// createScanAndSweepTask — build the unified MTC task
 // runScanAndSweep        — execute the full four-pose scan sequence
 // ---------------------------------------------------------------------------
 
@@ -890,7 +888,13 @@ mtc::Task WordleBotController::createScanAndSweepTask(
   const planning_scene::PlanningScenePtr & start_scene)
 {
   const std::string arm_group = "ur_onrobot_manipulator";
+  const std::string hand_group = "ur_onrobot_gripper";
   const std::string hand_frame = "gripper_tcp";
+
+  RCLCPP_INFO(LOGGER, "createScanAndSweepTask: scan pose 1 target  xyz=(%.3f, %.3f, %.3f)",
+    scan_poses[0].position.x, scan_poses[0].position.y, scan_poses[0].position.z);
+
+  auto sampling_planner = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
   cartesian_planner->setMaxVelocityScalingFactor(0.5);
@@ -900,56 +904,82 @@ mtc::Task WordleBotController::createScanAndSweepTask(
   mtc::Task task;
   task.stages()->setName("scan and sweep");
   task.loadRobotModel(node_);
-  task.setProperty("group", arm_group);
+  task.setProperty("group",    arm_group);
+  task.setProperty("eef",      hand_group);
   task.setProperty("ik_frame", hand_frame);
 
-  // Stage 1: CurrentState (first scan, no prior pose) or FixedState (chained).
-  // Kept as a raw pointer so GeneratePose stages can monitor it.
-  mtc::Stage * fixed_state_ptr = nullptr;
+  // Stage 1: current robot state (or chained fixed state).
+  mtc::Stage * current_state_ptr = nullptr;
   {
     if (start_scene == nullptr) {
-      auto current = std::make_unique<mtc::stages::CurrentState>("current state");
-      fixed_state_ptr = current.get();
-      task.add(std::move(current));
+      auto stage = std::make_unique<mtc::stages::CurrentState>("current state");
+      current_state_ptr = stage.get();
+      task.add(std::move(stage));
     } else {
-      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed start");
-      fixed->setState(start_scene);
-      fixed_state_ptr = fixed.get();
-      task.add(std::move(fixed));
+      auto stage = std::make_unique<mtc::stages::FixedState>("fixed start");
+      stage->setState(start_scene);
+      current_state_ptr = stage.get();
+      task.add(std::move(stage));
     }
   }
 
-  // For each scan pose (1-3): Connect(CartesianPath) then ComputeIK(GeneratePose).
-  // The Connect stage plans a straight-line Cartesian path to whichever IK solution
-  // the ComputeIK generator produces (up to 8 alternatives per pose).
-  for (size_t i = 0; i < scan_poses.size(); ++i) {
-    {
-      auto connect = std::make_unique<mtc::stages::Connect>(
-        "move to scan " + std::to_string(i + 1),
-        mtc::stages::Connect::GroupPlannerVector{{arm_group, cartesian_planner}});
-      connect->setTimeout(5.0);
-      connect->properties().configureInitFrom(mtc::Stage::PARENT);
-      task.add(std::move(connect));
-    }
+  // Stage 2: free-space OMPL move toward scan pose 1 — mirrors "move to pick" in pick-and-place.
+  {
+    auto connect = std::make_unique<mtc::stages::Connect>(
+      "move to scan 1",
+      mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
+    connect->setTimeout(0.2);
+    connect->properties().configureInitFrom(mtc::Stage::PARENT);
+    connect->setPathConstraints(WordleBotController::buildPathConstraints());
+    task.add(std::move(connect));
+  }
 
-    {
-      auto gen_pose = std::make_unique<mtc::stages::GeneratePose>(
-        "generate scan pose " + std::to_string(i + 1));
-      geometry_msgs::msg::PoseStamped target;
-      target.header.frame_id = "world";
-      target.pose = scan_poses[i];
-      gen_pose->setPose(target);
-      gen_pose->setMonitoredStage(fixed_state_ptr);
+  // Stage 3: IK resolution for scan pose 1.
+  {
+    auto gen_pose = std::make_unique<mtc::stages::GeneratePose>("generate scan pose 1");
+    geometry_msgs::msg::PoseStamped target;
+    target.header.frame_id = "world";
+    target.pose = scan_poses[0];
+    gen_pose->setPose(target);
+    gen_pose->setMonitoredStage(current_state_ptr);
 
-      auto ik = std::make_unique<mtc::stages::ComputeIK>(
-        "scan pose " + std::to_string(i + 1) + " IK", std::move(gen_pose));
-      ik->setMaxIKSolutions(8);
-      ik->setMinSolutionDistance(1.0);
-      ik->setIKFrame(hand_frame);
-      ik->properties().configureInitFrom(mtc::Stage::PARENT, {"group", "eef"});
-      ik->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
-      task.add(std::move(ik));
-    }
+    auto ik = std::make_unique<mtc::stages::ComputeIK>("scan pose 1 IK", std::move(gen_pose));
+    ik->setMaxIKSolutions(32);
+    ik->setMinSolutionDistance(0.1);
+    ik->setIKFrame(hand_frame);
+    ik->properties().configureInitFrom(mtc::Stage::PARENT, {"group", "eef"});
+    ik->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
+    task.add(std::move(ik));
+  }
+
+  // Stages 4-6: straight-line Cartesian sweep between scan poses 1→2→3→4.
+  // MoveRelative moves the IK frame along the world-frame delta between consecutive poses.
+  for (size_t i = 1; i < scan_poses.size(); ++i) {
+    const auto & from = scan_poses[i - 1];
+    const auto & to   = scan_poses[i];
+
+    const double dx   = to.position.x - from.position.x;
+    const double dy   = to.position.y - from.position.y;
+    const double dz   = to.position.z - from.position.z;
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    RCLCPP_INFO(LOGGER,
+      "createScanAndSweepTask: sweep %zu→%zu  delta=(%.3f, %.3f, %.3f)  dist=%.4f m",
+      i, i + 1, dx, dy, dz, dist);
+
+    geometry_msgs::msg::Vector3Stamped vec;
+    vec.header.frame_id = "world";
+    vec.vector.x = dx / dist;
+    vec.vector.y = dy / dist;
+    vec.vector.z = dz / dist;
+
+    auto stage = std::make_unique<mtc::stages::MoveRelative>(
+      "move to scan " + std::to_string(i + 1), cartesian_planner);
+    stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+    stage->setIKFrame(hand_frame);
+    stage->setDirection(vec);
+    stage->setMinMaxDistance(dist * 0.95, dist * 1.05);
+    task.add(std::move(stage));
   }
 
   return task;
@@ -964,10 +994,18 @@ bool WordleBotController::runScanAndSweep(
   }
 
   RCLCPP_INFO(LOGGER, "runScanAndSweep: starting.");
+  for (size_t i = 0; i < poses.size(); ++i) {
+    RCLCPP_INFO(LOGGER,
+      "runScanAndSweep: pose %zu  xyz=(%.3f, %.3f, %.3f)  quat=(%.3f, %.3f, %.3f, %.3f)",
+      i + 1,
+      poses[i].position.x,    poses[i].position.y,    poses[i].position.z,
+      poses[i].orientation.x, poses[i].orientation.y,
+      poses[i].orientation.z, poses[i].orientation.w);
+  }
 
   // ── All 4 poses: unified MTC scan-and-sweep task from current robot state ─
   if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: building unified scan task for all 4 poses.");
+  RCLCPP_INFO(LOGGER, "runScanAndSweep: building scan task.");
   auto sweep_task = createScanAndSweepTask(poses, nullptr);
 
   try {
@@ -987,7 +1025,8 @@ bool WordleBotController::runScanAndSweep(
   }
 
   if (!plan_result || sweep_task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: no solutions found for sweep task.");
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning failed — no solutions found.");
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: check above MTC stage tree for the failing stage.");
     return false;
   }
 
