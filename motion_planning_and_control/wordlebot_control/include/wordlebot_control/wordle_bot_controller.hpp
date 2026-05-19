@@ -129,6 +129,9 @@ public:
   // Execute a previously planned move-to-goal task. Returns true on SUCCESS.
   bool executePlannedMoveToGoal(PlannedMoveToGoal & planned);
 
+  // Plan and execute one goal pose using MoveGroupInterface. Used when USE_MTC_FOR_GOALS == false.
+  bool moveToGoal(const geometry_msgs::msg::Pose & goal_pose);
+
   // ---------------------------------------------------------------------------
   // Scan and Sweep
   // ---------------------------------------------------------------------------
@@ -191,6 +194,10 @@ public:
   // Constants
   // ---------------------------------------------------------------------------
 
+  // Change to false to use MoveGroupInterface sequential plan+execute per goal.
+  // Change to true  to use MTC plan-all-then-execute-all (existing behaviour).
+  static constexpr bool USE_MTC_FOR_GOALS = false;
+
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
   // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).
@@ -222,6 +229,27 @@ private:
   // Phase-split task builders for stop/resume-aware pick-and-place.
   moveit::task_constructor::Task createPickTask(const geometry_msgs::msg::Pose & object_pose);
   moveit::task_constructor::Task createPlaceTask();
+
+  // ---------------------------------------------------------------------------
+  // MoveGroupInterface goal-navigation helpers (USE_MTC_FOR_GOALS == false)
+  // ---------------------------------------------------------------------------
+
+  // Solve IK for target_pose. First 5 attempts seed from warm-start config;
+  // remaining 10 seed randomly. Applies 2π normalisation and wrist_3 [-π,π] clamp.
+  // No shoulder rejection. Returns best joint vector by movement+functional cost, or empty.
+  std::vector<double> computeBestIK(
+    const moveit::core::RobotStatePtr & current_state,
+    const geometry_msgs::msg::Pose & target_pose);
+
+  // Call move_group_.plan() num_attempts times and return all successful plans.
+  std::vector<moveit::planning_interface::MoveGroupInterface::Plan>
+  generateCandidatePlans(int num_attempts);
+
+  // Return the plan with the lowest computeTotalJointDisplacement cost.
+  // Returns a default-constructed (empty) plan if plans is empty.
+  moveit::planning_interface::MoveGroupInterface::Plan
+  selectBestPlan(
+    const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans);
 
   // ---------------------------------------------------------------------------
   // Member variables

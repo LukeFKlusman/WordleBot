@@ -879,6 +879,260 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
 }
 
 // ---------------------------------------------------------------------------
+// MoveGroupInterface Goal Navigation (USE_MTC_FOR_GOALS == false)
+// Sequential plan-then-execute per goal. Three private helpers feed into the
+// public moveToGoal entry point.
+// ---------------------------------------------------------------------------
+// computeBestIK         — IK with warm-start seeding, 2π normalisation,
+//                         wrist_3 clamping, no shoulder rejection
+// generateCandidatePlans — call move_group_.plan() N times, collect successes
+// selectBestPlan        — pick lowest-cost plan by computeTotalJointDisplacement
+// moveToGoal            — orchestrator: IK → set target → plan × 5 → best → execute
+// ---------------------------------------------------------------------------
+
+std::vector<double> WordleBotController::computeBestIK(
+  const moveit::core::RobotStatePtr & current_state,
+  const geometry_msgs::msg::Pose & target_pose)
+{
+  const std::string arm_group = "ur_onrobot_manipulator";
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup(arm_group);
+  if (jmg == nullptr) {
+    RCLCPP_ERROR(LOGGER, "computeBestIK: joint model group '%s' not found.", arm_group.c_str());
+    return {};
+  }
+  if (current_state == nullptr) {
+    RCLCPP_ERROR(LOGGER, "computeBestIK: current robot state is null.");
+    return {};
+  }
+  if (!jmg->getSolverInstance()) {
+    RCLCPP_ERROR(LOGGER, "computeBestIK: no kinematics solver loaded for group '%s'.", arm_group.c_str());
+    return {};
+  }
+
+  // Warm-start and functional-position config [shoulder_pan, shoulder_lift, elbow,
+  // wrist_1, wrist_2, wrist_3] = [65°, -90°, 90°, -90°, -90°, 65°]
+  static const std::vector<double> kWarmStart   = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
+  static const std::vector<double> kFuncPos     = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
+  static const std::vector<double> kFuncWeights = {0.3, 0.5, 0.5, 0.5, 0.3, 0.3};
+  static constexpr int kWarmAttempts  = 5;
+  static constexpr int kTotalAttempts = 15;
+
+  std::vector<double> current_joint_values;
+  current_state->copyJointGroupPositions(jmg, current_joint_values);
+
+  const auto & joint_names   = jmg->getVariableNames();
+  const auto & active_joints = jmg->getActiveJointModels();
+
+  std::vector<double> best_joint_values;
+  double best_cost  = std::numeric_limits<double>::infinity();
+  int ik_successes  = 0;
+
+  for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
+    moveit::core::RobotState ik_state(*current_state);
+
+    if (attempt < kWarmAttempts) {
+      ik_state.setJointGroupPositions(jmg, kWarmStart);
+      ik_state.update();
+    } else {
+      ik_state.setToRandomPositions(jmg);
+    }
+
+    if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1)) {
+      continue;
+    }
+    ++ik_successes;
+
+    std::vector<double> candidate;
+    ik_state.copyJointGroupPositions(jmg, candidate);
+
+    // 2π normalisation: map each revolute joint to the 2π-equivalent numerically
+    // closest to the current state, preventing huge spinning trajectories.
+    for (std::size_t i = 0; i < candidate.size() && i < active_joints.size(); ++i) {
+      if (active_joints[i]->getType() != moveit::core::JointModel::REVOLUTE) {
+        continue;
+      }
+      const double curr = current_joint_values[i];
+      const double raw  = candidate[i];
+      double best_norm  = raw;
+      double best_dist  = std::abs(raw - curr);
+      for (int k = -3; k <= 3; ++k) {
+        const double offset = raw + k * 2.0 * M_PI;
+        const double dist   = std::abs(offset - curr);
+        if (dist < best_dist && active_joints[i]->satisfiesPositionBounds(&offset)) {
+          best_dist = dist;
+          best_norm = offset;
+        }
+      }
+      candidate[i] = best_norm;
+    }
+
+    // Clamp wrist_3 to [-π, π]: UR RTDE reports wrist_3 in this range; values outside
+    // it cause a PATH_TOLERANCE_VIOLATED abort (2π position error) on the controller.
+    for (std::size_t i = 0; i < joint_names.size(); ++i) {
+      if (joint_names[i] == "wrist_3_joint" && i < candidate.size()) {
+        while (candidate[i] > M_PI)  candidate[i] -= 2.0 * M_PI;
+        while (candidate[i] < -M_PI) candidate[i] += 2.0 * M_PI;
+      }
+    }
+
+    double movement_cost      = 0.0;
+    double functional_penalty = 0.0;
+    for (std::size_t i = 0; i < candidate.size(); ++i) {
+      movement_cost += std::abs(candidate[i] - current_joint_values[i]);
+      if (i < kFuncPos.size()) {
+        const double d = candidate[i] - kFuncPos[i];
+        functional_penalty += kFuncWeights[i] * d * d;
+      }
+    }
+    const double cost = 2.0 * movement_cost + 0.3 * functional_penalty;
+
+    if (cost < best_cost) {
+      best_cost         = cost;
+      best_joint_values = candidate;
+    }
+  }
+
+  RCLCPP_INFO(LOGGER, "computeBestIK: %d/%d solutions found. Best cost: %.4f",
+    ik_successes, kTotalAttempts, best_cost);
+
+  if (best_joint_values.empty()) {
+    RCLCPP_ERROR(LOGGER,
+      "computeBestIK: no valid IK solution found for pose (x=%.3f y=%.3f z=%.3f).",
+      target_pose.position.x, target_pose.position.y, target_pose.position.z);
+  }
+  return best_joint_values;
+}
+
+std::vector<moveit::planning_interface::MoveGroupInterface::Plan>
+WordleBotController::generateCandidatePlans(int num_attempts)
+{
+  std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
+  plans.reserve(static_cast<std::size_t>(std::max(num_attempts, 0)));
+
+  RCLCPP_INFO(LOGGER, "generateCandidatePlans: generating %d plan attempts.", num_attempts);
+  int successes = 0;
+  for (int attempt = 0; attempt < num_attempts; ++attempt) {
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    const auto result = move_group_.plan(plan);
+    if (static_cast<bool>(result)) {
+      ++successes;
+      plans.push_back(plan);
+    } else {
+      RCLCPP_WARN(LOGGER, "generateCandidatePlans: attempt %d failed (error code %d).",
+        attempt, result.val);
+    }
+  }
+  RCLCPP_INFO(LOGGER, "generateCandidatePlans: %d/%d plans succeeded.", successes, num_attempts);
+  return plans;
+}
+
+moveit::planning_interface::MoveGroupInterface::Plan
+WordleBotController::selectBestPlan(
+  const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans)
+{
+  moveit::planning_interface::MoveGroupInterface::Plan best_plan;
+  double best_cost = std::numeric_limits<double>::infinity();
+
+  for (std::size_t i = 0; i < plans.size(); ++i) {
+    const double cost = computeTotalJointDisplacement(plans[i]);
+    RCLCPP_INFO(LOGGER, "selectBestPlan: plan %zu — cost=%.4f rad %s",
+      i, cost, cost < best_cost ? "(best so far)" : "(worse)");
+    if (cost < best_cost) {
+      best_cost = cost;
+      best_plan = plans[i];
+    }
+  }
+  RCLCPP_INFO(LOGGER, "selectBestPlan: best cost=%.4f rad total joint displacement.", best_cost);
+  return best_plan;
+}
+
+bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
+{
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER, "moveToGoal: stop requested — aborting before start.");
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER,
+    "moveToGoal: target pos (x=%.3f y=%.3f z=%.3f) quat (x=%.3f y=%.3f z=%.3f w=%.3f).",
+    goal_pose.position.x, goal_pose.position.y, goal_pose.position.z,
+    goal_pose.orientation.x, goal_pose.orientation.y,
+    goal_pose.orientation.z, goal_pose.orientation.w);
+
+  move_group_.setStartStateToCurrentState();
+  current_state = move_group_.getCurrentState(2.0);
+  if (!current_state) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: getCurrentState returned null — state monitor not ready.");
+    return false;
+  }
+
+  const std::string arm_group = "ur_onrobot_manipulator";
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup(arm_group);
+
+  // Log current joint state for diagnostics.
+  if (jmg) {
+    std::vector<double> q_start;
+    current_state->copyJointGroupPositions(jmg, q_start);
+    const auto & jnames = jmg->getVariableNames();
+    RCLCPP_INFO(LOGGER, "moveToGoal: current joint state (%zu joints):", q_start.size());
+    for (std::size_t i = 0; i < q_start.size() && i < jnames.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        jnames[i].c_str(), q_start[i], q_start[i] * 180.0 / M_PI);
+    }
+  }
+
+  const std::vector<double> best_q = computeBestIK(current_state, goal_pose);
+  if (best_q.empty()) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: IK failed — no valid solution found.");
+    return false;
+  }
+
+  // Log target joint values for diagnostics.
+  if (jmg) {
+    const auto & jnames = jmg->getVariableNames();
+    RCLCPP_INFO(LOGGER, "moveToGoal: target joint values (%zu joints):", best_q.size());
+    for (std::size_t i = 0; i < best_q.size() && i < jnames.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        jnames[i].c_str(), best_q[i], best_q[i] * 180.0 / M_PI);
+    }
+  }
+
+  // Seed the planner from the same state snapshot used for IK to avoid a race
+  // where the robot drifts slightly between getCurrentState and plan().
+  move_group_.setStartState(*current_state);
+  move_group_.setJointValueTarget(best_q);
+
+  const auto plans = generateCandidatePlans(5);
+  if (plans.empty()) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: all 5 planning attempts failed.");
+    return false;
+  }
+
+  const auto plan = selectBestPlan(plans);
+  if (plan.trajectory_.joint_trajectory.points.empty()) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: selectBestPlan returned an empty plan.");
+    return false;
+  }
+
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER, "moveToGoal: stop requested — aborting before execute.");
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "moveToGoal: executing plan (total_joint_disp=%.4f rad).",
+    computeTotalJointDisplacement(plan));
+
+  const auto exec_result = move_group_.execute(plan);
+  if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: execution failed (error code %d).", exec_result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "moveToGoal: goal reached.");
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Scan and Sweep
 // Four-pose camera scan sequence. Pose 1 is reached via free-space OMPL
 // (Connect + ComputeIK). Poses 2-4 are straight-line Cartesian sweeps

@@ -570,75 +570,114 @@ void WordleBotControlNode::missionLoop()
     } else {
       RCLCPP_INFO(LOGGER, "Goal mission: %zu goal(s) queued.", current_mission.size());
 
-      // ── Phase 1: Plan all goals sequentially, chaining via FixedState ────────
-      std::vector<WordleBotController::PlannedMoveToGoal> planned_goals;
-      planned_goals.reserve(current_mission.size());
-      bool planning_failed = false;
+      if constexpr (WordleBotController::USE_MTC_FOR_GOALS) {
+        // ── MTC path: plan-all-then-execute-all ──────────────────────────────
 
-      for (std::size_t i = 0; i < current_mission.size(); ++i) {
-        if (stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Goal planning: stop requested before goal %zu — aborting.", i + 1);
-          planning_failed = true;
-          break;
-        }
+        // ── Phase 1: Plan all goals sequentially, chaining via FixedState ────
+        std::vector<WordleBotController::PlannedMoveToGoal> planned_goals;
+        planned_goals.reserve(current_mission.size());
+        bool planning_failed = false;
 
-        const bool is_last = (i == current_mission.size() - 1);
-        planning_scene::PlanningScenePtr start_scene =
-            (i == 0) ? nullptr : planned_goals.back().end_scene;
-
-        RCLCPP_INFO(LOGGER, "Planning goal %zu of %zu (return_home=%s).",
-          i + 1, current_mission.size(), is_last ? "yes" : "no");
-
-        WordleBotController::PlannedMoveToGoal planned =
-            controller_->planMoveToGoal(current_mission[i], start_scene, is_last);
-
-        if (!planned.task) {
-          RCLCPP_ERROR(LOGGER, "Planning FAILED for goal %zu — aborting.", i + 1);
-          planning_failed = true;
-          break;
-        }
-
-        RCLCPP_INFO(LOGGER, "Planning succeeded for goal %zu of %zu.", i + 1, current_mission.size());
-        planned_goals.emplace_back(std::move(planned));
-      }
-
-      if (planned_goals.empty()) {
-        RCLCPP_ERROR(LOGGER, "Goal mission: no goals were successfully planned — aborting.");
-      } else {
-        if (planning_failed) {
-          RCLCPP_WARN(LOGGER, "Goal mission: %zu of %zu goals planned — executing partial mission.",
-            planned_goals.size(), current_mission.size());
-        } else {
-          RCLCPP_INFO(LOGGER, "Goal mission: all %zu goals planned — executing.", planned_goals.size());
-        }
-
-        // ── Phase 2: Execute all pre-planned goals in order ──────────────────
-        bool all_ok = true;
-        for (std::size_t i = 0; i < planned_goals.size(); ++i) {
+        for (std::size_t i = 0; i < current_mission.size(); ++i) {
           if (stop_requested_.load()) {
-            RCLCPP_INFO(LOGGER, "Goal execution: stop requested before goal %zu — aborting.", i + 1);
+            RCLCPP_INFO(LOGGER, "Goal planning: stop requested before goal %zu — aborting.", i + 1);
+            planning_failed = true;
+            break;
+          }
+
+          const bool is_last = (i == current_mission.size() - 1);
+          planning_scene::PlanningScenePtr start_scene =
+              (i == 0) ? nullptr : planned_goals.back().end_scene;
+
+          RCLCPP_INFO(LOGGER, "Planning goal %zu of %zu (return_home=%s).",
+            i + 1, current_mission.size(), is_last ? "yes" : "no");
+
+          WordleBotController::PlannedMoveToGoal planned =
+              controller_->planMoveToGoal(current_mission[i], start_scene, is_last);
+
+          if (!planned.task) {
+            RCLCPP_ERROR(LOGGER, "Planning FAILED for goal %zu — aborting.", i + 1);
+            planning_failed = true;
+            break;
+          }
+
+          RCLCPP_INFO(LOGGER, "Planning succeeded for goal %zu of %zu.", i + 1, current_mission.size());
+          planned_goals.emplace_back(std::move(planned));
+        }
+
+        if (planned_goals.empty()) {
+          RCLCPP_ERROR(LOGGER, "Goal mission: no goals were successfully planned — aborting.");
+        } else {
+          if (planning_failed) {
+            RCLCPP_WARN(LOGGER, "Goal mission: %zu of %zu goals planned — executing partial mission.",
+              planned_goals.size(), current_mission.size());
+          } else {
+            RCLCPP_INFO(LOGGER, "Goal mission: all %zu goals planned — executing.", planned_goals.size());
+          }
+
+          // ── Phase 2: Execute all pre-planned goals in order ────────────────
+          bool all_ok = true;
+          for (std::size_t i = 0; i < planned_goals.size(); ++i) {
+            if (stop_requested_.load()) {
+              RCLCPP_INFO(LOGGER, "Goal execution: stop requested before goal %zu — aborting.", i + 1);
+              all_ok = false;
+              break;
+            }
+
+            RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, planned_goals.size());
+
+            if (!controller_->executePlannedMoveToGoal(planned_goals[i]) || stop_requested_.load()) {
+              RCLCPP_ERROR(LOGGER, "Execution FAILED at goal %zu — stopping.", i + 1);
+              all_ok = false;
+              break;
+            }
+
+            goal_reached_pub_->publish(signal);
+            RCLCPP_INFO(LOGGER, "Goal %zu of %zu reached.", i + 1, planned_goals.size());
+          }
+
+          if (all_ok && !planning_failed && !stop_requested_.load()) {
+            mission_complete_pub_->publish(signal);
+            motion_complete_pub_->publish(signal);
+            RCLCPP_INFO(LOGGER, "Goal mission fully complete.");
+          } else {
+            RCLCPP_ERROR(LOGGER, "Goal mission did not complete fully.");
+          }
+        }
+
+      } else {
+        // ── MoveGroupInterface path: sequential plan+execute per goal ─────────
+
+        bool all_ok = true;
+        for (std::size_t i = 0; i < current_mission.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER, "Goal mission (MGI): stop requested before goal %zu — aborting.", i + 1);
             all_ok = false;
             break;
           }
 
-          RCLCPP_INFO(LOGGER, "Executing goal %zu of %zu.", i + 1, planned_goals.size());
+          RCLCPP_INFO(LOGGER, "Goal mission (MGI): executing goal %zu of %zu.",
+            i + 1, current_mission.size());
 
-          if (!controller_->executePlannedMoveToGoal(planned_goals[i]) || stop_requested_.load()) {
-            RCLCPP_ERROR(LOGGER, "Execution FAILED at goal %zu — stopping.", i + 1);
+          if (!controller_->moveToGoal(current_mission[i]) || stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER, "Goal mission (MGI): FAILED at goal %zu.", i + 1);
             all_ok = false;
             break;
           }
 
           goal_reached_pub_->publish(signal);
-          RCLCPP_INFO(LOGGER, "Goal %zu of %zu reached.", i + 1, planned_goals.size());
+          RCLCPP_INFO(LOGGER, "Goal mission (MGI): goal %zu of %zu reached.",
+            i + 1, current_mission.size());
         }
 
-        if (all_ok && !planning_failed && !stop_requested_.load()) {
+        if (all_ok && !stop_requested_.load()) {
+          RCLCPP_INFO(LOGGER, "Goal mission (MGI): returning to home.");
+          controller_->returnToHome();
           mission_complete_pub_->publish(signal);
           motion_complete_pub_->publish(signal);
-          RCLCPP_INFO(LOGGER, "Goal mission fully complete.");
+          RCLCPP_INFO(LOGGER, "Goal mission (MGI): fully complete.");
         } else {
-          RCLCPP_ERROR(LOGGER, "Goal mission did not complete fully.");
+          RCLCPP_ERROR(LOGGER, "Goal mission (MGI): did not complete fully.");
         }
       }
     }
