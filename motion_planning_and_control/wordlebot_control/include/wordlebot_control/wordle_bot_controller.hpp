@@ -18,6 +18,7 @@
 #include <moveit_visual_tools/moveit_visual_tools.h>
 #include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/joint_constraint.hpp>
+#include <moveit_msgs/msg/orientation_constraint.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
 
 #include <moveit/task_constructor/task.h>

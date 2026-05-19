@@ -141,6 +141,7 @@ def launch_setup(context, *args, **kwargs):
 
     pkg_share = get_package_share_directory("wordlebot_control")
     scan_sweep_params = os.path.join(pkg_share, "config", "scan_sweep_poses.yaml")
+    ik_warm_start_params = os.path.join(pkg_share, "config", "ik_warm_start.yaml")
 
     common_parameters = [
         robot_description,
@@ -149,6 +150,7 @@ def launch_setup(context, *args, **kwargs):
         robot_description_planning,
         ompl_planning_pipeline_config,
         scan_sweep_params,
+        ik_warm_start_params,
     ]
 
     mtc_demo_node = Node(

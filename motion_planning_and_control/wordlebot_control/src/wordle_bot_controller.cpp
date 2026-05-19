@@ -299,7 +299,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(0.20);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -366,9 +366,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       auto wrapper =
         std::make_unique<mtc::stages::ComputeIK>("grasp pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(8);
+      wrapper->setMaxIKSolutions(32);
       wrapper->setMinSolutionDistance(1.0);
       wrapper->setIKFrame(grasp_frame_transform, hand_frame);
+      wrapper->setProperty("default_pose", std::string("test_configuration"));
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
       grasp->insert(std::move(wrapper));
@@ -439,7 +440,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         {arm_group, sampling_planner}});
     stage->setTimeout(0.20);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(stage));
   }
 
@@ -473,9 +474,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       auto wrapper =
         std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(4);
+      wrapper->setMaxIKSolutions(32);
       wrapper->setMinSolutionDistance(1.0);
       wrapper->setIKFrame(object_id);
+      wrapper->setProperty("default_pose", std::string("test_configuration"));
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
       wrapper->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
       place->insert(std::move(wrapper));
@@ -776,7 +778,7 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
 
   const std::string arm_group = "ur_onrobot_manipulator";
 
-  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+  auto sampling_planner = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
   auto task = std::make_unique<mtc::Task>();
@@ -792,14 +794,17 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
     task->add(std::move(fixed));
   }
 
-  auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
-  stage->setGroup(arm_group);
-  geometry_msgs::msg::PoseStamped goal_stamped;
-  goal_stamped.header.frame_id = "world";
-  goal_stamped.pose = goal_pose;
-  stage->setGoal(goal_stamped);
-  stage->setPathConstraints(buildPathConstraints());
-  task->add(std::move(stage));
+  {
+    geometry_msgs::msg::PoseStamped goal_stamped;
+    goal_stamped.header.frame_id = "world";
+    goal_stamped.pose = goal_pose;
+
+    auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
+    stage->setGroup(arm_group);
+    stage->setGoal(goal_stamped);
+    // stage->setPathConstraints(buildPathConstraints());
+    task->add(std::move(stage));
+  }
 
   if (include_return_home) {
     auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
@@ -817,7 +822,7 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
 
   moveit::core::MoveItErrorCode plan_result;
   try {
-    plan_result = task->plan(5);
+    plan_result = task->plan(100);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER, "planMoveToGoal: planning threw: " << e);
     return result;
@@ -923,14 +928,14 @@ mtc::Task WordleBotController::createScanAndSweepTask(
     }
   }
 
-  // Stage 2: free-space OMPL move toward scan pose 1 — mirrors "move to pick" in pick-and-place.
+  // Stage 3: free-space OMPL move toward scan pose 1 — mirrors "move to pick" in pick-and-place.
   {
     auto connect = std::make_unique<mtc::stages::Connect>(
       "move to scan 1",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     connect->setTimeout(0.2);
     connect->properties().configureInitFrom(mtc::Stage::PARENT);
-    connect->setPathConstraints(WordleBotController::buildPathConstraints());
+    // connect->setPathConstraints(WordleBotController::buildPathConstraints());
     task.add(std::move(connect));
   }
 
@@ -947,6 +952,7 @@ mtc::Task WordleBotController::createScanAndSweepTask(
     ik->setMaxIKSolutions(32);
     ik->setMinSolutionDistance(0.1);
     ik->setIKFrame(hand_frame);
+    ik->setProperty("default_pose", std::string("test_configuration"));
     ik->properties().configureInitFrom(mtc::Stage::PARENT, {"group", "eef"});
     ik->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
     task.add(std::move(ik));
@@ -1263,5 +1269,23 @@ double WordleBotController::computeTotalJointDisplacement(
 moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 {
   moveit_msgs::msg::Constraints constraints;
+
+  // Keep the gripper facing straight down throughout all transit moves.
+  // This shrinks OMPL's search space significantly, preventing tumbling and
+  // reducing joint excursions on free-space Connect/MoveTo stages.
+  // Tolerances allow small tilts (±0.4 rad ≈ ±23°) but keep yaw free (±π).
+  moveit_msgs::msg::OrientationConstraint oc;
+  oc.header.frame_id = "world";
+  oc.link_name = "gripper_tcp";
+  oc.orientation.x = 1.0;        // roll=π → gripper Z-axis points straight down
+  oc.orientation.y = 0.0;
+  oc.orientation.z = 0.0;
+  oc.orientation.w = 0.0;
+  oc.absolute_x_axis_tolerance = 0.4;
+  oc.absolute_y_axis_tolerance = 0.4;
+  oc.absolute_z_axis_tolerance = M_PI;
+  oc.weight = 1.0;
+
+  constraints.orientation_constraints.push_back(oc);
   return constraints;
 }
