@@ -586,7 +586,7 @@ WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
               entry.object_id.c_str());
   moveit::core::MoveItErrorCode plan_result;
   try {
-    plan_result = result.task->plan(5);
+    plan_result = result.task->plan(15);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER,
       "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
@@ -718,7 +718,7 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
   RCLCPP_INFO(LOGGER, "doPickAndPlace: planning...");
   moveit::core::MoveItErrorCode plan_result;
   try {
-    plan_result = task.plan(5);
+    plan_result = task.plan(15);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER, "MTC task planning threw InitStageException: " << e);
     return false;
@@ -776,92 +776,63 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
 
   const std::string arm_group = "ur_onrobot_manipulator";
 
-  constexpr int NUM_PLANNING_ATTEMPTS = 5;
-  std::unique_ptr<mtc::Task> best_task;
-  const mtc::SolutionBase * best_solution_ptr = nullptr;
-  double best_cost = std::numeric_limits<double>::infinity();
+  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  for (int attempt = 1; attempt <= NUM_PLANNING_ATTEMPTS; ++attempt) {
-    auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
-    auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+  auto task = std::make_unique<mtc::Task>();
+  task->stages()->setName("move to goal");
+  task->loadRobotModel(node_);
+  task->setProperty("group", arm_group);
 
-    auto task = std::make_unique<mtc::Task>();
-    task->stages()->setName("move to goal");
-    task->loadRobotModel(node_);
-    task->setProperty("group", arm_group);
-
-    if (start_scene == nullptr) {
-      task->add(std::make_unique<mtc::stages::CurrentState>("current state"));
-    } else {
-      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed state");
-      fixed->setState(start_scene);
-      task->add(std::move(fixed));
-    }
-
-    auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
-    stage->setGroup(arm_group);
-    geometry_msgs::msg::PoseStamped goal_stamped;
-    goal_stamped.header.frame_id = "world";
-    goal_stamped.pose = goal_pose;
-    stage->setGoal(goal_stamped);
-    stage->setPathConstraints(buildPathConstraints());
-    task->add(std::move(stage));
-
-    if (include_return_home) {
-      auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-      home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      home->setGoal("home");
-      task->add(std::move(home));
-    }
-
-    try {
-      task->init();
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": task init failed: " << e);
-      continue;
-    }
-
-    moveit::core::MoveItErrorCode plan_result;
-    try {
-      plan_result = task->plan(1);
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoal attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": planning threw: " << e);
-      continue;
-    }
-
-    if (!plan_result || task->solutions().empty()) {
-      RCLCPP_WARN(LOGGER, "planMoveToGoal attempt %d/%d: no solution found.",
-        attempt, NUM_PLANNING_ATTEMPTS);
-      continue;
-    }
-
-    double cost = task->solutions().front()->cost();
-    RCLCPP_INFO(LOGGER, "planMoveToGoal attempt %d/%d: solution found, cost=%.3f.",
-      attempt, NUM_PLANNING_ATTEMPTS, cost);
-
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_task = std::move(task);
-      best_solution_ptr = best_task->solutions().front().get();
-    }
+  if (start_scene == nullptr) {
+    task->add(std::make_unique<mtc::stages::CurrentState>("current state"));
+  } else {
+    auto fixed = std::make_unique<mtc::stages::FixedState>("fixed state");
+    fixed->setState(start_scene);
+    task->add(std::move(fixed));
   }
 
-  if (!best_task) {
-    RCLCPP_ERROR(LOGGER, "planMoveToGoal: no solutions found across %d attempts.",
-      NUM_PLANNING_ATTEMPTS);
+  auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal", sampling_planner);
+  stage->setGroup(arm_group);
+  geometry_msgs::msg::PoseStamped goal_stamped;
+  goal_stamped.header.frame_id = "world";
+  goal_stamped.pose = goal_pose;
+  stage->setGoal(goal_stamped);
+  stage->setPathConstraints(buildPathConstraints());
+  task->add(std::move(stage));
+
+  if (include_return_home) {
+    auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+    home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
+    home->setGoal("home");
+    task->add(std::move(home));
+  }
+
+  try {
+    task->init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "planMoveToGoal: task init failed: " << e);
     return result;
   }
 
-  result.task = std::move(best_task);
-  result.best_solution = best_solution_ptr;
+  moveit::core::MoveItErrorCode plan_result;
+  try {
+    plan_result = task->plan(5);
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "planMoveToGoal: planning threw: " << e);
+    return result;
+  }
 
-  RCLCPP_INFO(LOGGER,
-    "planMoveToGoal: planning succeeded — best cost=%.3f across %d attempts.",
-    result.best_solution->cost(), NUM_PLANNING_ATTEMPTS);
+  if (!plan_result || task->solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "planMoveToGoal: no solution found.");
+    return result;
+  }
+
+  result.task = std::move(task);
+  result.best_solution = result.task->solutions().front().get();
+
+  RCLCPP_INFO(LOGGER, "planMoveToGoal: planning succeeded — cost=%.3f.",
+    result.best_solution->cost());
 
   if (result.best_solution->end() != nullptr) {
     result.end_scene = planning_scene::PlanningScene::clone(
@@ -904,186 +875,136 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
 
 // ---------------------------------------------------------------------------
 // Scan and Sweep
-// Cartesian move-to-goal planning and the four-pose camera scan sequence.
-// Pose 0 is reached via free-space OMPL planning; poses 1-3 are Cartesian
-// straight-line moves chained from the previous pose's terminal scene.
+// Four-pose camera scan sequence using a unified MTC task for poses 1-3.
+// Pose 0 is reached via free-space OMPL planning. Poses 1-3 are planned as a
+// single MTC task with ComputeIK(GeneratePose) generator stages interleaved
+// with Connect(CartesianPath) connector stages, giving the planner multiple
+// IK configurations to try at each scan pose (same pattern as pick-and-place).
 // ---------------------------------------------------------------------------
-// planMoveToGoalCartesian — plan a Cartesian (straight-line) move to a goal
-//                           pose using the CartesianPath solver
-// runScanAndSweep         — execute the full four-pose scan sequence with a
-//                           configurable dwell time at each pose
+// createScanAndSweepTask — build the unified MTC task for poses 1-3
+// runScanAndSweep        — execute the full four-pose scan sequence
 // ---------------------------------------------------------------------------
 
-WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoalCartesian(
-  const geometry_msgs::msg::Pose & goal_pose,
+mtc::Task WordleBotController::createScanAndSweepTask(
+  const std::vector<geometry_msgs::msg::Pose> & scan_poses,
   const planning_scene::PlanningScenePtr & start_scene)
 {
-  PlannedMoveToGoal result;
-
-  RCLCPP_INFO(LOGGER,
-    "planMoveToGoalCartesian: building task (start=%s).",
-    start_scene ? "FixedState(chained)" : "CurrentState(live)");
-
   const std::string arm_group = "ur_onrobot_manipulator";
+  const std::string hand_frame = "gripper_tcp";
 
-  constexpr int NUM_PLANNING_ATTEMPTS = 5;
-  std::unique_ptr<mtc::Task> best_task;
-  const mtc::SolutionBase * best_solution_ptr = nullptr;
-  double best_cost = std::numeric_limits<double>::infinity();
+  auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
+  cartesian_planner->setMaxVelocityScalingFactor(0.5);
+  cartesian_planner->setMaxAccelerationScalingFactor(0.5);
+  cartesian_planner->setStepSize(0.001);
 
-  for (int attempt = 1; attempt <= NUM_PLANNING_ATTEMPTS; ++attempt) {
-    auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
-    cartesian_planner->setMaxVelocityScalingFactor(0.5);
-    cartesian_planner->setMaxAccelerationScalingFactor(0.5);
-    cartesian_planner->setStepSize(0.001);
+  mtc::Task task;
+  task.stages()->setName("scan and sweep");
+  task.loadRobotModel(node_);
+  task.setProperty("group", arm_group);
+  task.setProperty("ik_frame", hand_frame);
 
-    auto task = std::make_unique<mtc::Task>();
-    task->stages()->setName("move to goal cartesian");
-    task->loadRobotModel(node_);
-    task->setProperty("group", arm_group);
-
+  // Stage 1: CurrentState (first scan, no prior pose) or FixedState (chained).
+  // Kept as a raw pointer so GeneratePose stages can monitor it.
+  mtc::Stage * fixed_state_ptr = nullptr;
+  {
     if (start_scene == nullptr) {
-      task->add(std::make_unique<mtc::stages::CurrentState>("current state"));
+      auto current = std::make_unique<mtc::stages::CurrentState>("current state");
+      fixed_state_ptr = current.get();
+      task.add(std::move(current));
     } else {
-      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed state");
+      auto fixed = std::make_unique<mtc::stages::FixedState>("fixed start");
       fixed->setState(start_scene);
-      task->add(std::move(fixed));
-    }
-
-    auto stage = std::make_unique<mtc::stages::MoveTo>("move to goal cartesian", cartesian_planner);
-    stage->setGroup(arm_group);
-    geometry_msgs::msg::PoseStamped goal_stamped;
-    goal_stamped.header.frame_id = "world";
-    goal_stamped.pose = goal_pose;
-    stage->setGoal(goal_stamped);
-    task->add(std::move(stage));
-
-    try {
-      task->init();
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoalCartesian attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": task init failed: " << e);
-      continue;
-    }
-
-    moveit::core::MoveItErrorCode plan_result;
-    try {
-      plan_result = task->plan(1);
-    } catch (const mtc::InitStageException & e) {
-      RCLCPP_ERROR_STREAM(LOGGER,
-        "planMoveToGoalCartesian attempt " << attempt << "/" << NUM_PLANNING_ATTEMPTS
-        << ": planning threw: " << e);
-      continue;
-    }
-
-    if (!plan_result || task->solutions().empty()) {
-      RCLCPP_WARN(LOGGER, "planMoveToGoalCartesian attempt %d/%d: no solution found.",
-        attempt, NUM_PLANNING_ATTEMPTS);
-      continue;
-    }
-
-    double cost = task->solutions().front()->cost();
-    RCLCPP_INFO(LOGGER, "planMoveToGoalCartesian attempt %d/%d: solution found, cost=%.3f.",
-      attempt, NUM_PLANNING_ATTEMPTS, cost);
-
-    if (cost < best_cost) {
-      best_cost = cost;
-      best_task = std::move(task);
-      best_solution_ptr = best_task->solutions().front().get();
+      fixed_state_ptr = fixed.get();
+      task.add(std::move(fixed));
     }
   }
 
-  if (!best_task) {
-    RCLCPP_ERROR(LOGGER, "planMoveToGoalCartesian: no solutions found across %d attempts.",
-      NUM_PLANNING_ATTEMPTS);
-    return result;
+  // For each scan pose (1-3): Connect(CartesianPath) then ComputeIK(GeneratePose).
+  // The Connect stage plans a straight-line Cartesian path to whichever IK solution
+  // the ComputeIK generator produces (up to 8 alternatives per pose).
+  for (size_t i = 0; i < scan_poses.size(); ++i) {
+    {
+      auto connect = std::make_unique<mtc::stages::Connect>(
+        "move to scan " + std::to_string(i + 1),
+        mtc::stages::Connect::GroupPlannerVector{{arm_group, cartesian_planner}});
+      connect->setTimeout(5.0);
+      connect->properties().configureInitFrom(mtc::Stage::PARENT);
+      task.add(std::move(connect));
+    }
+
+    {
+      auto gen_pose = std::make_unique<mtc::stages::GeneratePose>(
+        "generate scan pose " + std::to_string(i + 1));
+      geometry_msgs::msg::PoseStamped target;
+      target.header.frame_id = "world";
+      target.pose = scan_poses[i];
+      gen_pose->setPose(target);
+      gen_pose->setMonitoredStage(fixed_state_ptr);
+
+      auto ik = std::make_unique<mtc::stages::ComputeIK>(
+        "scan pose " + std::to_string(i + 1) + " IK", std::move(gen_pose));
+      ik->setMaxIKSolutions(8);
+      ik->setMinSolutionDistance(1.0);
+      ik->setIKFrame(hand_frame);
+      ik->properties().configureInitFrom(mtc::Stage::PARENT, {"group", "eef"});
+      ik->properties().configureInitFrom(mtc::Stage::INTERFACE, {"target_pose"});
+      task.add(std::move(ik));
+    }
   }
 
-  result.task = std::move(best_task);
-  result.best_solution = best_solution_ptr;
-
-  RCLCPP_INFO(LOGGER,
-    "planMoveToGoalCartesian: planning succeeded — best cost=%.3f across %d attempts.",
-    result.best_solution->cost(), NUM_PLANNING_ATTEMPTS);
-
-  if (result.best_solution->end() != nullptr) {
-    result.end_scene = planning_scene::PlanningScene::clone(
-      result.best_solution->end()->scene());
-  } else {
-    RCLCPP_WARN(LOGGER, "planMoveToGoalCartesian: solution end state is null — chaining may fail.");
-  }
-
-  return result;
+  return task;
 }
 
 bool WordleBotController::runScanAndSweep(
-  const std::vector<geometry_msgs::msg::Pose> & poses,
-  double dwell_time_seconds)
+  const std::vector<geometry_msgs::msg::Pose> & poses)
 {
   if (poses.size() != 4) {
     RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 4 poses, got %zu.", poses.size());
     return false;
   }
 
-  const auto dwell = std::chrono::duration<double>(dwell_time_seconds);
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: starting (dwell=%.2f s).", dwell_time_seconds);
+  RCLCPP_INFO(LOGGER, "runScanAndSweep: starting.");
 
-  // ── Pose 0: free-space move to starting scan position ────────────────────
+  // ── All 4 poses: unified MTC scan-and-sweep task from current robot state ─
   if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning pose 0 (OMPL free-space).");
-  auto planned0 = planMoveToGoal(poses[0], nullptr, false);
-  if (!planned0.task) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning pose 0 failed.");
-    return false;
-  }
-  if (!executePlannedMoveToGoal(planned0)) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: execution to pose 0 failed.");
-    return false;
-  }
-  rclcpp::sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(dwell));
+  RCLCPP_INFO(LOGGER, "runScanAndSweep: building unified scan task for all 4 poses.");
+  auto sweep_task = createScanAndSweepTask(poses, nullptr);
 
-  // ── Pose 1: Cartesian sweep ───────────────────────────────────────────────
-  if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning pose 1 (Cartesian).");
-  auto planned1 = planMoveToGoalCartesian(poses[1], planned0.end_scene);
-  if (!planned1.task) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning pose 1 failed.");
+  try {
+    sweep_task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep: sweep task init failed: " << e);
     return false;
   }
-  if (!executePlannedMoveToGoal(planned1)) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: execution to pose 1 failed.");
-    return false;
-  }
-  rclcpp::sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(dwell));
 
-  // ── Pose 2: Cartesian sweep ───────────────────────────────────────────────
-  if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning pose 2 (Cartesian).");
-  auto planned2 = planMoveToGoalCartesian(poses[2], planned1.end_scene);
-  if (!planned2.task) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning pose 2 failed.");
+  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning sweep (all 4 poses).");
+  moveit::core::MoveItErrorCode plan_result;
+  try {
+    plan_result = sweep_task.plan(15);
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep: sweep task planning threw: " << e);
     return false;
   }
-  if (!executePlannedMoveToGoal(planned2)) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: execution to pose 2 failed.");
-    return false;
-  }
-  rclcpp::sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(dwell));
 
-  // ── Pose 3: Cartesian sweep ───────────────────────────────────────────────
+  if (!plan_result || sweep_task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: no solutions found for sweep task.");
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER,
+    "runScanAndSweep: sweep task planned — %zu solution(s), best cost=%.3f. Executing.",
+    sweep_task.solutions().size(), sweep_task.solutions().front()->cost());
+
+  sweep_task.introspection().publishSolution(*sweep_task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
   if (stop_requested_.load()) { return false; }
-  RCLCPP_INFO(LOGGER, "runScanAndSweep: planning pose 3 (Cartesian).");
-  auto planned3 = planMoveToGoalCartesian(poses[3], planned2.end_scene);
-  if (!planned3.task) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: planning pose 3 failed.");
+  const auto exec_result = sweep_task.execute(*sweep_task.solutions().front());
+  if (exec_result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: sweep execution failed (error code %d).",
+      exec_result.val);
     return false;
   }
-  if (!executePlannedMoveToGoal(planned3)) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: execution to pose 3 failed.");
-    return false;
-  }
-  rclcpp::sleep_for(std::chrono::duration_cast<std::chrono::nanoseconds>(dwell));
 
   // ── Return home ───────────────────────────────────────────────────────────
   RCLCPP_INFO(LOGGER, "runScanAndSweep: returning to home.");
@@ -1128,7 +1049,7 @@ bool WordleBotController::returnToHome()
     return false;
   }
 
-  if (!task.plan(5) || task.solutions().empty()) {
+  if (!task.plan(15) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
     return false;
   }
@@ -1170,7 +1091,7 @@ bool WordleBotController::openGripper()
     return false;
   }
 
-  if (!task.plan(5) || task.solutions().empty()) {
+  if (!task.plan(15) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
     return false;
   }
@@ -1212,7 +1133,7 @@ bool WordleBotController::closeGripper()
     return false;
   }
 
-  if (!task.plan(5) || task.solutions().empty()) {
+  if (!task.plan(15) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
     return false;
   }

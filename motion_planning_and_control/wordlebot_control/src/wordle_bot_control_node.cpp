@@ -405,7 +405,7 @@ void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::Share
 
   std::thread([this, poses, dwell]() {
     controller_->runScanAndSweep(
-      std::vector<geometry_msgs::msg::Pose>(poses.begin(), poses.end()), dwell);
+      std::vector<geometry_msgs::msg::Pose>(poses.begin(), poses.end()));
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       mission_running_ = false;

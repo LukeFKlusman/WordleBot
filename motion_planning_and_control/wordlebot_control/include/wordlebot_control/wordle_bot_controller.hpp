@@ -132,17 +132,19 @@ public:
   // Scan and Sweep
   // ---------------------------------------------------------------------------
 
-  // Plan a Cartesian (straight-line) move to an absolute goal pose using the CartesianPath solver.
-  // Mirrors planMoveToGoal but replaces the OMPL sampling planner with CartesianPath.
-  // start_scene: nullptr → CurrentState; non-null → FixedState (chained).
-  PlannedMoveToGoal planMoveToGoalCartesian(const geometry_msgs::msg::Pose & goal_pose,
-                                             const planning_scene::PlanningScenePtr & start_scene);
+  // Build a unified MTC task for the three Cartesian scan poses (poses[1..3]).
+  // Uses alternating Connect(CartesianPath) + ComputeIK(GeneratePose) stages so
+  // the planner can explore multiple IK configurations at each scan pose.
+  // start_scene must be the terminal scene from executing pose 0.
+  moveit::task_constructor::Task createScanAndSweepTask(
+    const std::vector<geometry_msgs::msg::Pose> & scan_poses,
+    const planning_scene::PlanningScenePtr & start_scene);
 
-  // Execute the full scan-and-sweep sequence using the provided poses and dwell time.
-  // poses[0] is reached via free-space planning; poses[1..3] via Cartesian moves.
-  // Dwells dwell_time_seconds at each pose, then returns to home.
-  bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses,
-                       double dwell_time_seconds);
+  // Execute the full scan-and-sweep sequence.
+  // poses[0] is reached via free-space OMPL planning; poses[1..3] via a single
+  // unified MTC task with IK solving between each Cartesian segment.
+  // Returns home after the sweep completes.
+  bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses);
 
   // ---------------------------------------------------------------------------
   // Standalone Arm Motions
