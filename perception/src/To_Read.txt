@@ -69,11 +69,16 @@ SOFTWARE DEPENDENCIES
   |-- hl_control                Connor's custom message package
                                 (see HL_CONTROL section below)
 
-  Python packages (pip install)
+ Python packages — inference node (pip install)
   |-- torch / torchvision       CNN inference
   |-- opencv-python             Image processing
   |-- numpy                     Array maths
-  |-- mediapipe                 Human detection (disabled by default)
+  |-- mediapipe                 Human detection (required even if disabled)
+
+  Python packages — training only (pip install)
+  |-- scikit-learn              Per-class accuracy report and confusion matrix
+  |-- matplotlib                Training curves and confusion matrix plots
+  |-- seaborn                   Confusion matrix heatmap styling
 
 
 ================================================================================
@@ -173,45 +178,182 @@ WHAT "LATCHED" MEANS
 STARTUP ORDER
 ================================================================================
 
-  Run each command in a separate terminal in this order:
+  Run each command in a separate terminal in this order.
+  Expected terminal output is shown under each command.
 
+  ─────────────────────────────────────────────────────────────────────────────
   TERMINAL 1 — RealSense camera driver
-  -------------------------------------
-  ros2 launch realsense2_camera rs_launch.py \
-      enable_depth:=true \
-      align_depth.enable:=true
+  ─────────────────────────────────────────────────────────────────────────────
 
-  Wait for: "RealSense camera started" in the terminal output.
+  COMMAND:
+    ros2 launch realsense2_camera rs_launch.py \
+        enable_depth:=true \
+        align_depth.enable:=true
 
-  TERMINAL 2 — UR3e robot driver (Connor's responsibility)
-  ---------------------------------------------------------
-  ros2 launch ur_onrobot_control start_robot.launch.py \
-      ur_type:=ur3e \
-      onrobot_type:=rg2 \
-      robot_ip:=192.168.0.191 \
-      launch_rviz:=false
+  EXPECTED OUTPUT (may differ slightly by driver version):
+    [INFO] [realsense2_camera_node]: RealSense ROS v4.x.x
+    [INFO] [realsense2_camera_node]: Built with LibRealSense v2.x.x
+    [INFO] [realsense2_camera_node]: Running with LibRealSense v2.x.x
+    [INFO] [realsense2_camera_node]: Device with serial number ... found.
+    [INFO] [realsense2_camera_node]: Device USB type: 3.x
+    [INFO] [realsense2_camera_node]: Enabling Depth stream: ...
+    [INFO] [realsense2_camera_node]: Enabling Color stream: ...
+    [INFO] [realsense2_camera_node]: RealSense Node Is Up!
 
-  This starts robot_state_publisher which broadcasts the full UR3e TF tree.
-  Required before world-frame coordinates will be accurate.
+  WAIT FOR: "RealSense Node Is Up!" before continuing.
 
+  IF YOU SEE INSTEAD:
+    "No RealSense devices were found!" — USB not connected or not USB 3.0 port.
+    "LIBUSB_ERROR_ACCESS"             — run: sudo chmod 666 /dev/bus/usb/*/*
+    Node exits immediately             — unplug and replug the camera.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  TERMINAL 2 — UR3e robot driver  (Connor's responsibility)
+  ─────────────────────────────────────────────────────────────────────────────
+
+  COMMAND:
+    ros2 launch ur_onrobot_control start_robot.launch.py \
+        ur_type:=ur3e \
+        onrobot_type:=rg2 \
+        robot_ip:=192.168.0.191 \
+        launch_rviz:=false
+
+  EXPECTED OUTPUT:
+    [INFO] [robot_state_publisher]: Robot state publisher started
+    [INFO] [ur_ros2_control_node]: Loaded ur_controllers/...
+    [INFO] [controller_manager]: Loading controller: joint_state_broadcaster
+    [INFO] [controller_manager]: Configured and activated joint_state_broadcaster
+
+  WAIT FOR: "joint_state_broadcaster" active and no error lines.
+
+  NOTE: This is what publishes the UR3e TF tree. Without it, perception will
+  still detect blocks and publish camera-frame coordinates, but world-frame
+  transforms will fail and gameboard_state will fall back to camera frame.
+  The perception node logs a warning if this happens — it is not fatal.
+
+  ─────────────────────────────────────────────────────────────────────────────
   TERMINAL 3 — Perception node
-  -----------------------------
-  cd perception/src
-  python3 realsense_camera_cnn.py
+  ─────────────────────────────────────────────────────────────────────────────
 
-  On startup the node will:
-    1. Load the CNN model from ../outputs/letter_cnn.pt
-    2. Broadcast the static TF: gripper_tcp -> camera_color_optical_frame
-    3. Begin listening to camera topics
-    4. Open the live display window
+  COMMAND:
+    cd ~/Documents/RS2/perception/src
+    python3 realsense_camera_cnn.py
 
-  TERMINAL 4 — (optional) Verify TF chain is complete
-  -----------------------------------------------------
-  ros2 run tf2_tools view_frames
-  # Generates frames.pdf — check camera_color_optical_frame appears under gripper_tcp
+  EXPECTED OUTPUT (successful startup):
+    [INFO] [realsense_cnn_node]: [CNN] Loaded outputs/letter_cnn.pt  (36 classes)
+    [INFO] [realsense_cnn_node]: [TF] Static TF broadcast: gripper_tcp -> camera_color_optical_frame
+    [INFO] [realsense_cnn_node]: Perception node ready.
+      Publishing:  /perception/human_detected  /perception/status
+                   /perception/detections  /perception/gameboard_state  /tf_static
+      Subscribing: /camera/camera/color/image_raw
+                   /camera/camera/aligned_depth_to_color/image_raw
+                   /mission/state
+    [INFO] [realsense_cnn_node]: [Camera] First depth frame received
+    [INFO] [realsense_cnn_node]: [Camera] First colour frame received — starting display
 
-  ros2 run tf2_ros tf2_echo world camera_color_optical_frame
-  # Prints live transform — values should reflect robot pose, not zeros
+  A live display window opens showing the camera feed. The HUD reads "MOVING - STANDBY"
+  until you press SPACEBAR.
+
+  IF YOU SEE INSTEAD:
+    "WARNING: letter_cnn.pt not found"
+        Model file missing. Run train_letter_cnn.py first.
+        Node continues in fallback mode — all detections show "?".
+
+    "hl_control not available — /perception/gameboard_state will not be published"
+        hl_control hasn't been built. See HL_CONTROL section above.
+        All other topics still work normally.
+
+    "[TF] camera->world lookup failed"
+        Robot driver (Terminal 2) is not running yet. Not a crash — the node
+        retries every scan. Once the driver starts, lookups succeed automatically.
+
+    No display window / node crashes at startup
+        cv2.imshow() fails if DISPLAY is not set (SSH without -X flag).
+        Run in a local terminal, not over SSH.
+
+  ─────────────────────────────────────────────────────────────────────────────
+  TERMINAL 4 — (optional) Verify topics are live
+  ─────────────────────────────────────────────────────────────────────────────
+
+  Verify detections are publishing (press SPACEBAR in perception window first):
+
+    COMMAND:
+      ros2 topic echo /perception/detections
+
+    EXPECTED OUTPUT (blocks visible, AT POSITION):
+      data: '{"blocks": [{"letter": "A", "conf": 94.2, "x_m": 0.041,
+              "y_m": -0.023, "z_m": 0.382, "theta_deg": 5.0}]}'
+      ---
+      data: '{"blocks": [{"letter": "A", ...}]}'
+      ---
+
+    EXPECTED OUTPUT (MOVING / not at position):
+      (no output — detections only publish when AT POSITION)
+
+  Verify TF chain is complete:
+
+    COMMAND:
+      ros2 run tf2_tools view_frames
+
+    EXPECTED OUTPUT:
+      Listening to tf data during 5 seconds...
+      Generating graph in frames.pdf ...
+
+    Open frames.pdf and check camera_color_optical_frame appears as a child
+    of gripper_tcp, which should itself be under base_link.
+
+    COMMAND:
+      ros2 run tf2_ros tf2_echo world camera_color_optical_frame
+
+    EXPECTED OUTPUT (robot driver running, robot stationary):
+      At time 0.0
+      - Translation: [0.123, 0.456, 0.789]
+      - Rotation: in Quaternion [0.001, -0.002, 0.003, 0.999]
+      ...
+
+    IF YOU SEE INSTEAD:
+      "Could not find a connection between 'world' and 'camera_color_optical_frame'"
+        Robot driver not running, or static TF not broadcast yet.
+        Check Terminal 2 and Terminal 3 are both running.
+
+
+================================================================================
+DURING A SCAN — WHAT TO EXPECT
+================================================================================
+
+  1. Press SPACEBAR in the display window to enter AT POSITION mode.
+
+     Terminal 3 logs:
+       [INFO] [realsense_cnn_node]: [Trigger] -> AT POSITION
+
+     Display window HUD changes from "MOVING - STANDBY" to "AT POSITION - READING".
+
+  2. Hold letter blocks in front of the camera. After FRAMES_TO_AVERAGE (15)
+     consistent frames, each block is reported.
+
+     Terminal 3 logs (every ~1 Hz, only when blocks detected):
+       [INFO] [realsense_cnn_node]: [Detections]
+         A 94%  cam=(0.041, -0.023, 0.382)  world=(0.183, 0.312, 0.025)  theta=5.0deg
+         B 87%  cam=(-0.031, -0.019, 0.391)  world=(0.102, 0.318, 0.024)  theta=-3.1deg
+
+     /perception/detections topic publishes continuously at ~30 Hz.
+     Terminal only logs once per second to avoid flooding — topic is faster.
+
+  3. Press SPACEBAR again to leave AT POSITION (or send IDLE on /mission/state).
+
+     Terminal 3 logs:
+       [INFO] [realsense_cnn_node]: [Trigger] -> MOVING
+       [INFO] [realsense_cnn_node]: [GameboardState] Published 2 blocks in world frame
+
+     /perception/gameboard_state is published once with all detected blocks
+     in world frame coordinates. Connor's hl_control_node receives this.
+
+  4. If a human enters the frame:
+
+     Display window shows "HUMAN DETECTED" overlay text.
+     /perception/human_detected publishes True at ~5 Hz.
+     Elijah's behaviour tree receives this and can pause the mission.
+     No terminal log line for human detection — visual only.
 
 
 ================================================================================
@@ -223,6 +365,102 @@ MANUAL CONTROLS (live display window)
                 MOVING       ->  scanning paused, gameboard_state published
 
   Q           Quit the node
+
+
+================================================================================
+INTEGRATION WITH GAMIFICATION NODE (Kermit — SS4)
+================================================================================
+
+  The gamification node subscribes to /perception/detections and uses the
+  block positions to populate its placement JSON (x_m, y_m, z_m per letter).
+
+  For detections to reach the gamification node, ALL of the following must be
+  true at the same time:
+
+    1. Perception node is AT POSITION (SPACEBAR pressed or SCANNING received)
+    2. Blocks are visible and CNN confidence >= CNN_CONF_THRESHOLD
+    3. Gamification node has game_active = True
+    4. Gamification node has game_mode = 'A' and mode_locked = True
+    5. Gamification node has guess_pending = True
+
+  guess_pending is set True when a new round starts (after secret word accepted,
+  or after feedback). It is set False once a guess is published, preventing the
+  node from re-guessing on every incoming detection frame.
+
+  Correct startup sequence for a full Mode A game:
+
+    Step 1 — Set mode:
+
+      COMMAND:
+        ros2 topic pub --once /gamification/mode std_msgs/String "data: 'MODE_A'"
+
+      EXPECTED OUTPUT (gamification terminal):
+        [INFO] [gamification_node]: Game mode set to Mode A.
+        [INFO] [gamification_node]: Published diagnostics: SELECT_SECRET
+
+    Step 2 — Set secret word:
+
+      COMMAND:
+        ros2 topic pub --once /gamification/secret_word std_msgs/String "data: 'crane'"
+
+      EXPECTED OUTPUT (gamification terminal):
+        [INFO] [gamification_node]: Mode A secret word accepted.
+
+    Step 3 — Start game:
+
+      COMMAND:
+        ros2 topic pub --once /mission/state std_msgs/String "data: 'START'"
+
+      EXPECTED OUTPUT (gamification terminal):
+        [INFO] [gamification_node]: [Mission] Mode A game started.
+        [INFO] [gamification_node]: Published diagnostics: ACTIVE
+
+      guess_pending is now True. The node is waiting for detections.
+
+    Step 4 — Put perception AT POSITION with blocks visible:
+
+      Press SPACEBAR in the perception display window.
+
+      EXPECTED OUTPUT (gamification terminal, within ~1 second):
+        [INFO] [gamification_node]: Letters available: ['A', 'B', 'C', 'R', 'E', ...]
+        [INFO] [gamification_node]: Attempt 1: Guessing CRANE
+        [INFO] [gamification_node]: Published guess: CRANE
+        [INFO] [gamification_node]: Published mission state: {"word": "CRANE",
+          "attempt": 1, "placements": [{"position": 1, "letter": "C",
+          "x_m": 0.183, "y_m": 0.312, "z_m": 0.025, "theta_deg": 5.0}, ...]}
+        [INFO] [gamification_node]: Published word request to HL control: CRANE
+        [INFO] [gamification_node]: Published diagnostics: GUESSING
+
+      If x_m/y_m/z_m are still null in the published mission state:
+        The detections JSON contains null depth — blocks have no depth reading.
+        Verify by running: ros2 topic echo /perception/detections
+        If x_m is null there too, check blocks are 10-80 cm from the camera
+        and that align_depth.enable:=true was passed in Terminal 1.
+
+    Step 5 — Provide feedback after the robot places the word:
+
+      COMMAND:
+        ros2 topic pub --once /gamification/feedback std_msgs/String "data: 'GBIBI'"
+
+      (G=green/correct position, B=black/not in word, I=in word wrong position)
+
+      EXPECTED OUTPUT (gamification terminal):
+        [INFO] [gamification_node]: Feedback received: GBIBI
+        [INFO] [gamification_node]: Candidates remaining: 47
+
+      guess_pending is reset to True. Node waits for the next detections scan.
+      Repeat from Step 4.
+
+    To reset between games:
+
+      COMMAND:
+        ros2 topic pub --once /mission/state std_msgs/String "data: 'RESET'"
+
+      EXPECTED OUTPUT (gamification terminal):
+        [INFO] [gamification_node]: Published diagnostics: RESET
+        [INFO] [gamification_node]: [Mission] Game reset.
+
+      Then repeat from Step 1.
 
 
 ================================================================================
@@ -429,5 +667,218 @@ TROUBLESHOOTING
       Decrease CARD_BRIGHTNESS if labels are being missed.
       Check MIN_BLOCK_AREA — if blocks appear small in frame, lower this value.
 
+  Gamification node shows x_m: null in placement JSON
+      Detections reaching gamification but depth is null.
+      Verify by running: ros2 topic echo /perception/detections
+      If x_m is null in the raw topic, the depth stream has no reading for
+      those blocks. Ensure blocks are 10-80 cm from the camera and that
+      align_depth.enable:=true was passed in Terminal 1.
+
+  Gamification node receives no detections (no "Letters available" log line)
+      The node silently ignores detections unless all five conditions are met:
+        - game_active = True       -> send START on /mission/state
+        - game_mode = 'A'          -> send MODE_A on /gamification/mode first
+        - mode_locked = True       -> set automatically when MODE_A received
+        - guess_pending = True     -> set after secret word accepted or feedback
+      Correct order: MODE_A -> secret_word -> START -> scan blocks.
+      After a reset, send MODE_A and secret_word again before START.
+
+  ros2 node list stalls / hangs
+      Kill and restart the daemon:
+        ros2 daemon stop
+        ros2 daemon start
+        ros2 node list
+      If still stalling with cross-machine setup, confirm ROS_DOMAIN_ID matches
+      on all machines (export ROS_DOMAIN_ID=10).
 
 ================================================================================
+
+================================================================================
+LIMITATIONS
+================================================================================
+
+  CNN / DETECTION
+  ---------------
+  - White paper labels required. CARD mode detects block faces by brightness
+    threshold — different label materials, colours, or surfaces will break
+    detection. The system is not general-purpose object detection.
+
+  - Lab lighting only. The model was trained under lab conditions with
+    histogram equalisation applied. Significantly different lighting
+    environments (outdoor, strong shadows, coloured ambient light) will
+    degrade classification accuracy even with equalizeHist active.
+
+  - Single face per block. If a block is tilted or the wrong face is
+    presented to the camera, it will not be detected or classified.
+
+  - No occlusion handling. Overlapping or touching blocks will either
+    merge into a single detection or be missed entirely. Blocks must be
+    separated in the workspace.
+
+  - Theta is a placeholder. Block rotation (theta_deg) is estimated from
+    cv2.minAreaRect and has a 180 degree ambiguity — it cannot distinguish
+    a block at 0 degrees from one at 180 degrees. Dot-based disambiguation
+    (corner dot = top-left of block face) is the intended solution but is
+    not yet implemented.
+
+    - Maximum 5 blocks per scan. MAX_BLOCKS = 5 is hardcoded in the
+    detection pipeline. If more than 5 blocks are present in the workspace,
+    only the 5 leftmost detections (sorted by x pixel position) are
+    returned. Additional blocks are silently ignored.
+
+  DEPTH / POSE
+  ------------
+  - 4DoF only. Published pose is (x, y, z, theta) — roll and pitch are
+    not estimated. The system assumes all blocks are lying flat on the
+    workspace surface.
+
+  - Depth reads the paper surface, not the block base. z_m reflects the
+    top face of the block. Downstream consumers (Connor's hl_control) must
+    account for block height when computing grasp positions.
+
+  - World frame accuracy depends on mount calibration. CAM_MOUNT_X/Y/Z
+    and CAM_MOUNT_ROLL/PITCH/YAW have not been physically verified against
+    the real robot. World coordinates will be offset until these values are
+    calibrated against a known reference point in the workspace.
+
+  INTEGRATION
+  -----------
+  - Snapshot only. /perception/gameboard_state is published once when
+    scanning ends. If a block moves during robot execution, the published
+    state becomes stale — there is no automatic re-scan or continuous
+    position tracking during pick-and-place.
+
+  - World frame requires robot driver. Without Terminal 2 running,
+    TF lookups fail and gameboard_state falls back to camera frame
+    coordinates. Perception still functions but Connor's hl_control cannot
+    use the output for robot motion.
+
+  - Single camera, single viewpoint. There is no second camera or
+    alternative viewpoint to recover from bad angles or blind spots. If the
+    robot arm occludes a block from the camera's perspective, that block
+    will not be detected until the arm moves.
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+================================================================================
+END-TO-END WORKFLOW — DATA COLLECTION TO REAL-WORLD DEPLOYMENT
+================================================================================
+
+  STEP 1 — Print and attach block labels
+  ---------------------------------------
+  Print block_labels.pdf and cut/glue one label to each block face.
+  Ensure the corner dot is visible in the top-left of each face — this is
+  used for orientation disambiguation once dot detection is implemented.
+  Use the QO_labels.pdf sheet for Q and O blocks (FreeMono Bold font,
+  distinctive tail on Q to prevent Q/O confusion).
+
+  STEP 2 — Collect training data
+  --------------------------------
+  Connect the RealSense camera via USB 3.0.
+
+  COMMAND:
+    cd ~/Documents/RS2/perception/src
+    python3 collect_training_data.py
+
+  EXPECTED OUTPUT:
+    [INFO] pyrealsense2 found — using RealSense camera
+    Block Letter Data Collector
+    Press a LETTER or DIGIT key to capture 10 images
+    Press Escape to quit
+
+  - Hold each block in front of the camera and press the corresponding key.
+  - Each keypress saves a burst of 10 images to data/raw/<LETTER>/.
+  - Aim for 400-500 images per class across multiple sessions.
+  - Vary distance (30-70 cm), rotation (+-20 degrees), and lighting slightly
+    across sessions to improve model robustness.
+  - The HUD shows a live count per class — green means >= 200 images collected.
+  - Run multiple sessions across different days/lighting conditions if possible.
+  - Press Escape when done.
+
+  Target before training:
+    All 36 classes (A-Z, 0-9) showing green (>= 200 images each).
+    400-500 images per class recommended for best accuracy.
+
+  STEP 3 — Train the model
+  -------------------------
+  COMMAND:
+    cd ~/Documents/RS2/perception/src
+    python3 train_letter_cnn.py
+
+  EXPECTED OUTPUT:
+    [Dataset] 14400 images across 36/36 classes
+    [Train] Split -> train: 10800  val: 2160  test: 1440
+    [Train] Using device: cpu   (or cuda if GPU available)
+    [Train] Starting 25 epochs...
+
+    Epoch 01/25  loss: 2.1432  val_acc: 61.3%  (12.4s)
+    Epoch 02/25  loss: 1.4821  val_acc: 74.8%  (11.9s)
+    ...
+    Epoch 25/25  loss: 0.1823  val_acc: 96.4%  (11.7s)
+      checkmark Saved best model -> outputs/letter_cnn.pt
+
+    (classification report per class printed here)
+    [Done] Report saved to outputs/training_report.txt
+    [Done] Confusion matrix saved to outputs/confusion_matrix.png
+    [Done] Training curves saved to outputs/training_curves.png
+    Training complete. Best val accuracy: 96.4%
+    Model saved to: outputs/letter_cnn.pt
+
+  Review outputs/confusion_matrix.png — check for high off-diagonal values
+  between visually similar classes (B/8, O/0, I/1, Q/O). If a class has
+  poor recall, collect more images for that class and retrain.
+
+  Target before deployment:
+    Overall test accuracy >= 95%.
+    No single class below 85% recall in training_report.txt.
+
+  STEP 4 — Verify model in isolation (optional but recommended)
+  --------------------------------------------------------------
+  Before connecting the robot, confirm the model reads real blocks correctly
+  using just the camera.
+
+  COMMAND:
+    cd ~/Documents/RS2/perception/src
+    python3 realsense_camera_cnn.py
+
+  - Press SPACEBAR to enter AT POSITION mode.
+  - Hold each block in front of the camera one at a time.
+  - Confirm the correct letter appears with confidence >= 80%.
+  - If a block consistently reads wrong, check the label orientation and
+    retrain with more samples for that class if needed.
+
+  Watch for:
+    Correct letter shown, confidence >= 80%  ->  good to proceed
+    Correct letter shown, confidence 50-80%  ->  acceptable, monitor in testing
+    Wrong letter shown consistently          ->  retrain that class
+    "?" shown                                ->  below CNN_CONF_THRESHOLD,
+                                                 check lighting or lower threshold
+
+  STEP 5 — Full system startup with robot
+  ----------------------------------------
+  Once the model is verified, follow the STARTUP ORDER section to bring
+  up the full system:
+
+    Terminal 1  ->  RealSense camera driver
+    Terminal 2  ->  UR3e robot driver (Connor)
+    Terminal 3  ->  Perception node
+    Terminal 4  ->  Gamification node (Kermit) or verification commands
+
+  See STARTUP ORDER for expected terminal output at each step.
+
+  STEP 6 — Calibrate camera mount (first real-robot session)
+  -----------------------------------------------------------
+  World frame coordinates will be offset until CAM_MOUNT_* values are tuned.
+
+  Procedure:
+    1. Place a single block at a known position in the workspace
+       (measure its x, y from the robot base with a ruler).
+    2. Run a full scan — note the world x, y published on
+       /perception/gameboard_state.
+    3. Compare published values to measured values.
+    4. Adjust CAM_MOUNT_X/Y/Z and CAM_MOUNT_ROLL/PITCH/YAW at the top of
+       realsense_camera_cnn.py to reduce the error.
+    5. Restart the perception node and repeat until error is < 5 mm.
+
+  This only needs to be done once per physical camera mount configuration.
+  If the camera is remounted or the gripper is changed, recalibrate.
