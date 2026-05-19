@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
+find_package(moveit_ros_planning REQUIRED)
 find_package(moveit_visual_tools REQUIRED)
 find_package(moveit_task_constructor_core REQUIRED)
 find_package(tf2 REQUIRED)
@@ -27,6 +28,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 set(DEPENDENCIES
   rclcpp
   moveit_ros_planning_interface
+  moveit_ros_planning
   moveit_visual_tools
   moveit_task_constructor_core
   tf2

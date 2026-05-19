@@ -25,6 +25,7 @@
 #include <moveit/task_constructor/stages.h>
 #include <moveit/task_constructor/solvers.h>
 #include <moveit/planning_scene/planning_scene.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
 
 class WordleBotController
@@ -262,4 +263,5 @@ private:
   moveit::core::RobotStatePtr current_state;
 
   std::atomic<bool> stop_requested_{false};
+  planning_scene_monitor::PlanningSceneMonitorPtr psm_;
 };

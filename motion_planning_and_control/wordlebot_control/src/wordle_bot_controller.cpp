@@ -33,6 +33,14 @@ WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
   move_group_.setPlanningTime(15.0);
   move_group_.setNumPlanningAttempts(5);
 
+  // Planning scene monitor for collision-aware IK in computeBestIK.
+  // Subscribes to the move_group's published scene so it stays in sync with
+  // any collision objects added at runtime (floor, sensor guard, letter objects).
+  psm_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(node_, "robot_description");
+  psm_->startSceneMonitor("/monitored_planning_scene");
+  psm_->requestPlanningSceneState("/get_planning_scene");
+  RCLCPP_INFO(LOGGER, "PlanningSceneMonitor started — collision-aware IK enabled.");
+
   // DEBUG: log all link names in the robot model so we can verify touch_links names
   RCLCPP_INFO(LOGGER, "Robot model link names:");
   for (const auto & link : move_group_.getRobotModel()->getLinkModelNames()) {
@@ -927,6 +935,19 @@ std::vector<double> WordleBotController::computeBestIK(
   double best_cost  = std::numeric_limits<double>::infinity();
   int ik_successes  = 0;
 
+  // Collision-aware IK: reject any candidate that puts the robot in collision.
+  // LockedPlanningSceneRO holds the read lock for the full IK loop so the scene
+  // cannot change mid-loop and the lambda can safely query it.
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  auto isCollisionFree = [&](moveit::core::RobotState* state,
+                              const moveit::core::JointModelGroup* group,
+                              const double* ik_solution) -> bool
+  {
+    state->setJointGroupPositions(group, ik_solution);
+    state->update();
+    return !lps->isStateColliding(*state, group->getName());
+  };
+
   for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
     moveit::core::RobotState ik_state(*current_state);
 
@@ -937,7 +958,7 @@ std::vector<double> WordleBotController::computeBestIK(
       ik_state.setToRandomPositions(jmg);
     }
 
-    if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1)) {
+    if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1, isCollisionFree)) {
       continue;
     }
     ++ik_successes;
@@ -992,7 +1013,7 @@ std::vector<double> WordleBotController::computeBestIK(
     }
   }
 
-  RCLCPP_INFO(LOGGER, "computeBestIK: %d/%d solutions found. Best cost: %.4f",
+  RCLCPP_INFO(LOGGER, "computeBestIK: %d/%d collision-free IK solutions found. Best cost: %.4f",
     ik_successes, kTotalAttempts, best_cost);
 
   if (best_joint_values.empty()) {
