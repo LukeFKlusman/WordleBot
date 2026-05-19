@@ -996,6 +996,27 @@ std::vector<double> WordleBotController::computeBestIK(
       }
     }
 
+    // Reject candidates where wrist_1_joint is outside [-180°, +60°].
+    static constexpr double kWrist1Min = -M_PI;         // -180°
+    static constexpr double kWrist1Max =  M_PI / 12.0;  //  +15°
+    bool wrist1_in_range = true;
+    double wrist1_val = 0.0;
+    for (std::size_t i = 0; i < joint_names.size(); ++i) {
+      if (joint_names[i] == "wrist_1_joint" && i < candidate.size()) {
+        wrist1_val = candidate[i];
+        if (wrist1_val < kWrist1Min || wrist1_val > kWrist1Max) {
+          wrist1_in_range = false;
+        }
+        break;
+      }
+    }
+    if (!wrist1_in_range) {
+      RCLCPP_DEBUG(LOGGER,
+        "computeBestIK: attempt %d rejected — wrist_1=%.3f rad outside [%.3f, %.3f].",
+        attempt, wrist1_val, kWrist1Min, kWrist1Max);
+      continue;
+    }
+
     double movement_cost      = 0.0;
     double functional_penalty = 0.0;
     for (std::size_t i = 0; i < candidate.size(); ++i) {
