@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -39,6 +41,14 @@ private:
     HOME_GOAL
   };
 
+  struct MissionStepView
+  {
+    std::string id;
+    std::string title;
+    std::string detail;
+    std::string status;
+  };
+
   void handleMissionCommand(const std_msgs::msg::String::SharedPtr msg);
   void handleHumanDetected(const std_msgs::msg::Bool::SharedPtr msg);
   void handlePerceptionStatus(const std_msgs::msg::String::SharedPtr msg);
@@ -53,8 +63,15 @@ private:
   NodeStatus tickScanBranch();
   std::string normaliseCommand(const std::string & command) const;
   void transitionTo(MissionState new_state, const std::string & reason);
+  void publishPerceptionStateForMission(MissionState state);
+  std::vector<MissionStepView> buildMissionSteps() const;
+  std::string buildMissionProgressJson() const;
   void publishPerceptionState(const std::string & state);
   void publishMissionState();
+  void publishMissionProgress();
+  void publishMissionSignal(
+    const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & publisher,
+    const char * topic_name);
   void dispatchConfiguredGoal(bool home_goal);
   geometry_msgs::msg::PoseStamped buildPoseFromParameters(
     const std::string & prefix,
@@ -72,7 +89,12 @@ private:
 
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr perception_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_progress_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr set_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stop_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr abort_mission_pub_;
 
   rclcpp::TimerBase::SharedPtr heartbeat_timer_;
 
@@ -87,5 +109,8 @@ private:
   bool motion_complete_received_{false};
   bool awaiting_motion_completion_{false};
   GoalRequest pending_goal_request_{GoalRequest::NONE};
+  GoalRequest last_dispatched_goal_request_{GoalRequest::NONE};
+  GoalRequest last_completed_goal_request_{GoalRequest::NONE};
+  std::string last_transition_reason_{"Awaiting operator start command"};
   rclcpp::Time last_detection_time_{0, 0, RCL_ROS_TIME};
 };
