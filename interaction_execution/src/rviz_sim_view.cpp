@@ -41,8 +41,11 @@ rviz_common::properties::Property * findPropertyByName(
 }
 }  // namespace
 
-RvizSimView::RvizSimView(rclcpp::Node::SharedPtr node, QWidget * parent)
-: QWidget(parent), node_(std::move(node))
+RvizSimView::RvizSimView(
+  rclcpp::Node::SharedPtr node,
+  std::shared_ptr<rviz_common::ros_integration::RosNodeAbstraction> rviz_node,
+  QWidget * parent)
+: QWidget(parent), node_(std::move(node)), rviz_node_(std::move(rviz_node))
 {
   buildUi();
 
@@ -92,6 +95,11 @@ RvizSimView::~RvizSimView()
 
   if (manager_) {
     manager_->stopUpdate();
+    manager_.reset();
+  }
+  if (render_panel_) {
+    render_panel_->deleteLater();
+    render_panel_ = nullptr;
   }
 
   if (executor_) {
@@ -103,15 +111,29 @@ void RvizSimView::showEvent(QShowEvent * event)
 {
   QWidget::showEvent(event);
 
+  if (manager_) {
+    manager_->startUpdate();
+    return;
+  }
+
   if (rviz_initialized_) {
     return;
   }
 
   rviz_initialized_ = true;
-  QTimer::singleShot(0, this, [this]() {
+  QTimer::singleShot(100, this, [this]() {
     initializeRvizPanel();
     createDisplaysIfReady();
   });
+}
+
+void RvizSimView::hideEvent(QHideEvent * event)
+{
+  QWidget::hideEvent(event);
+
+  if (manager_) {
+    manager_->stopUpdate();
+  }
 }
 
 void RvizSimView::buildUi()
@@ -124,8 +146,10 @@ void RvizSimView::buildUi()
 
 void RvizSimView::initializeRvizPanel()
 {
-  rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>(
-    "interaction_execution_rviz_panel");
+  if (!rviz_node_) {
+    rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>(
+      "interaction_execution_rviz_panel");
+  }
 
   render_panel_ = new rviz_common::RenderPanel(this);
   render_panel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
@@ -138,39 +162,53 @@ void RvizSimView::initializeRvizPanel()
 
   render_panel_->show();
   QApplication::processEvents();
-  render_panel_->getRenderWindow()->initialize();
 
-  auto clock = rviz_node_->get_raw_node()->get_clock();
-  manager_ = std::make_shared<rviz_common::VisualizationManager>(
-    render_panel_, rviz_node_, nullptr, clock);
+  try {
+    render_panel_->getRenderWindow()->initialize();
 
-  render_panel_->initialize(manager_.get());
-  QApplication::processEvents();
+    auto clock = rviz_node_->get_raw_node()->get_clock();
+    manager_ = std::make_shared<rviz_common::VisualizationManager>(
+      render_panel_, rviz_node_, nullptr, clock);
 
-  manager_->setFixedFrame("base_link");
-  manager_->initialize();
-  manager_->startUpdate();
-  manager_->getViewManager()->setCurrentViewControllerType(kOrbitViewClassId);
+    render_panel_->initialize(manager_.get());
+    QApplication::processEvents();
 
-  auto * tool_manager = manager_->getToolManager();
-  rviz_common::Tool * move_camera_tool = nullptr;
-  for (int i = 0; tool_manager != nullptr && i < tool_manager->numTools(); ++i) {
-    auto * tool = tool_manager->getTool(i);
-    if (tool != nullptr && tool->getClassId() == kMoveCameraToolClassId) {
-      move_camera_tool = tool;
-      break;
+    manager_->setFixedFrame("base_link");
+    manager_->initialize();
+    manager_->startUpdate();
+    manager_->getViewManager()->setCurrentViewControllerType(kOrbitViewClassId);
+
+    auto * tool_manager = manager_->getToolManager();
+    rviz_common::Tool * move_camera_tool = nullptr;
+    for (int i = 0; tool_manager != nullptr && i < tool_manager->numTools(); ++i) {
+      auto * tool = tool_manager->getTool(i);
+      if (tool != nullptr && tool->getClassId() == kMoveCameraToolClassId) {
+        move_camera_tool = tool;
+        break;
+      }
     }
-  }
 
-  if (tool_manager != nullptr && move_camera_tool == nullptr) {
-    move_camera_tool = tool_manager->addTool(kMoveCameraToolClassId);
-  }
+    if (tool_manager != nullptr && move_camera_tool == nullptr) {
+      move_camera_tool = tool_manager->addTool(kMoveCameraToolClassId);
+    }
 
-  if (tool_manager != nullptr && move_camera_tool != nullptr) {
-    tool_manager->setDefaultTool(move_camera_tool);
-    tool_manager->setCurrentTool(move_camera_tool);
-  } else {
-    RCLCPP_WARN(node_->get_logger(), "Failed to activate RViz MoveCamera tool.");
+    if (tool_manager != nullptr && move_camera_tool != nullptr) {
+      tool_manager->setDefaultTool(move_camera_tool);
+      tool_manager->setCurrentTool(move_camera_tool);
+    } else {
+      RCLCPP_WARN(node_->get_logger(), "Failed to activate RViz MoveCamera tool.");
+    }
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(node_->get_logger(), "RViz initialization failed: %s", e.what());
+    if (manager_) {
+      manager_->stopUpdate();
+      manager_.reset();
+    }
+    if (render_panel_) {
+      render_panel_->deleteLater();
+      render_panel_ = nullptr;
+    }
+    rviz_initialized_ = false;
   }
 }
 
