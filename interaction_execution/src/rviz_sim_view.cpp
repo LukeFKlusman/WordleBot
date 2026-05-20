@@ -151,19 +151,18 @@ void RvizSimView::initializeRvizPanel()
       "interaction_execution_rviz_panel");
   }
 
-  render_panel_ = new rviz_common::RenderPanel(this);
-  render_panel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  render_panel_->setAttribute(Qt::WA_NativeWindow, true);
-  render_panel_->setFocusPolicy(Qt::StrongFocus);
-  render_panel_->setMouseTracking(true);
-  if (auto * layout = qobject_cast<QVBoxLayout *>(this->layout())) {
-    layout->addWidget(render_panel_);
-  }
-
-  render_panel_->show();
-  QApplication::processEvents();
-
   try {
+    render_panel_ = new rviz_common::RenderPanel(this);
+    render_panel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    render_panel_->setAttribute(Qt::WA_NativeWindow, true);
+    render_panel_->setFocusPolicy(Qt::StrongFocus);
+    render_panel_->setMouseTracking(true);
+    if (auto * layout = qobject_cast<QVBoxLayout *>(this->layout())) {
+      layout->addWidget(render_panel_);
+    }
+
+    render_panel_->show();
+    QApplication::processEvents();
     render_panel_->getRenderWindow()->initialize();
 
     auto clock = rviz_node_->get_raw_node()->get_clock();
