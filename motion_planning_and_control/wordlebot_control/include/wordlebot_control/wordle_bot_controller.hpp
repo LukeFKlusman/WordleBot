@@ -18,12 +18,14 @@
 #include <moveit_visual_tools/moveit_visual_tools.h>
 #include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/joint_constraint.hpp>
+#include <moveit_msgs/msg/orientation_constraint.hpp>
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
 
 #include <moveit/task_constructor/task.h>
 #include <moveit/task_constructor/stages.h>
 #include <moveit/task_constructor/solvers.h>
 #include <moveit/planning_scene/planning_scene.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
 
 class WordleBotController
@@ -128,21 +130,28 @@ public:
   // Execute a previously planned move-to-goal task. Returns true on SUCCESS.
   bool executePlannedMoveToGoal(PlannedMoveToGoal & planned);
 
+  // Plan and execute one goal pose using MoveGroupInterface. Used when USE_MTC_FOR_GOALS == false.
+  bool moveToGoal(const geometry_msgs::msg::Pose & goal_pose);
+
   // ---------------------------------------------------------------------------
   // Scan and Sweep
   // ---------------------------------------------------------------------------
 
-  // Plan a Cartesian (straight-line) move to an absolute goal pose using the CartesianPath solver.
-  // Mirrors planMoveToGoal but replaces the OMPL sampling planner with CartesianPath.
-  // start_scene: nullptr → CurrentState; non-null → FixedState (chained).
-  PlannedMoveToGoal planMoveToGoalCartesian(const geometry_msgs::msg::Pose & goal_pose,
-                                             const planning_scene::PlanningScenePtr & start_scene);
+  // Build a unified MTC task for the three Cartesian scan poses (poses[1..3]).
+  // Uses alternating Connect(CartesianPath) + ComputeIK(GeneratePose) stages so
+  // the planner can explore multiple IK configurations at each scan pose.
+  // start_scene must be the terminal scene from executing pose 0.
+  moveit::task_constructor::Task createScanAndSweepTask(
+    const std::vector<geometry_msgs::msg::Pose> & scan_poses,
+    const planning_scene::PlanningScenePtr & start_scene);
 
-  // Execute the full scan-and-sweep sequence using the provided poses and dwell time.
-  // poses[0] is reached via free-space planning; poses[1..3] via Cartesian moves.
-  // Dwells dwell_time_seconds at each pose, then returns to home.
+  // Execute the full scan-and-sweep sequence.
+  // When USE_MTC_FOR_SCAN_SWEEP == false (default): poses[0] via moveToGoal, poses[1..3] via
+  // computeCartesianPath with moveToGoal fallback, then returnToHome.
+  // When USE_MTC_FOR_SCAN_SWEEP == true: existing MTC plan-all-then-execute path.
+  // dwell_secs: how long to pause at each scan pose (0 = no dwell).
   bool runScanAndSweep(const std::vector<geometry_msgs::msg::Pose> & poses,
-                       double dwell_time_seconds);
+                       double dwell_secs = 0.0);
 
   // ---------------------------------------------------------------------------
   // Standalone Arm Motions
@@ -188,6 +197,18 @@ public:
   // Constants
   // ---------------------------------------------------------------------------
 
+  // Change to false to use MoveGroupInterface sequential plan+execute per goal.
+  // Change to true  to use MTC plan-all-then-execute-all (existing behaviour).
+  static constexpr bool USE_MTC_FOR_GOALS = false;
+
+  // Change to false to use MoveGroupInterface Cartesian path for scan-and-sweep.
+  // Change to true  to use MTC plan-all-then-execute-all (existing behaviour).
+  static constexpr bool USE_MTC_FOR_SCAN_SWEEP = false;
+
+  static constexpr double kCartesianEefStep       = 0.01;  // 1 cm max step between waypoints
+  static constexpr double kCartesianJumpThreshold = 0.0;   // disable joint-space jump check
+  static constexpr double kCartesianMinFraction   = 0.95;  // fallback to moveToGoal below this
+
   static constexpr const char * LETTER_OBJECT_ID = "letter_object";
 
   // Five placement columns along the x-axis (P1=leftmost, P3=centre, P5=rightmost).
@@ -221,6 +242,31 @@ private:
   moveit::task_constructor::Task createPlaceTask();
 
   // ---------------------------------------------------------------------------
+  // MoveGroupInterface goal-navigation helpers (USE_MTC_FOR_GOALS == false)
+  // ---------------------------------------------------------------------------
+
+  // Solve IK for target_pose. First 5 attempts seed from warm-start config;
+  // remaining 10 seed randomly. Applies 2π normalisation and wrist_3 [-π,π] clamp.
+  // No shoulder rejection. Returns best joint vector by movement+functional cost, or empty.
+  std::vector<double> computeBestIK(
+    const moveit::core::RobotStatePtr & current_state,
+    const geometry_msgs::msg::Pose & target_pose);
+
+  // Call move_group_.plan() num_attempts times and return all successful plans.
+  std::vector<moveit::planning_interface::MoveGroupInterface::Plan>
+  generateCandidatePlans(int num_attempts);
+
+  // Return the plan with the lowest computeTotalJointDisplacement cost.
+  // Returns a default-constructed (empty) plan if plans is empty.
+  moveit::planning_interface::MoveGroupInterface::Plan
+  selectBestPlan(
+    const std::vector<moveit::planning_interface::MoveGroupInterface::Plan> & plans);
+
+  // Move the end-effector to target_pose via computeCartesianPath.
+  // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
+  bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
+
+  // ---------------------------------------------------------------------------
   // Member variables
   // move_group_ MUST be declared before visual_tools_ — initialisation order matters
   // ---------------------------------------------------------------------------
@@ -231,4 +277,5 @@ private:
   moveit::core::RobotStatePtr current_state;
 
   std::atomic<bool> stop_requested_{false};
+  planning_scene_monitor::PlanningSceneMonitorPtr psm_;
 };
