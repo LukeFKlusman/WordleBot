@@ -75,7 +75,7 @@ private:
   // ---------------------------------------------------------------------------
   // Scan-and-sweep parameters (loaded from config/scan_sweep_poses.yaml)
   // ---------------------------------------------------------------------------
-  std::array<geometry_msgs::msg::Pose, 4> scan_sweep_poses_;
+  std::array<geometry_msgs::msg::Pose, 6> scan_sweep_poses_;
   double scan_sweep_dwell_time_{1.5};
 
   // ---------------------------------------------------------------------------

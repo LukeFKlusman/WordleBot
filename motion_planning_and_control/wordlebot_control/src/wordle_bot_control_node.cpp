@@ -106,6 +106,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<std::vector<double>>("scan_sweep_pose_2", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
   if (!node_->has_parameter("scan_sweep_pose_3"))
     node_->declare_parameter<std::vector<double>>("scan_sweep_pose_3", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_4"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_4", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+  if (!node_->has_parameter("scan_sweep_pose_5"))
+    node_->declare_parameter<std::vector<double>>("scan_sweep_pose_5", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
 
   scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
 
@@ -127,6 +131,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   scan_sweep_poses_[1] = load_pose("scan_sweep_pose_1");
   scan_sweep_poses_[2] = load_pose("scan_sweep_pose_2");
   scan_sweep_poses_[3] = load_pose("scan_sweep_pose_3");
+  scan_sweep_poses_[4] = load_pose("scan_sweep_pose_4");
+  scan_sweep_poses_[5] = load_pose("scan_sweep_pose_5");
 
   letter_object_counter_ = 0;
 

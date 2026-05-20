@@ -987,15 +987,6 @@ std::vector<double> WordleBotController::computeBestIK(
       candidate[i] = best_norm;
     }
 
-    // Clamp wrist_3 to [-π, π]: UR RTDE reports wrist_3 in this range; values outside
-    // it cause a PATH_TOLERANCE_VIOLATED abort (2π position error) on the controller.
-    for (std::size_t i = 0; i < joint_names.size(); ++i) {
-      if (joint_names[i] == "wrist_3_joint" && i < candidate.size()) {
-        while (candidate[i] > M_PI)  candidate[i] -= 2.0 * M_PI;
-        while (candidate[i] < -M_PI) candidate[i] += 2.0 * M_PI;
-      }
-    }
-
     // Reject candidates where wrist_1_joint is outside [-180°, +60°].
     static constexpr double kWrist1Min = -M_PI;         // -180°
     static constexpr double kWrist1Max =  M_PI / 12.0;  //  +15°
@@ -1323,8 +1314,8 @@ mtc::Task WordleBotController::createScanAndSweepTask(
 bool WordleBotController::runScanAndSweep(
   const std::vector<geometry_msgs::msg::Pose> & poses, double dwell_secs)
 {
-  if (poses.size() != 4) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 4 poses, got %zu.", poses.size());
+  if (poses.size() != 6) {
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 6 poses, got %zu.", poses.size());
     return false;
   }
 
@@ -1332,17 +1323,18 @@ bool WordleBotController::runScanAndSweep(
   for (size_t i = 0; i < poses.size(); ++i) {
     RCLCPP_INFO(LOGGER,
       "runScanAndSweep: pose %zu  xyz=(%.3f, %.3f, %.3f)  quat=(%.3f, %.3f, %.3f, %.3f)",
-      i + 1,
+      i,
       poses[i].position.x,    poses[i].position.y,    poses[i].position.z,
       poses[i].orientation.x, poses[i].orientation.y,
       poses[i].orientation.z, poses[i].orientation.w);
   }
 
   if constexpr (USE_MTC_FOR_SCAN_SWEEP) {
-    // ── MTC path (original behaviour) ──────────────────────────────────────
+    // ── MTC path — uses poses[0..3] only (original 4-pose behaviour) ──────
     if (stop_requested_.load()) { return false; }
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): building scan task.");
-    auto sweep_task = createScanAndSweepTask(poses, nullptr);
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): building scan task (poses 0-3).");
+    const std::vector<geometry_msgs::msg::Pose> mtc_poses(poses.begin(), poses.begin() + 4);
+    auto sweep_task = createScanAndSweepTask(mtc_poses, nullptr);
 
     try {
       sweep_task.init();
@@ -1351,7 +1343,7 @@ bool WordleBotController::runScanAndSweep(
       return false;
     }
 
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep (all 4 poses).");
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep.");
     moveit::core::MoveItErrorCode plan_result;
     try {
       plan_result = sweep_task.plan(15);
@@ -1367,7 +1359,7 @@ bool WordleBotController::runScanAndSweep(
     }
 
     RCLCPP_INFO(LOGGER,
-      "runScanAndSweep (MTC): sweep task planned — %zu solution(s), best cost=%.3f. Executing.",
+      "runScanAndSweep (MTC): planned — %zu solution(s), best cost=%.3f. Executing.",
       sweep_task.solutions().size(), sweep_task.solutions().front()->cost());
 
     sweep_task.introspection().publishSolution(*sweep_task.solutions().front());
@@ -1387,42 +1379,73 @@ bool WordleBotController::runScanAndSweep(
     return true;
 
   } else {
-    // ── MGI Cartesian path ─────────────────────────────────────────────────
-    if (stop_requested_.load()) { return false; }
+    // ── MGI path ───────────────────────────────────────────────────────────
+    // Sequence:
+    //   moveToGoal(0)          — free-space move to start
+    //   Cartesian → (1)        — first sweep
+    //   moveToGoal(2)          — reorient in place (same XYZ as 1, yaw -90°)
+    //   Cartesian → (3)        — second sweep
+    //   moveToGoal(4)          — reorient in place (same XYZ as 3, yaw -90°)
+    //   Cartesian → (5)        — third sweep
+    //   returnToHome()
+    // Dwell is applied after each Cartesian arrival; not at reorientation poses.
 
-    // 1. Joint-space move to poses[0].
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moving to pose 0.");
-    if (!moveToGoal(poses[0])) {
-      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 0.");
-      return false;
-    }
-    if (dwell_secs > 0.0) {
-      RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): dwelling %.2f s at pose 0.", dwell_secs);
-      rclcpp::sleep_for(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::duration<double>(dwell_secs)));
-    }
-
-    // 2. Cartesian sweeps: poses[0]→[1], [1]→[2], [2]→[3].
-    for (size_t i = 0; i < 3; ++i) {
-      if (stop_requested_.load()) { return false; }
-      RCLCPP_INFO(LOGGER,
-        "runScanAndSweep (MGI): Cartesian move pose %zu → %zu.", i, i + 1);
-      if (!moveCartesianToWaypoint(poses[i + 1])) {
-        RCLCPP_ERROR(LOGGER,
-          "runScanAndSweep (MGI): failed to reach pose %zu.", i + 1);
-        return false;
-      }
+    auto dwell = [&](size_t idx) {
       if (dwell_secs > 0.0) {
-        RCLCPP_INFO(LOGGER,
-          "runScanAndSweep (MGI): dwelling %.2f s at pose %zu.", dwell_secs, i + 1);
+        RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): dwelling %.2f s at pose %zu.", dwell_secs, idx);
         rclcpp::sleep_for(
           std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(dwell_secs)));
       }
+    };
+
+    if (stop_requested_.load()) { return false; }
+
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 0 (start).");
+    if (!moveToGoal(poses[0])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 0.");
+      return false;
+    }
+    dwell(0);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 0 → 1.");
+    if (!moveCartesianToWaypoint(poses[1])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 1.");
+      return false;
+    }
+    dwell(1);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 2 (reorient -90° yaw).");
+    if (!moveToGoal(poses[2])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 2.");
+      return false;
     }
 
-    // 3. Return home.
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 2 → 3.");
+    if (!moveCartesianToWaypoint(poses[3])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 3.");
+      return false;
+    }
+    dwell(3);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 4 (reorient -90° yaw).");
+    if (!moveToGoal(poses[4])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 4.");
+      return false;
+    }
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 4 → 5.");
+    if (!moveCartesianToWaypoint(poses[5])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 5.");
+      return false;
+    }
+    dwell(5);
+
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to home.");
     returnToHome();
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): complete.");
