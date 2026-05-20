@@ -199,6 +199,17 @@ void RvizMoveItView::initializeRvizPanel()
       render_panel_ = nullptr;
     }
     rviz_initialized_ = false;
+  } catch (...) {
+    RCLCPP_ERROR(node_->get_logger(), "RViz initialization failed: unknown exception");
+    if (manager_) {
+      manager_->stopUpdate();
+      manager_.reset();
+    }
+    if (render_panel_) {
+      render_panel_->deleteLater();
+      render_panel_ = nullptr;
+    }
+    rviz_initialized_ = false;
   }
 }
 
