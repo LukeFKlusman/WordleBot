@@ -14,8 +14,9 @@ wordle_bot_control_node:
     #   pose_4  — reorientation: same XYZ as pose_3, yaw -90° again (moveToGoal)
     #   pose_5  — Cartesian target (third sweep, from pose_4 orientation)
     #
-    # roll=pi points gripper straight down. All values are placeholders;
-    # fill in real values after physical testing.
+    # roll = pi -> points gripper straight down.
+
+    
     scan_sweep_pose_0: [-0.30, 0.10, 0.1, 3.14159, 0.0,  0.0]
     scan_sweep_pose_1: [-0.30, 0.30, 0.1, 3.14159, 0.0,  0.0]
     scan_sweep_pose_2: [-0.30, 0.30, 0.1, 3.14159, 0.0,  1.5708]
