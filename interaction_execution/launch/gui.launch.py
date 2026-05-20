@@ -23,9 +23,10 @@ def generate_launch_description():
     launch_perception = LaunchConfiguration("launch_perception")
     launch_gamification = LaunchConfiguration("launch_gamification")
     launch_voice_control = LaunchConfiguration("launch_voice_control")
+    launch_robot_description = LaunchConfiguration("launch_robot_description")
 
-    wordle_bot_share = find_package_share("wordleBot_control")
-    moveit_config_share = find_package_share("ur_onrobot_moveit_config")
+    wordle_bot_share = find_package_share("wordlebot_control")
+    moveit_config_share = find_package_share("ur_moveit_config")
     wordle_bot_launch = (
         wordle_bot_share / "launch" / "wordle_bot.launch.py"
         if wordle_bot_share is not None
@@ -64,6 +65,11 @@ def generate_launch_description():
             "launch_voice_control",
             default_value="false",
             description="Launch the voice_control CLI script. Disabled by default because it is interactive.",
+        ),
+        DeclareLaunchArgument(
+            "launch_robot_description",
+            default_value="false",
+            description="Launch robot_state_publisher with UR robot description (for MoveIt view visualization without full MoveIt).",
         ),
         SetEnvironmentVariable(name="QT_QPA_PLATFORM", value="xcb"),
         Node(
@@ -105,9 +111,9 @@ def generate_launch_description():
     else:
         missing_packages = []
         if wordle_bot_share is None:
-            missing_packages.append("wordleBot_control")
+            missing_packages.append("wordlebot_control")
         if moveit_config_share is None:
-            missing_packages.append("ur_onrobot_moveit_config")
+            missing_packages.append("ur_moveit_config")
 
         launch_actions.append(
             LogInfo(
@@ -118,5 +124,14 @@ def generate_launch_description():
                 ),
             )
         )
+
+    interaction_execution_share = Path(get_package_share_directory("interaction_execution"))
+    robot_description_launch = interaction_execution_share / "launch" / "load_ur_description.launch.py"
+    launch_actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(str(robot_description_launch)),
+            condition=IfCondition(launch_robot_description),
+        )
+    )
 
     return LaunchDescription(launch_actions)
