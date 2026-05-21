@@ -223,8 +223,8 @@ void WordleBotControlNode::stopMissionCallback(const std_msgs::msg::Bool::Shared
       RCLCPP_WARN(LOGGER, "stopMissionCallback: no mission running — ignoring.");
       return;
     }
+    stop_requested_.store(true);  // Inside lock — atomic with mission_running_ check
   }
-  stop_requested_.store(true);
   controller_->stop();
   RCLCPP_INFO(LOGGER, "stopMissionCallback: stop issued — robot will halt safely.");
 }
@@ -720,11 +720,32 @@ void WordleBotControlNode::missionLoop()
       }
     }
 
-    // ── STOPPED state handler ─────────────────────────────────────────────────
-    // Entered whenever the execution blocks above broke out due to stop_requested_.
-    // Blocks here until the operator sends resume or abort.
-    if (stop_requested_.load()) {
-      // Snapshot gripper state before doing anything else (robot is halted).
+    // ── Atomically decide: enter STOPPED state or complete normally ─────────────
+    // stop_requested_ is set inside queue_mutex_ by stopMissionCallback, so checking
+    // it here under the same lock is race-free with the mission_running_ cleanup.
+    bool should_stop = false;
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      should_stop = stop_requested_.load();
+      if (!should_stop) {
+        mission_running_ = false;  // Normal completion
+      } else {
+        // Signal callbacks immediately so resume/abort are accepted without delay.
+        // in_stopped_state_ is set before isGripperClosed() (which can block ~2 s)
+        // so the operator can send resume/abort the instant they see "STOPPED".
+        in_stopped_state_.store(true);
+      }
+    }
+
+    if (should_stop) {
+      // ── STOPPED state handler ────────────────────────────────────────────────
+      {
+        std_msgs::msg::String s;
+        s.data = "STOPPED";
+        robot_state_pub_->publish(s);
+      }
+
+      // Snapshot gripper state (robot is halted at this point).
       bool gripper_closed = controller_->isGripperClosed();
 
       // Save remaining unexecuted tasks so resume can re-execute them.
@@ -737,14 +758,8 @@ void WordleBotControlNode::missionLoop()
           resume_goal_tasks_.assign(
             current_mission.begin() + goal_resume_from, current_mission.end());
         }
-        in_stopped_state_.store(true);
       }
 
-      {
-        std_msgs::msg::String s;
-        s.data = "STOPPED";
-        robot_state_pub_->publish(s);
-      }
       RCLCPP_INFO(LOGGER,
         "missionLoop: STOPPED (gripper_closed=%s, %zu pick tasks / %zu goal tasks remain).",
         gripper_closed ? "yes" : "no",
@@ -761,7 +776,7 @@ void WordleBotControlNode::missionLoop()
       in_stopped_state_.store(false);
       if (!rclcpp::ok()) break;
 
-      // ── Abort path ──────────────────────────────────────────────────────────
+      // ── Abort path ────────────────────────────────────────────────────────────
       if (abort_requested_.exchange(false)) {
         RCLCPP_INFO(LOGGER, "missionLoop: abort — clearing queues and returning to home.");
         controller_->clearStopFlag();
@@ -787,7 +802,7 @@ void WordleBotControlNode::missionLoop()
         continue;
       }
 
-      // ── Resume path ─────────────────────────────────────────────────────────
+      // ── Resume path ──────────────────────────────────────────────────────────
       resume_requested_.store(false);
       controller_->clearStopFlag();
       stop_requested_.store(false);
@@ -834,17 +849,13 @@ void WordleBotControlNode::missionLoop()
 
       if (has_remaining) {
         RCLCPP_INFO(LOGGER, "missionLoop: re-arming for remaining tasks after resume.");
-        // mission_running_ stays true; CV predicate will be satisfied immediately.
+        // mission_running_ stays true; CV predicate satisfied immediately on continue.
         continue;
       }
-      // No remaining tasks: fall through to normal IDLE cleanup below.
+      // No remaining tasks: fall through to IDLE publish below.
     }
-    // ── End STOPPED state handler ─────────────────────────────────────────────
+    // ── End STOPPED state handler / normal completion ─────────────────────────
 
-    {
-      std::lock_guard<std::mutex> lock(queue_mutex_);
-      mission_running_ = false;
-    }
     {
       std_msgs::msg::String state_msg;
       state_msg.data = "IDLE";
