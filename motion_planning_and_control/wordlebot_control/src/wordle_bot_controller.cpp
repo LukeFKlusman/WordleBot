@@ -547,12 +547,19 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     task.add(std::move(place));
   }
 
-  // ── Stage 7: return home — only for the final task in a batch ────────────
+  // ── Stage 7: return to working pose — only for the final task in a batch ──
   if (include_return_home) {
-    RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return home'.", object_id.c_str());
-    auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+    RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return to working pose'.", object_id.c_str());
+    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", interpolation_planner);
     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-    stage->setGoal("home");
+    stage->setGoal(std::map<std::string, double>{
+      {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+      {"shoulder_lift_joint", node_->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+      {"elbow_joint",         node_->get_parameter("working_joints.elbow_joint").as_double()},
+      {"wrist_1_joint",       node_->get_parameter("working_joints.wrist_1_joint").as_double()},
+      {"wrist_2_joint",       node_->get_parameter("working_joints.wrist_2_joint").as_double()},
+      {"wrist_3_joint",       node_->get_parameter("working_joints.wrist_3_joint").as_double()},
+    });
     task.add(std::move(stage));
   } else {
     RCLCPP_DEBUG(LOGGER,
@@ -1373,8 +1380,8 @@ bool WordleBotController::runScanAndSweep(
       return false;
     }
 
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): returning to home.");
-    returnToHome();
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): returning to working pose.");
+    returnToWorkingPose();
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): complete.");
     return true;
 
@@ -1446,8 +1453,8 @@ bool WordleBotController::runScanAndSweep(
     }
     dwell(5);
 
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to home.");
-    returnToHome();
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to working pose.");
+    returnToWorkingPose();
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): complete.");
     return true;
   }
@@ -1503,6 +1510,38 @@ bool WordleBotController::returnToHome()
   }
 
   RCLCPP_INFO(LOGGER, "returnToHome: succeeded.");
+  return true;
+}
+
+bool WordleBotController::returnToWorkingPose()
+{
+  RCLCPP_INFO(LOGGER, "returnToWorkingPose: moving to working pose.");
+
+  std::map<std::string, double> joints = {
+    {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+    {"shoulder_lift_joint", node_->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+    {"elbow_joint",         node_->get_parameter("working_joints.elbow_joint").as_double()},
+    {"wrist_1_joint",       node_->get_parameter("working_joints.wrist_1_joint").as_double()},
+    {"wrist_2_joint",       node_->get_parameter("working_joints.wrist_2_joint").as_double()},
+    {"wrist_3_joint",       node_->get_parameter("working_joints.wrist_3_joint").as_double()},
+  };
+
+  move_group_.setStartStateToCurrentState();
+  move_group_.setJointValueTarget(joints);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToWorkingPose: planning failed.");
+    return false;
+  }
+
+  auto result = move_group_.execute(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToWorkingPose: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "returnToWorkingPose: succeeded.");
   return true;
 }
 
@@ -1700,9 +1739,9 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
     }
   }
 
-  RCLCPP_INFO(LOGGER, "recoverObject: returning to home.");
-  if (!returnToHome()) {
-    RCLCPP_ERROR(LOGGER, "recoverObject: returnToHome failed.");
+  RCLCPP_INFO(LOGGER, "recoverObject: returning to working pose.");
+  if (!returnToWorkingPose()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: returnToWorkingPose failed.");
     return false;
   }
 

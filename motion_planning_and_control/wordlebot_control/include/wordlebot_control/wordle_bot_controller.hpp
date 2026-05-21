@@ -160,6 +160,9 @@ public:
   // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
   bool returnToHome();
 
+  // Move the arm to the working pose defined in config/pose_working.yaml.
+  bool returnToWorkingPose();
+
   // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
   bool openGripper();
 

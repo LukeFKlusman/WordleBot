@@ -93,6 +93,20 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/scan_and_sweep", 10,
     std::bind(&WordleBotControlNode::scanAndSweepCallback, this, std::placeholders::_1));
 
+  // Load working-pose parameters from config/pose_working.yaml.
+  if (!node_->has_parameter("working_joints.shoulder_pan_joint"))
+    node_->declare_parameter<double>("working_joints.shoulder_pan_joint",  0.5236);
+  if (!node_->has_parameter("working_joints.shoulder_lift_joint"))
+    node_->declare_parameter<double>("working_joints.shoulder_lift_joint", -2.0071);
+  if (!node_->has_parameter("working_joints.elbow_joint"))
+    node_->declare_parameter<double>("working_joints.elbow_joint",          0.8901);
+  if (!node_->has_parameter("working_joints.wrist_1_joint"))
+    node_->declare_parameter<double>("working_joints.wrist_1_joint",       -0.4887);
+  if (!node_->has_parameter("working_joints.wrist_2_joint"))
+    node_->declare_parameter<double>("working_joints.wrist_2_joint",       -1.5184);
+  if (!node_->has_parameter("working_joints.wrist_3_joint"))
+    node_->declare_parameter<double>("working_joints.wrist_3_joint",       -1.0647);
+
   // Load scan-and-sweep parameters from config/scan_sweep_poses.yaml.
   // Guard each declaration: if the YAML was loaded via --params-file the parameters
   // are already declared by the time the constructor runs.
@@ -709,8 +723,8 @@ void WordleBotControlNode::missionLoop()
         }
 
         if (all_ok && !stop_requested_.load()) {
-          RCLCPP_INFO(LOGGER, "Goal mission (MGI): returning to home.");
-          controller_->returnToHome();
+          RCLCPP_INFO(LOGGER, "Goal mission (MGI): returning to working pose.");
+          controller_->returnToWorkingPose();
           mission_complete_pub_->publish(signal);
           motion_complete_pub_->publish(signal);
           RCLCPP_INFO(LOGGER, "Goal mission (MGI): fully complete.");
