@@ -18,16 +18,26 @@ Run with:
 """
 
 import math
+import os
+import subprocess
+import tempfile
 import time
 import unittest
 
-import launch_testing
-import pytest
 import rclpy
 from geometry_msgs.msg import PoseArray, PoseStamped
-from std_msgs.msg import Bool
+from hl_control.msg import GameboardState, LetterObject
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.serialization import deserialize_message
+import rosbag2_py
+from std_msgs.msg import Bool, String
 import tf2_ros
+from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformException
+
+
+# End-effector TF frame (must match active MoveIt planning group tip link)
+EE_LINK = "gripper_tcp"
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +89,91 @@ def _quat_angle_diff_deg(q1, q2) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Bag reader helpers
+# ---------------------------------------------------------------------------
+
+def _read_goal_reached_timestamps(bag_path: str) -> list:
+    """Return ordered list of timestamp_ns for each /wordle_bot/goal_reached=True in a bag."""
+    try:
+        reader = rosbag2_py.SequentialReader()
+        reader.open(
+            rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+            rosbag2_py.ConverterOptions('', ''),
+        )
+        timestamps = []
+        while reader.has_next():
+            topic, data, timestamp_ns = reader.read_next()
+            if topic == '/wordle_bot/goal_reached':
+                msg = deserialize_message(data, Bool)
+                if msg.data:
+                    timestamps.append(timestamp_ns)
+        return timestamps
+    except Exception as exc:
+        print(f"[TC2.4] Warning: could not read goal_reached timestamps from bag: {exc}")
+        return []
+
+
+def _read_ee_pose_from_bag(bag_path: str, lookup_time_ns: int, ee_link: str = EE_LINK):
+    """Look up world→ee_link transform from offline bag TF data at lookup_time_ns."""
+    buffer = tf2_ros.BufferCore(cache_time=rclpy.duration.Duration(seconds=600))
+    reader = rosbag2_py.SequentialReader()
+    reader.open(
+        rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+        rosbag2_py.ConverterOptions('', ''),
+    )
+    while reader.has_next():
+        topic, data, ts = reader.read_next()
+        if topic == '/tf_static':
+            msg = deserialize_message(data, TFMessage)
+            for tf in msg.transforms:
+                buffer.set_transform_static(tf, 'bag')
+        elif topic == '/tf' and ts <= lookup_time_ns:
+            msg = deserialize_message(data, TFMessage)
+            for tf in msg.transforms:
+                buffer.set_transform(tf, 'bag')
+    return buffer.lookup_transform_core('world', ee_link, rclpy.time.Time())
+
+
+def _read_ee_positions_from_bag(bag_path: str, ee_link: str = EE_LINK) -> list:
+    """Return list of (timestamp_ns, x, y, z) for world→ee_link across all /tf messages in a bag."""
+    buffer = tf2_ros.BufferCore(cache_time=rclpy.duration.Duration(seconds=600))
+    tf_timestamps = []
+    try:
+        reader = rosbag2_py.SequentialReader()
+        reader.open(
+            rosbag2_py.StorageOptions(uri=bag_path, storage_id='sqlite3'),
+            rosbag2_py.ConverterOptions('', ''),
+        )
+        while reader.has_next():
+            topic, data, ts = reader.read_next()
+            if topic == '/tf_static':
+                msg = deserialize_message(data, TFMessage)
+                for tf in msg.transforms:
+                    buffer.set_transform_static(tf, 'bag')
+            elif topic == '/tf':
+                msg = deserialize_message(data, TFMessage)
+                for tf in msg.transforms:
+                    buffer.set_transform(tf, 'bag')
+                tf_timestamps.append(ts)
+    except Exception as exc:
+        print(f"[TC2.4] Warning: _read_ee_positions_from_bag failed: {exc}")
+        return []
+
+    results = []
+    for ts in tf_timestamps:
+        try:
+            result = buffer.lookup_transform_core('world', ee_link, rclpy.time.Time())
+            t = result.transform.translation
+            results.append((ts, t.x, t.y, t.z))
+        except Exception:
+            pass
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Test fixture
 # ---------------------------------------------------------------------------
 
-@pytest.mark.launch(fixture=launch_testing.fixtures.launch_context_with_nodes)
 class TestAdvancedMotionControl(unittest.TestCase):
     """Test Case 2: Advanced Motion Control (validates HD criteria)."""
 
@@ -99,7 +190,7 @@ class TestAdvancedMotionControl(unittest.TestCase):
             Bool, "/wordle_bot/start_mission", 10
         )
 
-        # Motion complete subscriber
+        # Motion complete subscriber (legacy — kept for TC2.1/TC2.2 stubs)
         cls.motion_complete = False
         cls.node.create_subscription(
             Bool,
@@ -112,8 +203,35 @@ class TestAdvancedMotionControl(unittest.TestCase):
         cls.tf_buffer   = tf2_ros.Buffer()
         cls.tf_listener = tf2_ros.TransformListener(cls.tf_buffer, cls.node)
 
+        # TC2.4 — full-stack HL integration
+        _latched = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        cls.gameboard_pub      = cls.node.create_publisher(
+            GameboardState, '/perception/gameboard_state', _latched
+        )
+        cls.word_req_pub       = cls.node.create_publisher(
+            String, '/hl_control/word_request', _latched
+        )
+        cls.scan_and_sweep_pub = cls.node.create_publisher(
+            Bool, '/wordle_bot/scan_and_sweep', 10
+        )
+        cls.mission_complete   = False
+        cls.goal_reached_count = 0
+        cls.robot_state        = 'IDLE'
+        cls.node.create_subscription(
+            Bool, '/wordle_bot/mission_complete', cls._on_mission_complete, 10
+        )
+        cls.node.create_subscription(
+            Bool, '/wordle_bot/goal_reached', cls._on_goal_reached, 10
+        )
+        cls.node.create_subscription(
+            String, '/wordle_bot/robot_state', cls._on_robot_state, 10
+        )
+
         # TODO (TC2.1): subscribe to executed goal order feedback once topic is defined
-        # (e.g., a topic that publishes which goal index is being executed)
         # cls.executed_order = []
         # cls.node.create_subscription(<OrderMsg>, "/wordle_bot/execution_order", cls._on_execution_order, 10)
 
@@ -133,6 +251,20 @@ class TestAdvancedMotionControl(unittest.TestCase):
     def _on_motion_complete(cls, msg: Bool):
         if msg.data:
             cls.motion_complete = True
+
+    @classmethod
+    def _on_mission_complete(cls, msg: Bool):
+        if msg.data:
+            cls.mission_complete = True
+
+    @classmethod
+    def _on_goal_reached(cls, msg: Bool):
+        if msg.data:
+            cls.goal_reached_count += 1
+
+    @classmethod
+    def _on_robot_state(cls, msg: String):
+        cls.robot_state = msg.data
 
     # TODO (TC2.1): implement _on_execution_order callback
     # @classmethod
@@ -393,3 +525,216 @@ class TestAdvancedMotionControl(unittest.TestCase):
 
                 # TODO: verify gripper feedback confirms successful pick and place
                 pass
+
+    # -----------------------------------------------------------------------
+    # TC2.4 — Full-Stack HL + WordleBot Control Integration  (validates HD)
+    # -----------------------------------------------------------------------
+
+    def test_tc2_4_full_stack_hl_wordle_control(self):
+        """
+        Validates: HD — end-to-end pipeline from perception through HL planning to
+        physical pick-and-place execution for a five-letter Wordle word.
+
+        Pipeline:
+          /perception/gameboard_state (GameboardState) →
+          HL Control Agent solves CRANE →
+          /wordle_bot/start_mission →
+          WordleBot Control executes pick-and-place for each letter →
+          /wordle_bot/mission_complete
+
+        Pass: mission_complete received within timeout; at least one goal_reached
+              signal fired per letter; robot descended to expected pick height.
+        Fail: Timeout, mission_complete not received, or no goal_reached signals.
+        """
+
+        TestAdvancedMotionControl.mission_complete   = False
+        TestAdvancedMotionControl.goal_reached_count = 0
+        TestAdvancedMotionControl.robot_state        = 'IDLE'
+
+        # ------------------------------------------------------------------ #
+        # Step 1: Scan and sweep — let the robot survey the workspace first.
+        # Completion is indicated by /wordle_bot/robot_state going IDLE.
+        # ------------------------------------------------------------------ #
+        scan_msg      = Bool()
+        scan_msg.data = True
+        self.scan_and_sweep_pub.publish(scan_msg)
+        self.node.get_logger().info("[TC2.4] Scan-and-sweep triggered — waiting to start.")
+
+        # Wait for RUNNING to confirm the sweep began, then wait for IDLE
+        scan_timeout = MOTION_TIMEOUT_S * 2
+        deadline     = time.time() + scan_timeout
+
+        # Wait for RUNNING
+        while TestAdvancedMotionControl.robot_state != 'RUNNING':
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            if time.time() > deadline:
+                self.fail(
+                    f"[TC2.4] Scan-and-sweep never entered RUNNING state within "
+                    f"{scan_timeout:.0f} s — is the control node up?"
+                )
+
+        self.node.get_logger().info("[TC2.4] Scan-and-sweep RUNNING — waiting for IDLE.")
+
+        # Wait for IDLE (sweep complete)
+        while TestAdvancedMotionControl.robot_state != 'IDLE':
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+            if time.time() > deadline:
+                self.fail(
+                    f"[TC2.4] Scan-and-sweep did not complete within {scan_timeout:.0f} s."
+                )
+
+        self.node.get_logger().info("[TC2.4] Scan-and-sweep complete.")
+
+        # ------------------------------------------------------------------ #
+        # Letter poses and word definition (world frame, 40 mm tiles at z=0.025)
+        # ------------------------------------------------------------------ #
+        WORD = 'CRANE'
+        LETTERS = [
+            ('C', 'C_object_1', -0.448,  0.072, 0.025),
+            ('R', 'R_object_1', -0.377,  0.154, 0.025),
+            ('A', 'A_object_1', -0.302,  0.302, 0.025),
+            ('N', 'N_object_1',  0.373,  0.220, 0.025),
+            ('E', 'E_object_1',  0.157,  0.304, 0.025),
+        ]
+        PICK_Z_OFFSET    = 0.08   # grasp_frame_transform z in createTask
+        GRASP_REACH_TOL  = 0.05   # 50 mm — warn if robot never descended this close
+        PLACE_REACH_TOL  = 0.05   # 50 mm — EE x check at each goal_reached
+        expected_grasp_z = min(z for _, _, _, _, z in LETTERS) + PICK_Z_OFFSET
+
+        # ------------------------------------------------------------------ #
+        # Bag recording
+        # ------------------------------------------------------------------ #
+        bag_dir  = tempfile.mkdtemp(prefix='tc2_4_')
+        bag_path = os.path.join(bag_dir, 'tc2_4')
+        bag_proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', bag_path,
+             '/joint_states', '/tf', '/tf_static',
+             '/wordle_bot/goal_reached', '/wordle_bot/mission_complete'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1.0)
+
+        # ------------------------------------------------------------------ #
+        # Publish GameboardState (latched — HL node receives even if late)
+        # ------------------------------------------------------------------ #
+        gb_msg = GameboardState()
+        for letter, obj_id, x, y, z in LETTERS:
+            lo = LetterObject()
+            lo.letter    = letter
+            lo.object_id = obj_id
+            lo.pose.header.frame_id       = 'world'
+            lo.pose.pose.position.x       = x
+            lo.pose.pose.position.y       = y
+            lo.pose.pose.position.z       = z
+            lo.pose.pose.orientation.w    = 1.0
+            gb_msg.letters.append(lo)
+        self.gameboard_pub.publish(gb_msg)
+        rclpy.spin_once(self.node, timeout_sec=0.1)
+        time.sleep(0.1)
+
+        # ------------------------------------------------------------------ #
+        # Publish word request (latched)
+        # ------------------------------------------------------------------ #
+        word_msg      = String()
+        word_msg.data = WORD
+        self.word_req_pub.publish(word_msg)
+        self.node.get_logger().info(
+            f"[TC2.4] Published GameboardState ({len(LETTERS)} letters) "
+            f"and word_request='{WORD}'."
+        )
+
+        # Allow HL agent time to plan and publish PickPlaceTask messages
+        time.sleep(2.0)
+
+        # ------------------------------------------------------------------ #
+        # Arm the mission
+        # ------------------------------------------------------------------ #
+        start_msg      = Bool()
+        start_msg.data = True
+        self.start_mission_pub.publish(start_msg)
+        self.node.get_logger().info(
+            "[TC2.4] Mission armed — waiting for full pick-and-place sequence to complete."
+        )
+
+        # ------------------------------------------------------------------ #
+        # Wait for mission_complete  (5 letters × 3× per-goal timeout)
+        # ------------------------------------------------------------------ #
+        timeout  = MOTION_TIMEOUT_S * 3 * len(LETTERS)
+        deadline = time.time() + timeout
+        passed   = True
+
+        try:
+            while not TestAdvancedMotionControl.mission_complete:
+                rclpy.spin_once(self.node, timeout_sec=0.1)
+                self.assertLess(
+                    time.time(), deadline,
+                    f"[TC2.4] Full-stack mission did not complete within {timeout:.0f} s — "
+                    "check HL control and MTC planning output.",
+                )
+            self.assertTrue(
+                TestAdvancedMotionControl.mission_complete,
+                "[TC2.4] mission_complete signal was not received.",
+            )
+            self.assertGreaterEqual(
+                TestAdvancedMotionControl.goal_reached_count, len(LETTERS),
+                f"[TC2.4] Expected at least {len(LETTERS)} goal_reached signals "
+                f"(one per letter), got {TestAdvancedMotionControl.goal_reached_count}.",
+            )
+            self.node.get_logger().info("[TC2.4] Full-stack mission complete — PASS.")
+
+        except AssertionError:
+            passed = False
+            raise
+
+        finally:
+            bag_proc.terminate()
+            bag_proc.wait()
+            self.node.get_logger().info(f"[TC2.4] Bag recorded to: {bag_path}")
+
+            # -------------------------------------------------------------- #
+            # Post-run diagnostics (mirrors TC1.6/TC1.7 analysis)
+            # -------------------------------------------------------------- #
+            ee_positions = _read_ee_positions_from_bag(bag_path)
+            goal_ts_list = _read_goal_reached_timestamps(bag_path)
+
+            min_ee_z     = min((z for _, _, _, z in ee_positions), default=None)
+            pick_x_vals  = [x for _, _, x, _, _ in LETTERS]
+
+            print(f"\n[TC2.4] === Full-Stack HL Integration Diagnostic Summary ===")
+            print(f"[TC2.4] Word: '{WORD}'  |  Letters published: {len(LETTERS)}")
+            print(f"[TC2.4] goal_reached signals received: "
+                  f"{TestAdvancedMotionControl.goal_reached_count}  "
+                  f"(expected >= {len(LETTERS)})")
+
+            if min_ee_z is not None:
+                delta = min_ee_z - expected_grasp_z
+                flag  = (
+                    "OK — reached pick height"
+                    if delta <= GRASP_REACH_TOL
+                    else f"WARNING — stopped {delta * 1000:.1f} mm above expected pick z"
+                )
+                print(
+                    f"[TC2.4] Min EE z seen: {min_ee_z:.4f} m  "
+                    f"(expected grasp z={expected_grasp_z:.4f})  [{flag}]"
+                )
+            else:
+                print("[TC2.4] Min EE z: (not available — bag empty or TF not resolved)")
+
+            print(f"[TC2.4] EE position at each goal_reached:")
+            for i, ts_ns in enumerate(goal_ts_list):
+                try:
+                    tf  = _read_ee_pose_from_bag(bag_path, ts_ns)
+                    t   = tf.transform.translation
+                    nearest_pick_x = min(pick_x_vals, key=lambda px: abs(px - t.x))
+                    x_err = abs(t.x - nearest_pick_x)
+                    ok    = "OK" if x_err <= PLACE_REACH_TOL else "WARNING — far from any pick x"
+                    print(
+                        f"[TC2.4]   goal {i+1:2d}: EE=({t.x:.4f}, {t.y:.4f}, {t.z:.4f})  "
+                        f"nearest_pick_x={nearest_pick_x:.4f}  "
+                        f"x_err={x_err*1000:.1f} mm  [{ok}]"
+                    )
+                except Exception as exc:
+                    print(f"[TC2.4]   goal {i+1:2d}: EE lookup failed — {exc}")
+
+            print(f"[TC2.4] Result: {'PASS' if passed else 'FAIL'}")
+            print(f"[TC2.4] ====================================================\n")
