@@ -97,6 +97,16 @@ private:
   std::condition_variable cv_;
   std::thread          mission_thread_;
 
+  // STOPPED-state synchronisation (stopped_cv_ shares queue_mutex_)
+  std::atomic<bool>       in_stopped_state_{false};
+  std::atomic<bool>       resume_requested_{false};
+  std::atomic<bool>       abort_requested_{false};
+  std::condition_variable stopped_cv_;
+
+  // Tasks saved across a STOPPED state so resume can re-execute them
+  std::vector<WordleBotController::PickPlaceEntry> resume_pick_tasks_;
+  std::vector<geometry_msgs::msg::Pose>            resume_goal_tasks_;
+
   // ---------------------------------------------------------------------------
   // Mission Control Callbacks
   // ---------------------------------------------------------------------------

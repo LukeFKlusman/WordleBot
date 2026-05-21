@@ -187,6 +187,11 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
       RCLCPP_WARN(LOGGER, "startMissionCallback: mission already running — ignoring start.");
       return;
     }
+    if (in_stopped_state_.load()) {
+      RCLCPP_WARN(LOGGER,
+        "startMissionCallback: robot is in STOPPED state — send resume or abort first.");
+      return;
+    }
     if (goal_queue_.empty() && pick_place_queue_.empty()) {
       RCLCPP_WARN(LOGGER,
         "startMissionCallback: goal queue is empty and no pick-and-place tasks — ignoring.");
@@ -208,6 +213,10 @@ void WordleBotControlNode::startMissionCallback(const std_msgs::msg::Bool::Share
 void WordleBotControlNode::stopMissionCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if (!msg->data) return;
+  if (in_stopped_state_.load()) {
+    RCLCPP_WARN(LOGGER, "stopMissionCallback: already in STOPPED state — ignoring.");
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (!mission_running_) {
@@ -223,13 +232,25 @@ void WordleBotControlNode::stopMissionCallback(const std_msgs::msg::Bool::Shared
 void WordleBotControlNode::resumeMissionCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if (!msg->data) return;
-  RCLCPP_WARN(LOGGER, "resumeMissionCallback: resume not yet implemented.");
+  if (!in_stopped_state_.load()) {
+    RCLCPP_WARN(LOGGER, "resumeMissionCallback: not in STOPPED state — ignoring.");
+    return;
+  }
+  resume_requested_.store(true);
+  stopped_cv_.notify_one();
+  RCLCPP_INFO(LOGGER, "resumeMissionCallback: resume signal sent.");
 }
 
 void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if (!msg->data) return;
-  RCLCPP_WARN(LOGGER, "abortMissionCallback: abort not yet implemented.");
+  if (!in_stopped_state_.load()) {
+    RCLCPP_WARN(LOGGER, "abortMissionCallback: not in STOPPED state — ignoring.");
+    return;
+  }
+  abort_requested_.store(true);
+  stopped_cv_.notify_one();
+  RCLCPP_INFO(LOGGER, "abortMissionCallback: abort signal sent.");
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +494,11 @@ void WordleBotControlNode::missionLoop()
     std_msgs::msg::Bool signal;
     signal.data = true;
 
+    // Index into current_tasks / current_mission where execution was interrupted.
+    // Defaults to 0 so a planning-phase stop re-queues all tasks on resume.
+    std::size_t pp_resume_from   = 0;
+    std::size_t goal_resume_from = 0;
+
     if (do_pick_and_place) {
       RCLCPP_INFO(LOGGER, "Mission: %zu pick-and-place task(s) queued.", current_tasks.size());
 
@@ -545,6 +571,7 @@ void WordleBotControlNode::missionLoop()
           if (stop_requested_.load()) {
             RCLCPP_INFO(LOGGER,
               "Execution phase: stop requested before task %zu — aborting.", i + 1);
+            pp_resume_from = i;
             all_ok = false;
             break;
           }
@@ -556,6 +583,7 @@ void WordleBotControlNode::missionLoop()
             RCLCPP_ERROR(LOGGER,
               "Execution FAILED at task %zu ('%s') — stopping.",
               i + 1, planned_tasks[i].object_id.c_str());
+            pp_resume_from = i;
             all_ok = false;
             break;
           }
@@ -626,6 +654,7 @@ void WordleBotControlNode::missionLoop()
           for (std::size_t i = 0; i < planned_goals.size(); ++i) {
             if (stop_requested_.load()) {
               RCLCPP_INFO(LOGGER, "Goal execution: stop requested before goal %zu — aborting.", i + 1);
+              goal_resume_from = i;
               all_ok = false;
               break;
             }
@@ -634,6 +663,7 @@ void WordleBotControlNode::missionLoop()
 
             if (!controller_->executePlannedMoveToGoal(planned_goals[i]) || stop_requested_.load()) {
               RCLCPP_ERROR(LOGGER, "Execution FAILED at goal %zu — stopping.", i + 1);
+              goal_resume_from = i;
               all_ok = false;
               break;
             }
@@ -658,6 +688,7 @@ void WordleBotControlNode::missionLoop()
         for (std::size_t i = 0; i < current_mission.size(); ++i) {
           if (stop_requested_.load()) {
             RCLCPP_INFO(LOGGER, "Goal mission (MGI): stop requested before goal %zu — aborting.", i + 1);
+            goal_resume_from = i;
             all_ok = false;
             break;
           }
@@ -667,6 +698,7 @@ void WordleBotControlNode::missionLoop()
 
           if (!controller_->moveToGoal(current_mission[i]) || stop_requested_.load()) {
             RCLCPP_ERROR(LOGGER, "Goal mission (MGI): FAILED at goal %zu.", i + 1);
+            goal_resume_from = i;
             all_ok = false;
             break;
           }
@@ -687,6 +719,127 @@ void WordleBotControlNode::missionLoop()
         }
       }
     }
+
+    // ── STOPPED state handler ─────────────────────────────────────────────────
+    // Entered whenever the execution blocks above broke out due to stop_requested_.
+    // Blocks here until the operator sends resume or abort.
+    if (stop_requested_.load()) {
+      // Snapshot gripper state before doing anything else (robot is halted).
+      bool gripper_closed = controller_->isGripperClosed();
+
+      // Save remaining unexecuted tasks so resume can re-execute them.
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (do_pick_and_place) {
+          resume_pick_tasks_.assign(
+            current_tasks.begin() + pp_resume_from, current_tasks.end());
+        } else {
+          resume_goal_tasks_.assign(
+            current_mission.begin() + goal_resume_from, current_mission.end());
+        }
+        in_stopped_state_.store(true);
+      }
+
+      {
+        std_msgs::msg::String s;
+        s.data = "STOPPED";
+        robot_state_pub_->publish(s);
+      }
+      RCLCPP_INFO(LOGGER,
+        "missionLoop: STOPPED (gripper_closed=%s, %zu pick tasks / %zu goal tasks remain).",
+        gripper_closed ? "yes" : "no",
+        resume_pick_tasks_.size(), resume_goal_tasks_.size());
+
+      // Block until resume or abort (releases queue_mutex_ while waiting).
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        stopped_cv_.wait(lock, [this]() {
+          return resume_requested_.load() || abort_requested_.load() || !rclcpp::ok();
+        });
+      }
+
+      in_stopped_state_.store(false);
+      if (!rclcpp::ok()) break;
+
+      // ── Abort path ──────────────────────────────────────────────────────────
+      if (abort_requested_.exchange(false)) {
+        RCLCPP_INFO(LOGGER, "missionLoop: abort — clearing queues and returning to home.");
+        controller_->clearStopFlag();
+        stop_requested_.store(false);
+        controller_->returnToHome();
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex_);
+          pick_place_queue_.clear();
+          goal_queue_.clear();
+          resume_pick_tasks_.clear();
+          resume_goal_tasks_.clear();
+          controller_->clearLetterObjects(tracked_letter_ids_);
+          tracked_letter_ids_.clear();
+          letter_object_counter_ = 0;
+          mission_running_ = false;
+          mission_armed_   = false;
+        }
+        {
+          std_msgs::msg::String s;
+          s.data = "IDLE";
+          robot_state_pub_->publish(s);
+        }
+        continue;
+      }
+
+      // ── Resume path ─────────────────────────────────────────────────────────
+      resume_requested_.store(false);
+      controller_->clearStopFlag();
+      stop_requested_.store(false);
+
+      if (gripper_closed) {
+        RCLCPP_INFO(LOGGER, "missionLoop: gripper was closed — running recoverObject().");
+        std::string held_id;
+        if (do_pick_and_place && !resume_pick_tasks_.empty()) {
+          held_id = resume_pick_tasks_.front().object_id;
+        }
+        controller_->recoverObject(held_id);
+        // The object in the gripper belonged to resume_pick_tasks_[0]; skip it.
+        if (do_pick_and_place && !resume_pick_tasks_.empty()) {
+          resume_pick_tasks_.erase(resume_pick_tasks_.begin());
+        }
+      }
+
+      bool has_remaining = false;
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (do_pick_and_place && !resume_pick_tasks_.empty()) {
+          // Rebuild collision scene for remaining letter objects only.
+          controller_->clearLetterObjects(tracked_letter_ids_);
+          tracked_letter_ids_.clear();
+          letter_object_counter_ = 0;
+          pick_place_queue_ = std::move(resume_pick_tasks_);
+          for (const auto & t : pick_place_queue_) {
+            controller_->addCollisionObject(t.collision_object);
+            tracked_letter_ids_.push_back(t.object_id);
+          }
+          mission_armed_ = true;
+          has_remaining  = true;
+        } else if (!do_pick_and_place && !resume_goal_tasks_.empty()) {
+          goal_queue_    = std::move(resume_goal_tasks_);
+          mission_armed_ = true;
+          has_remaining  = true;
+        }
+
+        if (!has_remaining) {
+          mission_running_ = false;
+          mission_armed_   = false;
+        }
+      }
+
+      if (has_remaining) {
+        RCLCPP_INFO(LOGGER, "missionLoop: re-arming for remaining tasks after resume.");
+        // mission_running_ stays true; CV predicate will be satisfied immediately.
+        continue;
+      }
+      // No remaining tasks: fall through to normal IDLE cleanup below.
+    }
+    // ── End STOPPED state handler ─────────────────────────────────────────────
 
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);

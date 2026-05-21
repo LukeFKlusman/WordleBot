@@ -96,7 +96,7 @@ ros2 topic pub --once /wordle_bot/goal_pose geometry_msgs/msg/PoseStamped \
 
 # Or: load a multi-goal mission then start it in two steps
 ros2 topic pub --once /wordle_bot/set_mission geometry_msgs/msg/PoseArray \
-  "{header: {frame_id: 'world'}, poses: [{position: {x: 0.4, y: 0.0, z: 0.3}, orientation: {x: 0.0, y: 0.707, z: 0.0, w: 0.707}}]}"
+  "{header: {frame_id: 'world'}, poses: [{position: {x: 1.5, y: 1.5, z: 0.1}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}]}"
 
 ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
 ```

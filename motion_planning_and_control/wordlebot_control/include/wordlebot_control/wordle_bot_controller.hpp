@@ -166,6 +166,16 @@ public:
   // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
   bool closeGripper();
 
+  // Returns true if the gripper joint positions are closer to the "closed" SRDF named state
+  // than to the "open" state. Returns false on any state-monitor failure (safe default = open).
+  bool isGripperClosed();
+
+  // Move to safe recovery position (0.15, 0.15, 0.03), open gripper, return home.
+  // held_object_id: if non-empty, the object is detached from gripper_tcp at the safe position
+  // before the gripper opens. Pass "" when no object is known to be attached.
+  // clearStopFlag() must be called before this.
+  bool recoverObject(const std::string & held_object_id = "");
+
   // ---------------------------------------------------------------------------
   // Motion Control
   // ---------------------------------------------------------------------------

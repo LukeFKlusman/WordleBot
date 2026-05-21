@@ -1590,6 +1590,126 @@ bool WordleBotController::closeGripper()
   return true;
 }
 
+bool WordleBotController::isGripperClosed()
+{
+  auto state = move_group_.getCurrentState(2.0);
+  if (!state) {
+    RCLCPP_ERROR(LOGGER, "isGripperClosed: getCurrentState returned null — assuming open.");
+    return false;
+  }
+
+  const moveit::core::JointModelGroup * jmg =
+    state->getRobotModel()->getJointModelGroup("ur_onrobot_gripper");
+  if (!jmg) {
+    RCLCPP_ERROR(LOGGER, "isGripperClosed: joint group 'ur_onrobot_gripper' not found — assuming open.");
+    return false;
+  }
+
+  std::vector<double> current_vals;
+  state->copyJointGroupPositions(jmg, current_vals);
+
+  moveit::core::RobotState open_state(*state);
+  moveit::core::RobotState closed_state(*state);
+  open_state.setToDefaultValues(jmg, "open");
+  closed_state.setToDefaultValues(jmg, "closed");
+
+  std::vector<double> open_vals, closed_vals;
+  open_state.copyJointGroupPositions(jmg, open_vals);
+  closed_state.copyJointGroupPositions(jmg, closed_vals);
+
+  double dist_open = 0.0, dist_closed = 0.0;
+  for (std::size_t i = 0; i < current_vals.size(); ++i) {
+    double do_i = current_vals[i] - open_vals[i];
+    double dc_i = current_vals[i] - closed_vals[i];
+    dist_open   += do_i * do_i;
+    dist_closed += dc_i * dc_i;
+  }
+
+  bool closed = (dist_closed < dist_open);
+  RCLCPP_INFO(LOGGER, "isGripperClosed: dist_closed=%.4f dist_open=%.4f → %s.",
+    dist_closed, dist_open, closed ? "CLOSED" : "OPEN");
+  return closed;
+}
+
+bool WordleBotController::recoverObject(const std::string & held_object_id)
+{
+  RCLCPP_INFO(LOGGER, "recoverObject: beginning object recovery to safe position (0.15, 0.15, 0.03).");
+
+  // Preserve current gripper orientation so the arm doesn't flip the wrist mid-recovery.
+  auto eef_stamped = move_group_.getCurrentPose("gripper_tcp");
+  // const auto & orient = eef_stamped.pose.orientation;
+
+  geometry_msgs::msg::Pose approach_pose;
+  approach_pose.position.x    = 0.15;
+  approach_pose.position.y    = 0.15;
+  approach_pose.position.z    = 0.15;
+  approach_pose.orientation.x   = 1.0;
+  approach_pose.orientation.y   = 0.0;
+  approach_pose.orientation.z   = 0.0;
+  approach_pose.orientation.w   = 0.0;
+
+  geometry_msgs::msg::Pose safe_pose;
+  safe_pose.position.x    = 0.15;
+  safe_pose.position.y    = 0.15;
+  safe_pose.position.z    = 0.03;
+  safe_pose.orientation.x   = 1.0;
+  safe_pose.orientation.y   = 0.0;
+  safe_pose.orientation.z   = 0.0;
+  safe_pose.orientation.w   = 0.0;
+
+  bool ok = true;
+
+  RCLCPP_INFO(LOGGER, "recoverObject: moving to approach pose above safe position.");
+  if (!moveToGoal(approach_pose)) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: moveToGoal to approach failed — continuing.");
+    ok = false;
+  }
+
+  if (ok) {
+    RCLCPP_INFO(LOGGER, "recoverObject: Cartesian descent to safe position.");
+    if (!moveCartesianToWaypoint(safe_pose)) {
+      RCLCPP_ERROR(LOGGER, "recoverObject: Cartesian descent failed — continuing.");
+      ok = false;
+    }
+  }
+
+  // Detach the held object at the safe position before opening the gripper.
+  // Mirrors detachSensorCollisionObject() — REMOVE moves the object back to the world scene
+  // at its current (safe) position rather than leaving it fused to the end effector.
+  if (!held_object_id.empty()) {
+    moveit_msgs::msg::AttachedCollisionObject detach;
+    detach.link_name = "gripper_tcp";
+    detach.object.id = held_object_id;
+    detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    planning_scene_.applyAttachedCollisionObject(detach);
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
+    RCLCPP_INFO(LOGGER, "recoverObject: detached '%s' from gripper_tcp at safe position.",
+      held_object_id.c_str());
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: opening gripper.");
+  if (!openGripper()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: openGripper failed — continuing.");
+    ok = false;
+  }
+
+  if (ok) {
+    RCLCPP_INFO(LOGGER, "recoverObject: Cartesian ascent from safe position.");
+    if (!moveCartesianToWaypoint(approach_pose)) {
+      RCLCPP_ERROR(LOGGER, "recoverObject: Cartesian ascent failed — continuing.");
+    }
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: returning to home.");
+  if (!returnToHome()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: returnToHome failed.");
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: complete.");
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Motion Control
 // Interrupt and reset helpers for the stop/resume lifecycle.
