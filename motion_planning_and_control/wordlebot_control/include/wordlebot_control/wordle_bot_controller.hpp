@@ -201,6 +201,10 @@ public:
   // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
   static moveit_msgs::msg::Constraints buildPathConstraints();
 
+  // Return joint constraints that clamp wrist_2 and wrist_3 to [-π, π], applied
+  // to all MTC Connect stages and MGI Cartesian planning to prevent drift.
+  static moveit_msgs::msg::Constraints buildJointLimitConstraints();
+
   // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
   // This is the L1 path length in joint space — used to validate motion efficiency.
   static double computeTotalJointDisplacement(
