@@ -160,11 +160,24 @@ public:
   // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
   bool returnToHome();
 
+  // Move the arm to the working pose defined in config/pose_working.yaml.
+  bool returnToWorkingPose();
+
   // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
   bool openGripper();
 
   // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
   bool closeGripper();
+
+  // Returns true if the gripper joint positions are closer to the "closed" SRDF named state
+  // than to the "open" state. Returns false on any state-monitor failure (safe default = open).
+  bool isGripperClosed();
+
+  // Move to safe recovery position (0.15, 0.15, 0.03), open gripper, return home.
+  // held_object_id: if non-empty, the object is detached from gripper_tcp at the safe position
+  // before the gripper opens. Pass "" when no object is known to be attached.
+  // clearStopFlag() must be called before this.
+  bool recoverObject(const std::string & held_object_id = "");
 
   // ---------------------------------------------------------------------------
   // Motion Control
@@ -187,6 +200,10 @@ public:
 
   // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
   static moveit_msgs::msg::Constraints buildPathConstraints();
+
+  // Return joint constraints that clamp wrist_2 and wrist_3 to [-π, π], applied
+  // to all MTC Connect stages and MGI Cartesian planning to prevent drift.
+  static moveit_msgs::msg::Constraints buildJointLimitConstraints();
 
   // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
   // This is the L1 path length in joint space — used to validate motion efficiency.

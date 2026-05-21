@@ -1,0 +1,12 @@
+wordle_bot_control_node:
+  ros__parameters:
+    # Working joints: joint angles (radians) used to define a known good working position for the robot.
+    # Edit these values to match a known good working position for the robot.
+    # Degrees: shoulder_pan=30, shoulder_lift=-115, elbow=51, wrist_1=-28, wrist_2=-87, wrist_3=-61
+    working_joints:
+      shoulder_pan_joint:   0.5236   #  30 deg
+      shoulder_lift_joint: -2.0071   # -115 deg
+      elbow_joint:          0.8901   #  51 deg
+      wrist_1_joint:       -0.4887   # -28 deg
+      wrist_2_joint:       -1.5184   # -87 deg
+      wrist_3_joint:       -1.0647   # -61 deg

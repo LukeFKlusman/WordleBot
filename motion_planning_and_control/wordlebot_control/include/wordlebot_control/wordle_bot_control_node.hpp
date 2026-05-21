@@ -75,7 +75,7 @@ private:
   // ---------------------------------------------------------------------------
   // Scan-and-sweep parameters (loaded from config/scan_sweep_poses.yaml)
   // ---------------------------------------------------------------------------
-  std::array<geometry_msgs::msg::Pose, 4> scan_sweep_poses_;
+  std::array<geometry_msgs::msg::Pose, 6> scan_sweep_poses_;
   double scan_sweep_dwell_time_{1.5};
 
   // ---------------------------------------------------------------------------
@@ -96,6 +96,16 @@ private:
   std::mutex           queue_mutex_;
   std::condition_variable cv_;
   std::thread          mission_thread_;
+
+  // STOPPED-state synchronisation (stopped_cv_ shares queue_mutex_)
+  std::atomic<bool>       in_stopped_state_{false};
+  std::atomic<bool>       resume_requested_{false};
+  std::atomic<bool>       abort_requested_{false};
+  std::condition_variable stopped_cv_;
+
+  // Tasks saved across a STOPPED state so resume can re-execute them
+  std::vector<WordleBotController::PickPlaceEntry> resume_pick_tasks_;
+  std::vector<geometry_msgs::msg::Pose>            resume_goal_tasks_;
 
   // ---------------------------------------------------------------------------
   // Mission Control Callbacks

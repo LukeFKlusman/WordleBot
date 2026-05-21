@@ -307,7 +307,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     stage_move_to_pick->setTimeout(0.20);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage_move_to_pick->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage_move_to_pick->setPathConstraints(buildJointLimitConstraints());
     task.add(std::move(stage_move_to_pick));
   }
 
@@ -448,7 +448,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
         {arm_group, sampling_planner}});
     stage->setTimeout(0.20);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
-    // stage->setPathConstraints(WordleBotController::buildPathConstraints());
+    // stage->setPathConstraints(buildJointLimitConstraints());
     task.add(std::move(stage));
   }
 
@@ -547,12 +547,19 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     task.add(std::move(place));
   }
 
-  // ── Stage 7: return home — only for the final task in a batch ────────────
+  // ── Stage 7: return to working pose — only for the final task in a batch ──
   if (include_return_home) {
-    RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return home'.", object_id.c_str());
-    auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+    RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return to working pose'.", object_id.c_str());
+    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", interpolation_planner);
     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-    stage->setGoal("home");
+    stage->setGoal(std::map<std::string, double>{
+      {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+      {"shoulder_lift_joint", node_->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+      {"elbow_joint",         node_->get_parameter("working_joints.elbow_joint").as_double()},
+      {"wrist_1_joint",       node_->get_parameter("working_joints.wrist_1_joint").as_double()},
+      {"wrist_2_joint",       node_->get_parameter("working_joints.wrist_2_joint").as_double()},
+      {"wrist_3_joint",       node_->get_parameter("working_joints.wrist_3_joint").as_double()},
+    });
     task.add(std::move(stage));
   } else {
     RCLCPP_DEBUG(LOGGER,
@@ -948,9 +955,10 @@ std::vector<double> WordleBotController::computeBestIK(
     return !lps->isStateColliding(*state, group->getName());
   };
 
-  for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
+  // One IK attempt: seed → solve → normalise → validate → cost. Uses return
+  // in place of continue so the retry loop below can reuse the same logic.
+  auto runIKAttempt = [&](int attempt) {
     moveit::core::RobotState ik_state(*current_state);
-
     if (attempt < kWarmAttempts) {
       ik_state.setJointGroupPositions(jmg, kWarmStart);
       ik_state.update();
@@ -959,7 +967,7 @@ std::vector<double> WordleBotController::computeBestIK(
     }
 
     if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1, isCollisionFree)) {
-      continue;
+      return;
     }
     ++ik_successes;
 
@@ -987,18 +995,33 @@ std::vector<double> WordleBotController::computeBestIK(
       candidate[i] = best_norm;
     }
 
-    // Clamp wrist_3 to [-π, π]: UR RTDE reports wrist_3 in this range; values outside
-    // it cause a PATH_TOLERANCE_VIOLATED abort (2π position error) on the controller.
+    // Reject candidates where wrist_3_joint is outside [-π, π].
+    // The normalization above picks the 2π-equivalent closest to the current
+    // joint value, which can push wrist_3 further out of range each move (e.g.
+    // current=-3.89 rad, IK=+1.0 rad → normalized=-5.28 rad). Rejecting those
+    // solutions forces the IK to find one whose normalized wrist_3 stays in
+    // [-π, π], making the controller reverse direction rather than accumulate.
+    bool wrist3_in_range = true;
+    double wrist3_val = 0.0;
     for (std::size_t i = 0; i < joint_names.size(); ++i) {
       if (joint_names[i] == "wrist_3_joint" && i < candidate.size()) {
-        while (candidate[i] > M_PI)  candidate[i] -= 2.0 * M_PI;
-        while (candidate[i] < -M_PI) candidate[i] += 2.0 * M_PI;
+        wrist3_val = candidate[i];
+        if (wrist3_val < -3.0 * M_PI / 2.0 || wrist3_val > 3.0 * M_PI / 2.0) {
+          wrist3_in_range = false;
+        }
+        break;
       }
     }
+    if (!wrist3_in_range) {
+      RCLCPP_DEBUG(LOGGER,
+        "computeBestIK: attempt %d rejected — wrist_3=%.3f rad outside [-3π/2, 3π/2].",
+        attempt, wrist3_val);
+      return;
+    }
 
-    // Reject candidates where wrist_1_joint is outside [-180°, +60°].
-    static constexpr double kWrist1Min = -M_PI;         // -180°
-    static constexpr double kWrist1Max =  M_PI / 12.0;  //  +15°
+    // Reject candidates where wrist_1_joint is outside [-180°, +15°].
+    static constexpr double kWrist1Min = -M_PI;
+    static constexpr double kWrist1Max =  M_PI / 12.0;
     bool wrist1_in_range = true;
     double wrist1_val = 0.0;
     for (std::size_t i = 0; i < joint_names.size(); ++i) {
@@ -1014,7 +1037,7 @@ std::vector<double> WordleBotController::computeBestIK(
       RCLCPP_DEBUG(LOGGER,
         "computeBestIK: attempt %d rejected — wrist_1=%.3f rad outside [%.3f, %.3f].",
         attempt, wrist1_val, kWrist1Min, kWrist1Max);
-      continue;
+      return;
     }
 
     double movement_cost      = 0.0;
@@ -1032,15 +1055,46 @@ std::vector<double> WordleBotController::computeBestIK(
       best_cost         = cost;
       best_joint_values = candidate;
     }
+  };
+
+  for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
+    runIKAttempt(attempt);
   }
 
-  RCLCPP_INFO(LOGGER, "computeBestIK: %d/%d collision-free IK solutions found. Best cost: %.4f",
-    ik_successes, kTotalAttempts, best_cost);
+  if (best_joint_values.empty()) {
+    RCLCPP_WARN(LOGGER,
+      "computeBestIK: no valid solution after %d attempts — retrying with %d more random seeds.",
+      kTotalAttempts, kTotalAttempts);
+    for (int attempt = kTotalAttempts; attempt < kTotalAttempts * 2; ++attempt) {
+      runIKAttempt(attempt);
+    }
+  }
+
+  RCLCPP_INFO(LOGGER, "computeBestIK: %d IK solutions found. Best cost: %.4f",
+    ik_successes, best_cost);
 
   if (best_joint_values.empty()) {
+    RCLCPP_INFO(LOGGER,
+      "computeBestIK: IK FAILED for target pose (x=%.3f y=%.3f z=%.3f qx=%.3f qy=%.3f qz=%.3f qw=%.3f).",
+      target_pose.position.x, target_pose.position.y, target_pose.position.z,
+      target_pose.orientation.x, target_pose.orientation.y,
+      target_pose.orientation.z, target_pose.orientation.w);
+    RCLCPP_INFO(LOGGER, "computeBestIK: start joint state at time of failure:");
+    for (std::size_t i = 0; i < current_joint_values.size() && i < joint_names.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        joint_names[i].c_str(), current_joint_values[i],
+        current_joint_values[i] * 180.0 / M_PI);
+    }
     RCLCPP_ERROR(LOGGER,
       "computeBestIK: no valid IK solution found for pose (x=%.3f y=%.3f z=%.3f).",
       target_pose.position.x, target_pose.position.y, target_pose.position.z);
+  } else {
+    RCLCPP_INFO(LOGGER, "computeBestIK: goal joint state selected:");
+    for (std::size_t i = 0; i < best_joint_values.size() && i < joint_names.size(); ++i) {
+      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+        joint_names[i].c_str(), best_joint_values[i],
+        best_joint_values[i] * 180.0 / M_PI);
+    }
   }
   return best_joint_values;
 }
@@ -1123,7 +1177,41 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
     }
   }
 
-  const std::vector<double> best_q = computeBestIK(current_state, goal_pose);
+  std::vector<double> best_q = computeBestIK(current_state, goal_pose);
+
+  if (best_q.empty() && jmg) {
+    // All IK attempts failed. Negate wrist_3_joint and move there, then retry.
+    RCLCPP_WARN(LOGGER, "moveToGoal: IK failed — attempting wrist_3 flip recovery.");
+
+    std::vector<double> flipped_q;
+    current_state->copyJointGroupPositions(jmg, flipped_q);
+    const auto & flip_jnames = jmg->getVariableNames();
+    for (std::size_t i = 0; i < flipped_q.size() && i < flip_jnames.size(); ++i) {
+      if (flip_jnames[i] == "wrist_3_joint") {
+        double & v = flipped_q[i];
+        const double before = v;
+        while (v >  M_PI) v -= 2.0 * M_PI;
+        while (v < -M_PI) v += 2.0 * M_PI;
+        RCLCPP_INFO(LOGGER, "moveToGoal: normalising wrist_3: %.3f rad → %.3f rad.",
+          before, v);
+        break;
+      }
+    }
+
+    move_group_.setStartStateToCurrentState();
+    move_group_.setJointValueTarget(flipped_q);
+    moveit::planning_interface::MoveGroupInterface::Plan flip_plan;
+    if (static_cast<bool>(move_group_.plan(flip_plan)) &&
+        move_group_.execute(flip_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+      current_state = move_group_.getCurrentState(2.0);
+      if (current_state) {
+        best_q = computeBestIK(current_state, goal_pose);
+      }
+    } else {
+      RCLCPP_ERROR(LOGGER, "moveToGoal: wrist_3 flip move failed.");
+    }
+  }
+
   if (best_q.empty()) {
     RCLCPP_ERROR(LOGGER, "moveToGoal: IK failed — no valid solution found.");
     return false;
@@ -1192,28 +1280,37 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
 bool WordleBotController::moveCartesianToWaypoint(
   const geometry_msgs::msg::Pose & target_pose)
 {
-  move_group_.setStartStateToCurrentState();
-  moveit_msgs::msg::RobotTrajectory trajectory;
-  const double fraction = move_group_.computeCartesianPath(
-    {target_pose}, kCartesianEefStep, kCartesianJumpThreshold, trajectory);
+  static constexpr double kStepSizes[] = {kCartesianEefStep, 0.03, 0.05};
 
-  RCLCPP_INFO(LOGGER,
-    "moveCartesianToWaypoint: fraction=%.3f  target xyz=(%.3f, %.3f, %.3f)",
-    fraction,
-    target_pose.position.x, target_pose.position.y, target_pose.position.z);
+  for (const double step : kStepSizes) {
+    move_group_.setStartStateToCurrentState();
+    moveit_msgs::msg::RobotTrajectory trajectory;
+    const double fraction = move_group_.computeCartesianPath(
+      {target_pose}, step, kCartesianJumpThreshold, trajectory);
 
-  if (fraction >= kCartesianMinFraction) {
-    const auto result = move_group_.execute(trajectory);
-    if (result != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(LOGGER, "moveCartesianToWaypoint: execution failed (%d).", result.val);
-      return false;
+    RCLCPP_INFO(LOGGER,
+      "moveCartesianToWaypoint: step=%.3f  fraction=%.3f  target xyz=(%.3f, %.3f, %.3f)",
+      step, fraction,
+      target_pose.position.x, target_pose.position.y, target_pose.position.z);
+
+    if (fraction >= kCartesianMinFraction) {
+      const auto result = move_group_.execute(trajectory);
+      if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_WARN(LOGGER,
+          "moveCartesianToWaypoint: execution failed (%d) — falling back to moveToGoal.",
+          result.val);
+        return moveToGoal(target_pose);
+      }
+      return true;
     }
-    return true;
+
+    RCLCPP_WARN(LOGGER,
+      "moveCartesianToWaypoint: step=%.3f fraction=%.3f < %.3f — trying next step size.",
+      step, fraction, kCartesianMinFraction);
   }
 
   RCLCPP_WARN(LOGGER,
-    "moveCartesianToWaypoint: fraction=%.3f < %.3f — falling back to moveToGoal.",
-    fraction, kCartesianMinFraction);
+    "moveCartesianToWaypoint: all step sizes failed — falling back to moveToGoal.");
   return moveToGoal(target_pose);
 }
 
@@ -1264,7 +1361,7 @@ mtc::Task WordleBotController::createScanAndSweepTask(
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
     connect->setTimeout(0.2);
     connect->properties().configureInitFrom(mtc::Stage::PARENT);
-    // connect->setPathConstraints(WordleBotController::buildPathConstraints());
+    // connect->setPathConstraints(buildJointLimitConstraints());
     task.add(std::move(connect));
   }
 
@@ -1323,8 +1420,8 @@ mtc::Task WordleBotController::createScanAndSweepTask(
 bool WordleBotController::runScanAndSweep(
   const std::vector<geometry_msgs::msg::Pose> & poses, double dwell_secs)
 {
-  if (poses.size() != 4) {
-    RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 4 poses, got %zu.", poses.size());
+  if (poses.size() != 6) {
+    RCLCPP_ERROR(LOGGER, "runScanAndSweep: expected 6 poses, got %zu.", poses.size());
     return false;
   }
 
@@ -1332,17 +1429,18 @@ bool WordleBotController::runScanAndSweep(
   for (size_t i = 0; i < poses.size(); ++i) {
     RCLCPP_INFO(LOGGER,
       "runScanAndSweep: pose %zu  xyz=(%.3f, %.3f, %.3f)  quat=(%.3f, %.3f, %.3f, %.3f)",
-      i + 1,
+      i,
       poses[i].position.x,    poses[i].position.y,    poses[i].position.z,
       poses[i].orientation.x, poses[i].orientation.y,
       poses[i].orientation.z, poses[i].orientation.w);
   }
 
   if constexpr (USE_MTC_FOR_SCAN_SWEEP) {
-    // ── MTC path (original behaviour) ──────────────────────────────────────
+    // ── MTC path — uses poses[0..3] only (original 4-pose behaviour) ──────
     if (stop_requested_.load()) { return false; }
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): building scan task.");
-    auto sweep_task = createScanAndSweepTask(poses, nullptr);
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): building scan task (poses 0-3).");
+    const std::vector<geometry_msgs::msg::Pose> mtc_poses(poses.begin(), poses.begin() + 4);
+    auto sweep_task = createScanAndSweepTask(mtc_poses, nullptr);
 
     try {
       sweep_task.init();
@@ -1351,7 +1449,7 @@ bool WordleBotController::runScanAndSweep(
       return false;
     }
 
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep (all 4 poses).");
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep.");
     moveit::core::MoveItErrorCode plan_result;
     try {
       plan_result = sweep_task.plan(15);
@@ -1367,7 +1465,7 @@ bool WordleBotController::runScanAndSweep(
     }
 
     RCLCPP_INFO(LOGGER,
-      "runScanAndSweep (MTC): sweep task planned — %zu solution(s), best cost=%.3f. Executing.",
+      "runScanAndSweep (MTC): planned — %zu solution(s), best cost=%.3f. Executing.",
       sweep_task.solutions().size(), sweep_task.solutions().front()->cost());
 
     sweep_task.introspection().publishSolution(*sweep_task.solutions().front());
@@ -1381,50 +1479,81 @@ bool WordleBotController::runScanAndSweep(
       return false;
     }
 
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): returning to home.");
-    returnToHome();
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): returning to working pose.");
+    returnToWorkingPose();
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): complete.");
     return true;
 
   } else {
-    // ── MGI Cartesian path ─────────────────────────────────────────────────
-    if (stop_requested_.load()) { return false; }
+    // ── MGI path ───────────────────────────────────────────────────────────
+    // Sequence:
+    //   moveToGoal(0)          — free-space move to start
+    //   Cartesian → (1)        — first sweep
+    //   moveToGoal(2)          — reorient in place (same XYZ as 1, yaw -90°)
+    //   Cartesian → (3)        — second sweep
+    //   moveToGoal(4)          — reorient in place (same XYZ as 3, yaw -90°)
+    //   Cartesian → (5)        — third sweep
+    //   returnToHome()
+    // Dwell is applied after each Cartesian arrival; not at reorientation poses.
 
-    // 1. Joint-space move to poses[0].
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moving to pose 0.");
-    if (!moveToGoal(poses[0])) {
-      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 0.");
-      return false;
-    }
-    if (dwell_secs > 0.0) {
-      RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): dwelling %.2f s at pose 0.", dwell_secs);
-      rclcpp::sleep_for(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::duration<double>(dwell_secs)));
-    }
-
-    // 2. Cartesian sweeps: poses[0]→[1], [1]→[2], [2]→[3].
-    for (size_t i = 0; i < 3; ++i) {
-      if (stop_requested_.load()) { return false; }
-      RCLCPP_INFO(LOGGER,
-        "runScanAndSweep (MGI): Cartesian move pose %zu → %zu.", i, i + 1);
-      if (!moveCartesianToWaypoint(poses[i + 1])) {
-        RCLCPP_ERROR(LOGGER,
-          "runScanAndSweep (MGI): failed to reach pose %zu.", i + 1);
-        return false;
-      }
+    auto dwell = [&](size_t idx) {
       if (dwell_secs > 0.0) {
-        RCLCPP_INFO(LOGGER,
-          "runScanAndSweep (MGI): dwelling %.2f s at pose %zu.", dwell_secs, i + 1);
+        RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): dwelling %.2f s at pose %zu.", dwell_secs, idx);
         rclcpp::sleep_for(
           std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(dwell_secs)));
       }
+    };
+
+    if (stop_requested_.load()) { return false; }
+
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 0 (start).");
+    if (!moveToGoal(poses[0])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 0.");
+      return false;
+    }
+    dwell(0);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 0 → 1.");
+    if (!moveCartesianToWaypoint(poses[1])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 1.");
+      return false;
+    }
+    dwell(1);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 2 (reorient -90° yaw).");
+    if (!moveToGoal(poses[2])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 2.");
+      return false;
     }
 
-    // 3. Return home.
-    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to home.");
-    returnToHome();
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 2 → 3.");
+    if (!moveCartesianToWaypoint(poses[3])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 3.");
+      return false;
+    }
+    dwell(3);
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): moveToGoal pose 4 (reorient -90° yaw).");
+    if (!moveToGoal(poses[4])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 4.");
+      return false;
+    }
+
+    if (stop_requested_.load()) { return false; }
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): Cartesian pose 4 → 5.");
+    if (!moveCartesianToWaypoint(poses[5])) {
+      RCLCPP_ERROR(LOGGER, "runScanAndSweep (MGI): failed to reach pose 5.");
+      return false;
+    }
+    dwell(5);
+
+    RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): returning to working pose.");
+    returnToWorkingPose();
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MGI): complete.");
     return true;
   }
@@ -1480,6 +1609,38 @@ bool WordleBotController::returnToHome()
   }
 
   RCLCPP_INFO(LOGGER, "returnToHome: succeeded.");
+  return true;
+}
+
+bool WordleBotController::returnToWorkingPose()
+{
+  RCLCPP_INFO(LOGGER, "returnToWorkingPose: moving to working pose.");
+
+  std::map<std::string, double> joints = {
+    {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+    {"shoulder_lift_joint", node_->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+    {"elbow_joint",         node_->get_parameter("working_joints.elbow_joint").as_double()},
+    {"wrist_1_joint",       node_->get_parameter("working_joints.wrist_1_joint").as_double()},
+    {"wrist_2_joint",       node_->get_parameter("working_joints.wrist_2_joint").as_double()},
+    {"wrist_3_joint",       node_->get_parameter("working_joints.wrist_3_joint").as_double()},
+  };
+
+  move_group_.setStartStateToCurrentState();
+  move_group_.setJointValueTarget(joints);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToWorkingPose: planning failed.");
+    return false;
+  }
+
+  auto result = move_group_.execute(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToWorkingPose: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "returnToWorkingPose: succeeded.");
   return true;
 }
 
@@ -1564,6 +1725,126 @@ bool WordleBotController::closeGripper()
   }
 
   RCLCPP_INFO(LOGGER, "closeGripper: succeeded.");
+  return true;
+}
+
+bool WordleBotController::isGripperClosed()
+{
+  auto state = move_group_.getCurrentState(2.0);
+  if (!state) {
+    RCLCPP_ERROR(LOGGER, "isGripperClosed: getCurrentState returned null — assuming open.");
+    return false;
+  }
+
+  const moveit::core::JointModelGroup * jmg =
+    state->getRobotModel()->getJointModelGroup("ur_onrobot_gripper");
+  if (!jmg) {
+    RCLCPP_ERROR(LOGGER, "isGripperClosed: joint group 'ur_onrobot_gripper' not found — assuming open.");
+    return false;
+  }
+
+  std::vector<double> current_vals;
+  state->copyJointGroupPositions(jmg, current_vals);
+
+  moveit::core::RobotState open_state(*state);
+  moveit::core::RobotState closed_state(*state);
+  open_state.setToDefaultValues(jmg, "open");
+  closed_state.setToDefaultValues(jmg, "closed");
+
+  std::vector<double> open_vals, closed_vals;
+  open_state.copyJointGroupPositions(jmg, open_vals);
+  closed_state.copyJointGroupPositions(jmg, closed_vals);
+
+  double dist_open = 0.0, dist_closed = 0.0;
+  for (std::size_t i = 0; i < current_vals.size(); ++i) {
+    double do_i = current_vals[i] - open_vals[i];
+    double dc_i = current_vals[i] - closed_vals[i];
+    dist_open   += do_i * do_i;
+    dist_closed += dc_i * dc_i;
+  }
+
+  bool closed = (dist_closed < dist_open);
+  RCLCPP_INFO(LOGGER, "isGripperClosed: dist_closed=%.4f dist_open=%.4f → %s.",
+    dist_closed, dist_open, closed ? "CLOSED" : "OPEN");
+  return closed;
+}
+
+bool WordleBotController::recoverObject(const std::string & held_object_id)
+{
+  RCLCPP_INFO(LOGGER, "recoverObject: beginning object recovery to safe position (0.15, 0.15, 0.03).");
+
+  // Preserve current gripper orientation so the arm doesn't flip the wrist mid-recovery.
+  auto eef_stamped = move_group_.getCurrentPose("gripper_tcp");
+  // const auto & orient = eef_stamped.pose.orientation;
+
+  geometry_msgs::msg::Pose approach_pose;
+  approach_pose.position.x    = 0.15;
+  approach_pose.position.y    = 0.15;
+  approach_pose.position.z    = 0.15;
+  approach_pose.orientation.x   = 1.0;
+  approach_pose.orientation.y   = 0.0;
+  approach_pose.orientation.z   = 0.0;
+  approach_pose.orientation.w   = 0.0;
+
+  geometry_msgs::msg::Pose safe_pose;
+  safe_pose.position.x    = 0.15;
+  safe_pose.position.y    = 0.15;
+  safe_pose.position.z    = 0.03;
+  safe_pose.orientation.x   = 1.0;
+  safe_pose.orientation.y   = 0.0;
+  safe_pose.orientation.z   = 0.0;
+  safe_pose.orientation.w   = 0.0;
+
+  bool ok = true;
+
+  RCLCPP_INFO(LOGGER, "recoverObject: moving to approach pose above safe position.");
+  if (!moveToGoal(approach_pose)) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: moveToGoal to approach failed — continuing.");
+    ok = false;
+  }
+
+  if (ok) {
+    RCLCPP_INFO(LOGGER, "recoverObject: Cartesian descent to safe position.");
+    if (!moveCartesianToWaypoint(safe_pose)) {
+      RCLCPP_ERROR(LOGGER, "recoverObject: Cartesian descent failed — continuing.");
+      ok = false;
+    }
+  }
+
+  // Detach the held object at the safe position before opening the gripper.
+  // Mirrors detachSensorCollisionObject() — REMOVE moves the object back to the world scene
+  // at its current (safe) position rather than leaving it fused to the end effector.
+  if (!held_object_id.empty()) {
+    moveit_msgs::msg::AttachedCollisionObject detach;
+    detach.link_name = "gripper_tcp";
+    detach.object.id = held_object_id;
+    detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+    planning_scene_.applyAttachedCollisionObject(detach);
+    rclcpp::sleep_for(std::chrono::milliseconds(200));
+    RCLCPP_INFO(LOGGER, "recoverObject: detached '%s' from gripper_tcp at safe position.",
+      held_object_id.c_str());
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: opening gripper.");
+  if (!openGripper()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: openGripper failed — continuing.");
+    ok = false;
+  }
+
+  if (ok) {
+    RCLCPP_INFO(LOGGER, "recoverObject: Cartesian ascent from safe position.");
+    if (!moveCartesianToWaypoint(approach_pose)) {
+      RCLCPP_ERROR(LOGGER, "recoverObject: Cartesian ascent failed — continuing.");
+    }
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: returning to working pose.");
+  if (!returnToWorkingPose()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: returnToWorkingPose failed.");
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "recoverObject: complete.");
   return true;
 }
 
@@ -1659,4 +1940,19 @@ moveit_msgs::msg::Constraints WordleBotController::buildPathConstraints()
 
   constraints.orientation_constraints.push_back(oc);
   return constraints;
+}
+
+moveit_msgs::msg::Constraints WordleBotController::buildJointLimitConstraints()
+{
+  moveit_msgs::msg::Constraints c;
+  for (const char * name : {"wrist_2_joint", "wrist_3_joint"}) {
+    moveit_msgs::msg::JointConstraint jc;
+    jc.joint_name      = name;
+    jc.position        = 0.0;
+    jc.tolerance_above = M_PI;
+    jc.tolerance_below = M_PI;
+    jc.weight          = 1.0;
+    c.joint_constraints.push_back(jc);
+  }
+  return c;
 }
