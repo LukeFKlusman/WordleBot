@@ -1006,22 +1006,69 @@ std::vector<double> WordleBotController::computeBestIK(
   double best_cost  = std::numeric_limits<double>::infinity();
   int ik_successes  = 0;
 
+  struct IkDiagnostics {
+    int total_attempts = 0;
+    int solver_failures = 0;
+    int collision_callback_rejections = 0;
+    int collision_rejected_attempts = 0;
+    int wrist3_filter_rejections = 0;
+    int wrist1_filter_rejections = 0;
+    int accepted_candidates = 0;
+  } ik_diag;
+
+  auto get_joint_value = [&](const std::vector<double> & values,
+                             const char * joint_name) -> double {
+    for (std::size_t i = 0; i < joint_names.size() && i < values.size(); ++i) {
+      if (joint_names[i] == joint_name) {
+        return values[i];
+      }
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+
+  auto log_rejection = [&](int attempt, const char * reason,
+                           double wrist1, double wrist2, double wrist3) {
+    RCLCPP_DEBUG(LOGGER,
+      "computeBestIK: attempt %d rejected by %s. "
+      "wrist_1=%.4f wrist_2=%.4f wrist_3=%.4f. "
+      "target xyz=(%.3f, %.3f, %.3f) quat=(%.3f, %.3f, %.3f, %.3f).",
+      attempt, reason, wrist1, wrist2, wrist3,
+      target_pose.position.x, target_pose.position.y, target_pose.position.z,
+      target_pose.orientation.x, target_pose.orientation.y,
+      target_pose.orientation.z, target_pose.orientation.w);
+  };
+
   // Collision-aware IK: reject any candidate that puts the robot in collision.
   // LockedPlanningSceneRO holds the read lock for the full IK loop so the scene
   // cannot change mid-loop and the lambda can safely query it.
   planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  int active_ik_attempt = -1;
   auto isCollisionFree = [&](moveit::core::RobotState* state,
                               const moveit::core::JointModelGroup* group,
                               const double* ik_solution) -> bool
   {
     state->setJointGroupPositions(group, ik_solution);
     state->update();
-    return !lps->isStateColliding(*state, group->getName());
+    const bool colliding = lps->isStateColliding(*state, group->getName());
+    if (colliding) {
+      ++ik_diag.collision_callback_rejections;
+      std::vector<double> rejected_values;
+      state->copyJointGroupPositions(group, rejected_values);
+      log_rejection(active_ik_attempt, "collision callback",
+        get_joint_value(rejected_values, "wrist_1_joint"),
+        get_joint_value(rejected_values, "wrist_2_joint"),
+        get_joint_value(rejected_values, "wrist_3_joint"));
+    }
+    return !colliding;
   };
 
   // One IK attempt: seed → solve → normalise → validate → cost. Uses return
   // in place of continue so the retry loop below can reuse the same logic.
   auto runIKAttempt = [&](int attempt) {
+    ++ik_diag.total_attempts;
+    active_ik_attempt = attempt;
+    const int collision_rejections_before = ik_diag.collision_callback_rejections;
+
     moveit::core::RobotState ik_state(*current_state);
     if (attempt < kWarmAttempts) {
       ik_state.setJointGroupPositions(jmg, kWarmStart);
@@ -1031,6 +1078,11 @@ std::vector<double> WordleBotController::computeBestIK(
     }
 
     if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1, isCollisionFree)) {
+      if (ik_diag.collision_callback_rejections > collision_rejections_before) {
+        ++ik_diag.collision_rejected_attempts;
+      } else {
+        ++ik_diag.solver_failures;
+      }
       return;
     }
     ++ik_successes;
@@ -1059,30 +1111,6 @@ std::vector<double> WordleBotController::computeBestIK(
       candidate[i] = best_norm;
     }
 
-    // Reject candidates where wrist_3_joint is outside [-π, π].
-    // The normalization above picks the 2π-equivalent closest to the current
-    // joint value, which can push wrist_3 further out of range each move (e.g.
-    // current=-3.89 rad, IK=+1.0 rad → normalized=-5.28 rad). Rejecting those
-    // solutions forces the IK to find one whose normalized wrist_3 stays in
-    // [-π, π], making the controller reverse direction rather than accumulate.
-    bool wrist3_in_range = true;
-    double wrist3_val = 0.0;
-    for (std::size_t i = 0; i < joint_names.size(); ++i) {
-      if (joint_names[i] == "wrist_3_joint" && i < candidate.size()) {
-        wrist3_val = candidate[i];
-        if (wrist3_val < -3.0 * M_PI / 2.0 || wrist3_val > 3.0 * M_PI / 2.0) {
-          wrist3_in_range = false;
-        }
-        break;
-      }
-    }
-    if (!wrist3_in_range) {
-      RCLCPP_DEBUG(LOGGER,
-        "computeBestIK: attempt %d rejected — wrist_3=%.3f rad outside [-3π/2, 3π/2].",
-        attempt, wrist3_val);
-      return;
-    }
-
     // Reject candidates where wrist_1_joint is outside [-180°, +15°].
     static constexpr double kWrist1Min = -M_PI;
     static constexpr double kWrist1Max =  M_PI / 12.0;
@@ -1098,11 +1126,15 @@ std::vector<double> WordleBotController::computeBestIK(
       }
     }
     if (!wrist1_in_range) {
-      RCLCPP_DEBUG(LOGGER,
-        "computeBestIK: attempt %d rejected — wrist_1=%.3f rad outside [%.3f, %.3f].",
-        attempt, wrist1_val, kWrist1Min, kWrist1Max);
+      ++ik_diag.wrist1_filter_rejections;
+      log_rejection(attempt, "wrist_1 range filter",
+        wrist1_val,
+        get_joint_value(candidate, "wrist_2_joint"),
+        get_joint_value(candidate, "wrist_3_joint"));
       return;
     }
+
+    ++ik_diag.accepted_candidates;
 
     double movement_cost      = 0.0;
     double functional_penalty = 0.0;
@@ -1138,6 +1170,15 @@ std::vector<double> WordleBotController::computeBestIK(
     ik_successes, best_cost);
 
   if (best_joint_values.empty()) {
+    RCLCPP_WARN(LOGGER,
+      "computeBestIK diagnostics: no accepted candidate after %d attempt(s). "
+      "solver_failures=%d, solver_successes=%d, accepted=%d, "
+      "collision_callback_rejections=%d, collision_rejected_attempts=%d, "
+      "wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
+      ik_diag.total_attempts, ik_diag.solver_failures, ik_successes,
+      ik_diag.accepted_candidates, ik_diag.collision_callback_rejections,
+      ik_diag.collision_rejected_attempts, ik_diag.wrist3_filter_rejections,
+      ik_diag.wrist1_filter_rejections);
     RCLCPP_INFO(LOGGER,
       "computeBestIK: IK FAILED for target pose (x=%.3f y=%.3f z=%.3f qx=%.3f qy=%.3f qz=%.3f qw=%.3f).",
       target_pose.position.x, target_pose.position.y, target_pose.position.z,
