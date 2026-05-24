@@ -13,7 +13,7 @@ wordle_bot_control_node:
       # Ordered joint vectors:
       # [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]
       ik_warm_attempts: 5
-      ik_total_attempts: 10
+      ik_total_attempts: 15
       ik_retry_multiplier: 2
       ik_warm_start_joints: [1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345]
       ik_functional_reference_joints: [1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345]

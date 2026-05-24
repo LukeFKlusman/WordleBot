@@ -17,12 +17,12 @@ wordle_bot_control_node:
     # Scan-and-sweep poses in world frame.
     # Pose format: [x, y, z, roll, pitch, yaw] in metres/radians.
     scan_sweep_dwell_time: 1.5
-    scan_sweep_pose_0: [-0.30, 0.10, 0.1, 3.14159, 0.0, 0.0]
-    scan_sweep_pose_1: [-0.30, 0.30, 0.1, 3.14159, 0.0, 0.0]
-    scan_sweep_pose_2: [-0.30, 0.30, 0.1, 3.14159, 0.0, 1.5708]
-    scan_sweep_pose_3: [ 0.30, 0.30, 0.1, 3.14159, 0.0, 1.5708]
-    scan_sweep_pose_4: [ 0.30, 0.30, 0.1, 3.14159, 0.0, 0.0]
-    scan_sweep_pose_5: [ 0.30, 0.10, 0.1, 3.14159, 0.0, 0.0]
+    scan_sweep_pose_0: [-0.25, 0.100, 0.1, 3.14159, -0.1745, 3.14159]
+    scan_sweep_pose_1: [-0.25, 0.325, 0.1, 3.14159, -0.1745, 3.14159]
+    scan_sweep_pose_2: [-0.25, 0.325, 0.1, 3.14159, -0.1745, 1.5708 ]
+    scan_sweep_pose_3: [ 0.25, 0.325, 0.1, 3.14159, -0.1745, 1.5708 ]
+    scan_sweep_pose_4: [ 0.25, 0.325, 0.1, 3.14159, -0.1745, 0.0    ]
+    scan_sweep_pose_5: [ 0.25, 0.100, 0.1, 3.14159, -0.1745, 0.0    ]
 
     # Pick-and-place MTC task tuning. Solution target count is passed to
     # task.plan(N); the task still proceeds if at least one valid solution exists.
