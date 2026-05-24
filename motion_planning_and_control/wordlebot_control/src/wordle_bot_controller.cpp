@@ -20,6 +20,9 @@ namespace mtc = moveit::task_constructor;
 #include <moveit_msgs/msg/constraints.hpp>
 #include <moveit_msgs/msg/joint_constraint.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <moveit/kinematic_constraints/utils.h>
+#include <moveit/planning_pipeline/planning_pipeline.h>
+#include <moveit/robot_trajectory/robot_trajectory.h>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotController");
@@ -78,6 +81,307 @@ bool alignWrist3JointTrajectoryToReference(
   }
   return true;
 }
+
+double computeTotalJointDisplacement(
+  const robot_trajectory::RobotTrajectory & trajectory,
+  const moveit::core::JointModelGroup * jmg)
+{
+  if (jmg == nullptr || trajectory.getWayPointCount() < 2) {
+    return 0.0;
+  }
+
+  double total = 0.0;
+  std::vector<double> prev;
+  std::vector<double> curr;
+  for (std::size_t i = 1; i < trajectory.getWayPointCount(); ++i) {
+    trajectory.getWayPoint(i - 1).copyJointGroupPositions(jmg, prev);
+    trajectory.getWayPoint(i).copyJointGroupPositions(jmg, curr);
+    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
+      total += std::abs(curr[j] - prev[j]);
+    }
+  }
+  return total;
+}
+
+class WordleMtcPlanner : public mtc::solvers::PlannerInterface
+{
+public:
+  explicit WordleMtcPlanner(rclcpp::Node::SharedPtr node, std::string pipeline_name = "ompl")
+  : node_(std::move(node)), pipeline_name_(std::move(pipeline_name))
+  {
+    auto & p = properties();
+    p.declare<std::string>("planner", "", "planner id");
+    p.declare<uint>("num_planning_attempts", 1u, "number of planning attempts per candidate");
+    p.declare<uint>("candidate_plans", 5u, "number of candidate trajectories to generate and score");
+    p.declare<moveit_msgs::msg::WorkspaceParameters>(
+      "workspace_parameters", moveit_msgs::msg::WorkspaceParameters(),
+      "allowed workspace of mobile base?");
+    p.declare<double>("goal_joint_tolerance", 1e-4, "tolerance for reaching joint goals");
+    p.declare<double>("goal_position_tolerance", 1e-4, "tolerance for reaching position goals");
+    p.declare<double>("goal_orientation_tolerance", 1e-4, "tolerance for reaching orientation goals");
+  }
+
+  void init(const moveit::core::RobotModelConstPtr & robot_model) override
+  {
+    if (pipeline_ == nullptr) {
+      mtc::solvers::PipelinePlanner::Specification spec;
+      spec.model = robot_model;
+      spec.pipeline = pipeline_name_;
+      spec.ns = pipeline_name_;
+      pipeline_ = mtc::solvers::PipelinePlanner::create(node_, spec);
+    } else if (pipeline_->getRobotModel() != robot_model) {
+      throw std::runtime_error(
+        "WordleMtcPlanner planning pipeline robot model does not match the task robot model");
+    }
+  }
+
+  mtc::solvers::PlannerInterface::Result plan(
+    const planning_scene::PlanningSceneConstPtr & from,
+    const planning_scene::PlanningSceneConstPtr & to,
+    const moveit::core::JointModelGroup * jmg,
+    double timeout,
+    robot_trajectory::RobotTrajectoryPtr & result,
+    const moveit_msgs::msg::Constraints & path_constraints = moveit_msgs::msg::Constraints()) override
+  {
+    if (from == nullptr || to == nullptr || jmg == nullptr) {
+      return {false, "WordleMtcPlanner received a null planning input"};
+    }
+
+    moveit_msgs::msg::MotionPlanRequest req;
+    initMotionPlanRequest(req, jmg, timeout);
+    req.goal_constraints.resize(1);
+    req.goal_constraints[0] = kinematic_constraints::constructGoalConstraints(
+      to->getCurrentState(), jmg, properties().get<double>("goal_joint_tolerance"));
+    req.path_constraints = path_constraints;
+
+    return planAndSelect(from, req, jmg, result);
+  }
+
+  mtc::solvers::PlannerInterface::Result plan(
+    const planning_scene::PlanningSceneConstPtr & from,
+    const moveit::core::LinkModel & link,
+    const Eigen::Isometry3d & offset,
+    const Eigen::Isometry3d & target,
+    const moveit::core::JointModelGroup * jmg,
+    double timeout,
+    robot_trajectory::RobotTrajectoryPtr & result,
+    const moveit_msgs::msg::Constraints & path_constraints = moveit_msgs::msg::Constraints()) override
+  {
+    if (from == nullptr || jmg == nullptr) {
+      return {false, "WordleMtcPlanner received a null pose-goal planning input"};
+    }
+
+    const auto best_q = computeBestIK(from, target * offset.inverse(), link.getName(), jmg);
+    if (best_q.empty()) {
+      return {false, "WordleMtcPlanner could not find a valid IK solution"};
+    }
+
+    auto target_scene = from->diff();
+    auto & target_state = target_scene->getCurrentStateNonConst();
+    target_state.setJointGroupPositions(jmg, best_q);
+    target_state.update();
+
+    moveit_msgs::msg::MotionPlanRequest req;
+    initMotionPlanRequest(req, jmg, timeout);
+    req.goal_constraints.resize(1);
+    req.goal_constraints[0] = kinematic_constraints::constructGoalConstraints(
+      target_state, jmg, properties().get<double>("goal_joint_tolerance"));
+    req.path_constraints = path_constraints;
+
+    return planAndSelect(from, req, jmg, result);
+  }
+
+  std::string getPlannerId() const override { return "WordleMtcPlanner"; }
+
+private:
+  void initMotionPlanRequest(
+    moveit_msgs::msg::MotionPlanRequest & req,
+    const moveit::core::JointModelGroup * jmg,
+    double timeout) const
+  {
+    const auto & props = properties();
+    req.group_name = jmg->getName();
+    req.planner_id = props.get<std::string>("planner");
+    req.allowed_planning_time = std::min(timeout, props.get<double>("timeout"));
+    req.start_state.is_diff = true;
+    req.num_planning_attempts = props.get<uint>("num_planning_attempts");
+    req.max_velocity_scaling_factor = props.get<double>("max_velocity_scaling_factor");
+    req.max_acceleration_scaling_factor = props.get<double>("max_acceleration_scaling_factor");
+    req.workspace_parameters = props.get<moveit_msgs::msg::WorkspaceParameters>("workspace_parameters");
+  }
+
+  mtc::solvers::PlannerInterface::Result planAndSelect(
+    const planning_scene::PlanningSceneConstPtr & from,
+    const moveit_msgs::msg::MotionPlanRequest & req,
+    const moveit::core::JointModelGroup * jmg,
+    robot_trajectory::RobotTrajectoryPtr & result)
+  {
+    if (pipeline_ == nullptr) {
+      return {false, "WordleMtcPlanner planning pipeline was not initialised"};
+    }
+
+    const uint candidate_count = std::max(1u, properties().get<uint>("candidate_plans"));
+    double best_cost = std::numeric_limits<double>::infinity();
+    std::string last_error;
+    robot_trajectory::RobotTrajectoryPtr best_trajectory;
+    int successes = 0;
+
+    for (uint attempt = 0; attempt < candidate_count; ++attempt) {
+      planning_interface::MotionPlanResponse response;
+      const bool success = pipeline_->generatePlan(from, req, response);
+      if (!success || response.trajectory_ == nullptr || response.trajectory_->getWayPointCount() == 0) {
+        last_error = moveit::core::error_code_to_string(response.error_code_.val);
+        RCLCPP_DEBUG(LOGGER,
+          "WordleMtcPlanner: candidate %u/%u failed: %s",
+          attempt + 1, candidate_count, last_error.c_str());
+        continue;
+      }
+
+      ++successes;
+      const double cost = computeTotalJointDisplacement(*response.trajectory_, jmg);
+      RCLCPP_DEBUG(LOGGER,
+        "WordleMtcPlanner: candidate %u/%u cost=%.4f rad%s",
+        attempt + 1, candidate_count, cost, cost < best_cost ? " (best)" : "");
+      if (cost < best_cost) {
+        best_cost = cost;
+        best_trajectory = response.trajectory_;
+      }
+    }
+
+    if (best_trajectory == nullptr) {
+      return {false, last_error.empty() ? "all candidate plans failed" : last_error};
+    }
+
+    result = best_trajectory;
+    RCLCPP_DEBUG(LOGGER,
+      "WordleMtcPlanner: selected best of %d/%u successful candidate(s), cost=%.4f rad.",
+      successes, candidate_count, best_cost);
+    return {true, ""};
+  }
+
+  std::vector<double> computeBestIK(
+    const planning_scene::PlanningSceneConstPtr & scene,
+    const Eigen::Isometry3d & target_pose,
+    const std::string & tip_link,
+    const moveit::core::JointModelGroup * jmg) const
+  {
+    if (scene == nullptr || jmg == nullptr || !jmg->getSolverInstance()) {
+      return {};
+    }
+
+    static const std::vector<double> kWarmStart   = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
+    static const std::vector<double> kFuncPos     = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
+    static const std::vector<double> kFuncWeights = {0.3, 0.5, 0.5, 0.5, 0.3, 0.3};
+    static constexpr int kWarmAttempts = 5;
+    static constexpr int kTotalAttempts = 15;
+
+    const auto & start_state = scene->getCurrentState();
+    const auto & joint_names = jmg->getVariableNames();
+    const auto & active_joints = jmg->getActiveJointModels();
+
+    std::vector<double> current_joint_values;
+    start_state.copyJointGroupPositions(jmg, current_joint_values);
+
+    std::vector<double> best_joint_values;
+    double best_cost = std::numeric_limits<double>::infinity();
+
+    auto get_joint_value = [&](const std::vector<double> & values, const char * joint_name) {
+      for (std::size_t i = 0; i < joint_names.size() && i < values.size(); ++i) {
+        if (joint_names[i] == joint_name) {
+          return values[i];
+        }
+      }
+      return std::numeric_limits<double>::quiet_NaN();
+    };
+
+    auto is_collision_free = [scene](
+      moveit::core::RobotState * state,
+      const moveit::core::JointModelGroup * group,
+      const double * ik_solution)
+    {
+      state->setJointGroupPositions(group, ik_solution);
+      state->update();
+      collision_detection::CollisionRequest req;
+      collision_detection::CollisionResult res;
+      req.group_name = group->getName();
+      scene->checkCollision(req, res, *state);
+      return !res.collision;
+    };
+
+    auto run_attempt = [&](int attempt) {
+      moveit::core::RobotState ik_state(start_state);
+      if (attempt < kWarmAttempts && kWarmStart.size() == jmg->getVariableCount()) {
+        ik_state.setJointGroupPositions(jmg, kWarmStart);
+      } else {
+        ik_state.setToRandomPositions(jmg);
+      }
+      ik_state.update();
+
+      if (!ik_state.setFromIK(jmg, target_pose, tip_link, jmg->getDefaultIKTimeout(), is_collision_free)) {
+        return;
+      }
+
+      std::vector<double> candidate;
+      ik_state.copyJointGroupPositions(jmg, candidate);
+
+      for (std::size_t i = 0; i < candidate.size() && i < active_joints.size(); ++i) {
+        if (active_joints[i]->getType() != moveit::core::JointModel::REVOLUTE) {
+          continue;
+        }
+        const double curr = current_joint_values[i];
+        const double raw = candidate[i];
+        double best_norm = raw;
+        double best_dist = std::abs(raw - curr);
+        for (int k = -3; k <= 3; ++k) {
+          const double offset = raw + kTwoPi * k;
+          const double dist = std::abs(offset - curr);
+          if (dist < best_dist && active_joints[i]->satisfiesPositionBounds(&offset)) {
+            best_dist = dist;
+            best_norm = offset;
+          }
+        }
+        candidate[i] = best_norm;
+      }
+
+      static constexpr double kWrist1Min = -M_PI;
+      static constexpr double kWrist1Max =  M_PI / 12.0;
+      const double wrist1 = get_joint_value(candidate, "wrist_1_joint");
+      if (std::isfinite(wrist1) && (wrist1 < kWrist1Min || wrist1 > kWrist1Max)) {
+        return;
+      }
+
+      double movement_cost = 0.0;
+      double functional_penalty = 0.0;
+      for (std::size_t i = 0; i < candidate.size(); ++i) {
+        movement_cost += std::abs(candidate[i] - current_joint_values[i]);
+        if (i < kFuncPos.size()) {
+          const double d = candidate[i] - kFuncPos[i];
+          functional_penalty += kFuncWeights[i] * d * d;
+        }
+      }
+      const double cost = 2.0 * movement_cost + 0.3 * functional_penalty;
+      if (cost < best_cost) {
+        best_cost = cost;
+        best_joint_values = candidate;
+      }
+    };
+
+    for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
+      run_attempt(attempt);
+    }
+    if (best_joint_values.empty()) {
+      for (int attempt = kTotalAttempts; attempt < kTotalAttempts * 2; ++attempt) {
+        run_attempt(attempt);
+      }
+    }
+
+    return best_joint_values;
+  }
+
+  rclcpp::Node::SharedPtr node_;
+  std::string pipeline_name_;
+  planning_pipeline::PlanningPipelinePtr pipeline_;
+};
 }  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
@@ -301,7 +605,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
   // Explicitly name the OMPL pipeline so MTC never falls back to CHOMP.
   // ompl_planning.yaml must be loaded into the node's parameters (see wordle_bot.launch.py).
-  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+  // The custom planner keeps MTC's staged scene handling, but generates multiple
+  // OMPL candidates and selects the one with the least joint motion.
+  auto sampling_planner      = std::make_shared<WordleMtcPlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
@@ -611,7 +917,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   // ── Stage 7: return to working pose — only for the final task in a batch ──
   if (include_return_home) {
     RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return to working pose'.", object_id.c_str());
-    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", interpolation_planner);
+    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", sampling_planner);
     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
     stage->setGoal(std::map<std::string, double>{
       {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
@@ -2084,6 +2390,24 @@ moveit::core::MoveItErrorCode WordleBotController::executeAlignedTaskSolution(
   ExecuteTaskSolutionAction::Goal goal;
   solution.toMsg(goal.solution, &task.introspection());
 
+  for (std::size_t i = 0; i < goal.solution.sub_trajectory.size(); ++i) {
+    const auto & joint_trajectory = goal.solution.sub_trajectory[i].trajectory.joint_trajectory;
+    if (joint_trajectory.points.empty()) {
+      continue;
+    }
+
+    const auto & first = joint_trajectory.points.front().time_from_start;
+    const auto & last = joint_trajectory.points.back().time_from_start;
+    RCLCPP_DEBUG(LOGGER,
+      "%s: subtrajectory %zu stage_id=%u joints=%zu points=%zu duration=%.6f s first_time=%.6f s.",
+      context.c_str(), i + 1,
+      goal.solution.sub_trajectory[i].info.stage_id,
+      joint_trajectory.joint_names.size(),
+      joint_trajectory.points.size(),
+      rclcpp::Duration(last).seconds(),
+      rclcpp::Duration(first).seconds());
+  }
+
   double reference_wrist3 = joint_values[*current_index];
   std::size_t aligned_subtrajectories = 0;
   for (std::size_t i = 0; i < goal.solution.sub_trajectory.size(); ++i) {
@@ -2136,8 +2460,12 @@ moveit::core::MoveItErrorCode WordleBotController::executeAlignedTaskSolution(
 
   const auto result = result_future.get();
   if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-    RCLCPP_ERROR(LOGGER, "%s: execute_task_solution goal was aborted or canceled.",
-      context.c_str());
+    if (result.result) {
+      error_code = result.result->error_code;
+    }
+    RCLCPP_ERROR(LOGGER,
+      "%s: execute_task_solution goal was aborted or canceled (action_result=%d, moveit_error=%d).",
+      context.c_str(), static_cast<int>(result.code), error_code.val);
     return error_code;
   }
 
