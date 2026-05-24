@@ -1,4 +1,5 @@
 #include "wordlebot_control/wordle_bot_controller.hpp"
+#include "wordlebot_control/wordle_mtc_planner.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -78,6 +79,7 @@ bool alignWrist3JointTrajectoryToReference(
   }
   return true;
 }
+
 }  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
@@ -301,7 +303,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
   // Explicitly name the OMPL pipeline so MTC never falls back to CHOMP.
   // ompl_planning.yaml must be loaded into the node's parameters (see wordle_bot.launch.py).
-  auto sampling_planner      = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+  // The custom planner keeps MTC's staged scene handling, but generates multiple
+  // OMPL candidates and selects the one with the least joint motion.
+  auto sampling_planner      = std::make_shared<WordleMtcPlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
@@ -611,7 +615,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   // ── Stage 7: return to working pose — only for the final task in a batch ──
   if (include_return_home) {
     RCLCPP_DEBUG(LOGGER, "createTask [%s]: adding stage 7 — 'return to working pose'.", object_id.c_str());
-    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", interpolation_planner);
+    auto stage = std::make_unique<mtc::stages::MoveTo>("return to working pose", sampling_planner);
     stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
     stage->setGoal(std::map<std::string, double>{
       {"shoulder_pan_joint",  node_->get_parameter("working_joints.shoulder_pan_joint").as_double()},
@@ -2084,6 +2088,24 @@ moveit::core::MoveItErrorCode WordleBotController::executeAlignedTaskSolution(
   ExecuteTaskSolutionAction::Goal goal;
   solution.toMsg(goal.solution, &task.introspection());
 
+  for (std::size_t i = 0; i < goal.solution.sub_trajectory.size(); ++i) {
+    const auto & joint_trajectory = goal.solution.sub_trajectory[i].trajectory.joint_trajectory;
+    if (joint_trajectory.points.empty()) {
+      continue;
+    }
+
+    const auto & first = joint_trajectory.points.front().time_from_start;
+    const auto & last = joint_trajectory.points.back().time_from_start;
+    RCLCPP_DEBUG(LOGGER,
+      "%s: subtrajectory %zu stage_id=%u joints=%zu points=%zu duration=%.6f s first_time=%.6f s.",
+      context.c_str(), i + 1,
+      goal.solution.sub_trajectory[i].info.stage_id,
+      joint_trajectory.joint_names.size(),
+      joint_trajectory.points.size(),
+      rclcpp::Duration(last).seconds(),
+      rclcpp::Duration(first).seconds());
+  }
+
   double reference_wrist3 = joint_values[*current_index];
   std::size_t aligned_subtrajectories = 0;
   for (std::size_t i = 0; i < goal.solution.sub_trajectory.size(); ++i) {
@@ -2136,8 +2158,12 @@ moveit::core::MoveItErrorCode WordleBotController::executeAlignedTaskSolution(
 
   const auto result = result_future.get();
   if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
-    RCLCPP_ERROR(LOGGER, "%s: execute_task_solution goal was aborted or canceled.",
-      context.c_str());
+    if (result.result) {
+      error_code = result.result->error_code;
+    }
+    RCLCPP_ERROR(LOGGER,
+      "%s: execute_task_solution goal was aborted or canceled (action_result=%d, moveit_error=%d).",
+      context.c_str(), static_cast<int>(result.code), error_code.val);
     return error_code;
   }
 
