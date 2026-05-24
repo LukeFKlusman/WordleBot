@@ -127,10 +127,60 @@ WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
   }
   RCLCPP_INFO(LOGGER, "End effector link: %s", move_group_.getEndEffectorLink().c_str());
   RCLCPP_INFO(LOGGER, "Planning frame: %s", move_group_.getPlanningFrame().c_str());
+
+  loadVelocityScalingProfiles();
 }
 
 WordleBotController::~WordleBotController()
 {
+}
+
+// ---------------------------------------------------------------------------
+// Velocity Scaling
+// ---------------------------------------------------------------------------
+
+void WordleBotController::loadVelocityScalingProfiles()
+{
+  vel_profiles_.scan_vel  = getDoubleParam(node_, "velocity_scaling.scan.velocity",     0.15);
+  vel_profiles_.scan_acc  = getDoubleParam(node_, "velocity_scaling.scan.acceleration", 0.15);
+  vel_profiles_.precise_vel  = getDoubleParam(node_, "velocity_scaling.precise.velocity",     0.30);
+  vel_profiles_.precise_acc  = getDoubleParam(node_, "velocity_scaling.precise.acceleration", 0.30);
+  vel_profiles_.transit_vel  = getDoubleParam(node_, "velocity_scaling.transit.velocity",     0.75);
+  vel_profiles_.transit_acc  = getDoubleParam(node_, "velocity_scaling.transit.acceleration", 0.75);
+  vel_profiles_.near_threshold = getDoubleParam(node_, "velocity_scaling.proximity.near_threshold", 0.10);
+  vel_profiles_.far_threshold  = getDoubleParam(node_, "velocity_scaling.proximity.far_threshold",  0.35);
+
+  RCLCPP_INFO(LOGGER,
+    "Velocity scaling profiles loaded — scan=%.2f, precise=%.2f, transit=%.2f, "
+    "proximity=[%.2f, %.2f] m.",
+    vel_profiles_.scan_vel, vel_profiles_.precise_vel, vel_profiles_.transit_vel,
+    vel_profiles_.near_threshold, vel_profiles_.far_threshold);
+}
+
+double WordleBotController::queryCurrentStateMinDistance() const
+{
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  moveit::core::RobotState state = lps->getCurrentState();
+  state.update();
+
+  collision_detection::CollisionRequest req;
+  req.distance = true;
+  req.contacts = false;
+  collision_detection::CollisionResult res;
+  lps->checkCollision(req, res, state);
+
+  // res.distance is negative when in collision; clamp to 0.0 so the ramp always
+  // returns precise_vel in that (shouldn't-happen-in-practice) case.
+  return std::max(0.0, res.distance);
+}
+
+double WordleBotController::computeTransitScaling(double d) const
+{
+  if (d >= vel_profiles_.far_threshold) return vel_profiles_.transit_vel;
+  if (d <= vel_profiles_.near_threshold) return vel_profiles_.precise_vel;
+  const double t = (d - vel_profiles_.near_threshold) /
+                   (vel_profiles_.far_threshold - vel_profiles_.near_threshold);
+  return vel_profiles_.precise_vel + t * (vel_profiles_.transit_vel - vel_profiles_.precise_vel);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,10 +374,6 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   auto sampling_planner      = std::make_shared<WordleMtcPlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
-  const double cartesian_velocity_scaling =
-    getDoubleParam(node_, "pick_place.cartesian_velocity_scaling", 0.5);
-  const double cartesian_acceleration_scaling =
-    getDoubleParam(node_, "pick_place.cartesian_acceleration_scaling", 0.5);
   const double cartesian_step_size =
     getDoubleParam(node_, "pick_place.cartesian_step_size", 0.001);
   const double retreat_min_fraction =
@@ -360,18 +406,18 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     getDoubleParam(node_, "pick_place.place_min_solution_distance", 1.0);
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  cartesian_planner->setMaxVelocityScalingFactor(cartesian_velocity_scaling);
-  cartesian_planner->setMaxAccelerationScalingFactor(cartesian_acceleration_scaling);
+  cartesian_planner->setMaxVelocityScalingFactor(vel_profiles_.precise_vel);
+  cartesian_planner->setMaxAccelerationScalingFactor(vel_profiles_.precise_acc);
   cartesian_planner->setStepSize(cartesian_step_size);
   RCLCPP_DEBUG(LOGGER,
     "createTask: CartesianPath planner configured (vel=%.3f, acc=%.3f, step=%.4f).",
-    cartesian_velocity_scaling, cartesian_acceleration_scaling, cartesian_step_size);
+    vel_profiles_.precise_vel, vel_profiles_.precise_acc, cartesian_step_size);
 
   // Dedicated planner for retreat: min_fraction=0 accepts whatever Cartesian
   // distance the arm can actually achieve at the (low, far-reach) place pose.
   auto retreat_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  retreat_planner->setMaxVelocityScalingFactor(cartesian_velocity_scaling);
-  retreat_planner->setMaxAccelerationScalingFactor(cartesian_acceleration_scaling);
+  retreat_planner->setMaxVelocityScalingFactor(vel_profiles_.precise_vel);
+  retreat_planner->setMaxAccelerationScalingFactor(vel_profiles_.precise_acc);
   retreat_planner->setStepSize(cartesian_step_size);
   retreat_planner->setMinFraction(retreat_min_fraction);
 
@@ -917,6 +963,12 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
   const std::string arm_group = "ur_onrobot_manipulator";
 
   auto sampling_planner = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
+  {
+    const double s = computeTransitScaling(queryCurrentStateMinDistance());
+    sampling_planner->setMaxVelocityScalingFactor(s);
+    sampling_planner->setMaxAccelerationScalingFactor(s);
+    RCLCPP_DEBUG(LOGGER, "planMoveToGoal: transit velocity scaling = %.2f.", s);
+  }
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
   auto task = std::make_unique<mtc::Task>();
@@ -1314,6 +1366,13 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
     return false;
   }
 
+  {
+    const double s = computeTransitScaling(queryCurrentStateMinDistance());
+    move_group_.setMaxVelocityScalingFactor(s);
+    move_group_.setMaxAccelerationScalingFactor(s);
+    RCLCPP_DEBUG(LOGGER, "moveToGoal: transit velocity scaling = %.2f.", s);
+  }
+
   RCLCPP_INFO(LOGGER,
     "moveToGoal: target pos (x=%.3f y=%.3f z=%.3f) quat (x=%.3f y=%.3f z=%.3f w=%.3f).",
     goal_pose.position.x, goal_pose.position.y, goal_pose.position.z,
@@ -1449,6 +1508,9 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
 bool WordleBotController::moveCartesianToWaypoint(
   const geometry_msgs::msg::Pose & target_pose)
 {
+  move_group_.setMaxVelocityScalingFactor(vel_profiles_.scan_vel);
+  move_group_.setMaxAccelerationScalingFactor(vel_profiles_.scan_acc);
+
   static constexpr double kStepSizes[] = {kCartesianEefStep, 0.03, 0.05};
 
   for (const double step : kStepSizes) {
@@ -1500,8 +1562,8 @@ mtc::Task WordleBotController::createScanAndSweepTask(
   auto sampling_planner = std::make_shared<mtc::solvers::PipelinePlanner>(node_, "ompl");
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  cartesian_planner->setMaxVelocityScalingFactor(0.5);
-  cartesian_planner->setMaxAccelerationScalingFactor(0.5);
+  cartesian_planner->setMaxVelocityScalingFactor(vel_profiles_.scan_vel);
+  cartesian_planner->setMaxAccelerationScalingFactor(vel_profiles_.scan_acc);
   cartesian_planner->setStepSize(0.001);
 
   mtc::Task task;
@@ -1749,6 +1811,8 @@ bool WordleBotController::returnToHome()
   RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
 
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+  interpolation_planner->setMaxVelocityScalingFactor(vel_profiles_.transit_vel);
+  interpolation_planner->setMaxAccelerationScalingFactor(vel_profiles_.transit_acc);
 
   mtc::Task task;
   task.stages()->setName("return home");
@@ -1802,6 +1866,12 @@ bool WordleBotController::returnToWorkingPose()
     {"wrist_3_joint",       node_->get_parameter("working_joints.wrist_3_joint").as_double()},
   };
 
+  {
+    const double s = computeTransitScaling(queryCurrentStateMinDistance());
+    move_group_.setMaxVelocityScalingFactor(s);
+    move_group_.setMaxAccelerationScalingFactor(s);
+    RCLCPP_DEBUG(LOGGER, "returnToWorkingPose: transit velocity scaling = %.2f.", s);
+  }
   move_group_.setStartStateToCurrentState();
   move_group_.setJointValueTarget(joints);
 

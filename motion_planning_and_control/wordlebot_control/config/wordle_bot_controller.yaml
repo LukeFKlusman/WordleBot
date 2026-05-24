@@ -32,8 +32,6 @@ wordle_bot_control_node:
       place_max_ik_solutions: 32
       grasp_min_solution_distance: 1.0
       place_min_solution_distance: 1.0
-      cartesian_velocity_scaling: 0.5
-      cartesian_acceleration_scaling: 0.5
       cartesian_step_size: 0.001
       retreat_min_fraction: 0.0
       move_to_pick_timeout: 0.20
@@ -45,3 +43,28 @@ wordle_bot_control_node:
       retreat_min_distance: 0.03
       retreat_max_distance: 0.15
       grasp_z_offset: 0.01
+
+    # Velocity scaling profiles and proximity-based selection thresholds.
+    # All values are scaling factors in [0.0, 1.0] applied to each joint's
+    # hardware velocity and acceleration limits before trajectory time-parameterisation.
+    #
+    # scan    — slow, smooth Cartesian motion for camera stability during scan-and-sweep
+    # precise — Cartesian approach / lift / retreat near tiles and objects
+    # transit — free-space OMPL moves when the robot is clear of obstacles
+    #
+    # proximity.near_threshold: distance (m) at or below which transit moves use precise scaling
+    # proximity.far_threshold:  distance (m) at or above which transit moves use full transit scaling
+    # Between the two thresholds the scaling is linearly interpolated.
+    velocity_scaling:
+      scan:
+        velocity: 0.05
+        acceleration: 0.01
+      precise:
+        velocity: 0.30
+        acceleration: 0.15
+      transit:
+        velocity: 0.75
+        acceleration: 0.35
+      proximity:
+        near_threshold: 0.10
+        far_threshold: 0.50
