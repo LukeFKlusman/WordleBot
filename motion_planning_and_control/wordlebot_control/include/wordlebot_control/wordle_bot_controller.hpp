@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -210,6 +211,15 @@ public:
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
+  // Return the whole-2π offset that places a continuous joint waypoint on the
+  // same revolution as a reference state while preserving the planned motion.
+  static double computeContinuousJointRevolutionOffset(double reference_position,
+                                                       double first_waypoint_position)
+  {
+    constexpr double two_pi = 6.28318530717958647692;
+    return std::round((reference_position - first_waypoint_position) / two_pi) * two_pi;
+  }
+
   // ---------------------------------------------------------------------------
   // Constants
   // ---------------------------------------------------------------------------
@@ -282,6 +292,18 @@ private:
   // Move the end-effector to target_pose via computeCartesianPath.
   // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
   bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
+
+  // Shift wrist_3 trajectory positions by whole revolutions so the first
+  // commanded point is numerically close to the live continuous-joint state.
+  bool alignWrist3TrajectoryToCurrentState(moveit_msgs::msg::RobotTrajectory & trajectory,
+                                           const std::string & context);
+
+  // Execute an MTC solution after applying the same wrist_3 alignment to each
+  // serialized sub-trajectory in the ExecuteTaskSolution goal.
+  moveit::core::MoveItErrorCode executeAlignedTaskSolution(
+    moveit::task_constructor::Task & task,
+    const moveit::task_constructor::SolutionBase & solution,
+    const std::string & context);
 
   // ---------------------------------------------------------------------------
   // Member variables

@@ -32,7 +32,7 @@ source install/setup.bash
 ```bash
 ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 use_fake_hardware:=true launch_rviz:=false
 # or use real hardware
-ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:=192.168.0.192 launch_rviz:=false 
+ros2 launch ur_onrobot_control start_robot.launch.py ur_type:=ur3e onrobot_type:=rg2 robot_ip:=192.168.0.194 launch_rviz:=false 
 # using the id of the ur3e
 ```
 
@@ -43,7 +43,7 @@ This starts the UR3e MoveIt stack. Keep this running throughout your session.
 ```bash
 ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false
 # or use real hardware
-ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false robot_ip:=192.168.0.192
+ros2 launch ur_onrobot_moveit_config ur_onrobot_moveit.launch.py ur_type:=ur3e onrobot_type:=rg2 launch_rviz:=false robot_ip:=192.168.0.194
 # using the id of the ur3e
 ```
 
@@ -96,7 +96,7 @@ ros2 topic pub --once /wordle_bot/goal_pose geometry_msgs/msg/PoseStamped \
 
 # Or: load a multi-goal mission then start it in two steps
 ros2 topic pub --once /wordle_bot/set_mission geometry_msgs/msg/PoseArray \
-  "{header: {frame_id: 'world'}, poses: [{position: {x: 1.5, y: 1.5, z: 0.1}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}]}"
+  "{header: {frame_id: 'world'}, poses: [{position: {x: 0.0, y: 0.225, z: 0.1}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}]}"
 
 ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
 ```
