@@ -57,4 +57,15 @@ private:
   rclcpp::Node::SharedPtr node_;
   std::string pipeline_name_;
   planning_pipeline::PlanningPipelinePtr pipeline_;
+
+  std::vector<double> ik_warm_start_;
+  std::vector<double> ik_functional_reference_;
+  std::vector<double> ik_functional_weights_;
+  int ik_warm_attempts_{5};
+  int ik_total_attempts_{10};
+  int ik_retry_multiplier_{2};
+  double ik_wrist_1_min_{-3.14159265358979323846};
+  double ik_wrist_1_max_{3.14159265358979323846 / 12.0};
+  double ik_movement_cost_weight_{2.0};
+  double ik_functional_cost_weight_{0.3};
 };

@@ -80,6 +80,22 @@ bool alignWrist3JointTrajectoryToReference(
   return true;
 }
 
+int getIntParam(const rclcpp::Node::SharedPtr & node, const std::string & name, int default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<int>(name, default_value);
+  }
+  return static_cast<int>(node->get_parameter(name).as_int());
+}
+
+double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & name, double default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<double>(name, default_value);
+  }
+  return node->get_parameter(name).as_double();
+}
+
 }  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
@@ -308,19 +324,56 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   auto sampling_planner      = std::make_shared<WordleMtcPlanner>(node_, "ompl");
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
+  const double cartesian_velocity_scaling =
+    getDoubleParam(node_, "pick_place.cartesian_velocity_scaling", 0.5);
+  const double cartesian_acceleration_scaling =
+    getDoubleParam(node_, "pick_place.cartesian_acceleration_scaling", 0.5);
+  const double cartesian_step_size =
+    getDoubleParam(node_, "pick_place.cartesian_step_size", 0.001);
+  const double retreat_min_fraction =
+    getDoubleParam(node_, "pick_place.retreat_min_fraction", 0.0);
+  const double move_to_pick_timeout =
+    getDoubleParam(node_, "pick_place.move_to_pick_timeout", 0.20);
+  const double move_to_place_timeout =
+    getDoubleParam(node_, "pick_place.move_to_place_timeout", 0.20);
+  const double approach_min_distance =
+    getDoubleParam(node_, "pick_place.approach_min_distance", 0.05);
+  const double approach_max_distance =
+    getDoubleParam(node_, "pick_place.approach_max_distance", 0.15);
+  const double lift_min_distance =
+    getDoubleParam(node_, "pick_place.lift_min_distance", 0.05);
+  const double lift_max_distance =
+    getDoubleParam(node_, "pick_place.lift_max_distance", 0.15);
+  const double retreat_min_distance =
+    getDoubleParam(node_, "pick_place.retreat_min_distance", 0.03);
+  const double retreat_max_distance =
+    getDoubleParam(node_, "pick_place.retreat_max_distance", 0.15);
+  const double grasp_z_offset =
+    getDoubleParam(node_, "pick_place.grasp_z_offset", 0.01);
+  const int grasp_max_ik_solutions =
+    std::max(1, getIntParam(node_, "pick_place.grasp_max_ik_solutions", 32));
+  const int place_max_ik_solutions =
+    std::max(1, getIntParam(node_, "pick_place.place_max_ik_solutions", 32));
+  const double grasp_min_solution_distance =
+    getDoubleParam(node_, "pick_place.grasp_min_solution_distance", 1.0);
+  const double place_min_solution_distance =
+    getDoubleParam(node_, "pick_place.place_min_solution_distance", 1.0);
+
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  cartesian_planner->setMaxVelocityScalingFactor(0.5);
-  cartesian_planner->setMaxAccelerationScalingFactor(0.5);
-  cartesian_planner->setStepSize(0.001);
-  RCLCPP_DEBUG(LOGGER, "createTask: CartesianPath planner configured (vel=0.5, acc=0.5, step=0.001).");
+  cartesian_planner->setMaxVelocityScalingFactor(cartesian_velocity_scaling);
+  cartesian_planner->setMaxAccelerationScalingFactor(cartesian_acceleration_scaling);
+  cartesian_planner->setStepSize(cartesian_step_size);
+  RCLCPP_DEBUG(LOGGER,
+    "createTask: CartesianPath planner configured (vel=%.3f, acc=%.3f, step=%.4f).",
+    cartesian_velocity_scaling, cartesian_acceleration_scaling, cartesian_step_size);
 
   // Dedicated planner for retreat: min_fraction=0 accepts whatever Cartesian
   // distance the arm can actually achieve at the (low, far-reach) place pose.
   auto retreat_planner = std::make_shared<mtc::solvers::CartesianPath>();
-  retreat_planner->setMaxVelocityScalingFactor(0.5);
-  retreat_planner->setMaxAccelerationScalingFactor(0.5);
-  retreat_planner->setStepSize(0.001);
-  retreat_planner->setMinFraction(0.0);
+  retreat_planner->setMaxVelocityScalingFactor(cartesian_velocity_scaling);
+  retreat_planner->setMaxAccelerationScalingFactor(cartesian_acceleration_scaling);
+  retreat_planner->setStepSize(cartesian_step_size);
+  retreat_planner->setMinFraction(retreat_min_fraction);
 
   // ── Stage 1: start state — CurrentState (task 1) or FixedState (tasks 2..N) ──
   mtc::Stage * current_state_ptr = nullptr;
@@ -370,7 +423,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
-    stage_move_to_pick->setTimeout(0.20);
+    stage_move_to_pick->setTimeout(move_to_pick_timeout);
     stage_move_to_pick->properties().configureInitFrom(mtc::Stage::PARENT);
     // stage_move_to_pick->setPathConstraints(buildJointLimitConstraints());
     task.add(std::move(stage_move_to_pick));
@@ -394,7 +447,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       stage->properties().set("marker_ns", "approach_object");
       stage->properties().set("link", hand_frame);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
+      stage->setMinMaxDistance(approach_min_distance, approach_max_distance);
 
       geometry_msgs::msg::Vector3Stamped vec;
       vec.header.frame_id = hand_frame;
@@ -419,28 +472,27 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       // Transform from gripper_tcp to the object centre when grasping top-down.
       // z=0.08 means gripper_tcp sits 80 mm above the object centre at grasp time.
-      constexpr double GRASP_Z_OFFSET = 0.01;
       Eigen::Isometry3d grasp_frame_transform = Eigen::Isometry3d::Identity();
       Eigen::Quaterniond q = Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitY()) *
                              Eigen::AngleAxisd(0.0,  Eigen::Vector3d::UnitZ());
       grasp_frame_transform.linear() = q.matrix();
-      grasp_frame_transform.translation().z() = GRASP_Z_OFFSET;
+      grasp_frame_transform.translation().z() = grasp_z_offset;
 
-      const double expected_grasp_z   = object_pose.position.z + GRASP_Z_OFFSET;
-      const double expected_approach_z_min = expected_grasp_z + 0.10;
-      const double expected_approach_z_max = expected_grasp_z + 0.15;
+      const double expected_grasp_z   = object_pose.position.z + grasp_z_offset;
+      const double expected_approach_z_min = expected_grasp_z + approach_min_distance;
+      const double expected_approach_z_max = expected_grasp_z + approach_max_distance;
       RCLCPP_INFO(LOGGER,
         "createTask [grasp geometry]: object_z=%.4f m  grasp_z_offset=%.3f m  "
         "=> expected gripper_tcp z AT GRASP = %.4f m  "
         "| pre-approach z range = [%.4f, %.4f] m (world frame, top-down).",
-        object_pose.position.z, GRASP_Z_OFFSET,
+        object_pose.position.z, grasp_z_offset,
         expected_grasp_z, expected_approach_z_min, expected_approach_z_max);
 
       auto wrapper =
         std::make_unique<mtc::stages::ComputeIK>("grasp pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(32);
-      wrapper->setMinSolutionDistance(1.0);
+      wrapper->setMaxIKSolutions(static_cast<uint32_t>(grasp_max_ik_solutions));
+      wrapper->setMinSolutionDistance(grasp_min_solution_distance);
       wrapper->setIKFrame(grasp_frame_transform, hand_frame);
       wrapper->setProperty("default_pose", std::string("test_configuration"));
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
@@ -489,7 +541,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       auto stage =
         std::make_unique<mtc::stages::MoveRelative>("lift object", cartesian_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.05, 0.15);
+      stage->setMinMaxDistance(lift_min_distance, lift_max_distance);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "lift_object");
 
@@ -511,7 +563,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
         {arm_group, sampling_planner}});
-    stage->setTimeout(0.20);
+    stage->setTimeout(move_to_place_timeout);
     stage->properties().configureInitFrom(mtc::Stage::PARENT);
     // stage->setPathConstraints(buildJointLimitConstraints());
     task.add(std::move(stage));
@@ -547,8 +599,8 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       auto wrapper =
         std::make_unique<mtc::stages::ComputeIK>("place pose IK", std::move(stage));
-      wrapper->setMaxIKSolutions(32);
-      wrapper->setMinSolutionDistance(1.0);
+      wrapper->setMaxIKSolutions(static_cast<uint32_t>(place_max_ik_solutions));
+      wrapper->setMinSolutionDistance(place_min_solution_distance);
       wrapper->setIKFrame(object_id);
       wrapper->setProperty("default_pose", std::string("test_configuration"));
       wrapper->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group"});
@@ -597,7 +649,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       auto stage =
         std::make_unique<mtc::stages::MoveRelative>("retreat", retreat_planner);
       stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-      stage->setMinMaxDistance(0.03, 0.15);
+      stage->setMinMaxDistance(retreat_min_distance, retreat_max_distance);
       stage->setIKFrame(hand_frame);
       stage->properties().set("marker_ns", "retreat");
 
@@ -664,11 +716,13 @@ WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
     return result;
   }
 
-  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (max 5 solutions)...",
-              entry.object_id.c_str());
+  const int task_solution_target_count =
+    std::max(1, getIntParam(node_, "pick_place.task_solution_target_count", 15));
+  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (target %d solution(s))...",
+              entry.object_id.c_str(), task_solution_target_count);
   moveit::core::MoveItErrorCode plan_result;
   try {
-    plan_result = result.task->plan(15);
+    plan_result = result.task->plan(task_solution_target_count);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER,
       "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
@@ -800,9 +854,11 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
   }
 
   RCLCPP_INFO(LOGGER, "doPickAndPlace: planning...");
+  const int task_solution_target_count =
+    std::max(1, getIntParam(node_, "pick_place.task_solution_target_count", 15));
   moveit::core::MoveItErrorCode plan_result;
   try {
-    plan_result = task.plan(15);
+    plan_result = task.plan(task_solution_target_count);
   } catch (const mtc::InitStageException & e) {
     RCLCPP_ERROR_STREAM(LOGGER, "MTC task planning threw InitStageException: " << e);
     return false;
@@ -1566,9 +1622,11 @@ bool WordleBotController::runScanAndSweep(
     }
 
     RCLCPP_INFO(LOGGER, "runScanAndSweep (MTC): planning sweep.");
+    const int mtc_solution_target_count =
+      std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
     moveit::core::MoveItErrorCode plan_result;
     try {
-      plan_result = sweep_task.plan(15);
+      plan_result = sweep_task.plan(mtc_solution_target_count);
     } catch (const mtc::InitStageException & e) {
       RCLCPP_ERROR_STREAM(LOGGER, "runScanAndSweep (MTC): sweep task planning threw: " << e);
       return false;
@@ -1711,7 +1769,9 @@ bool WordleBotController::returnToHome()
     return false;
   }
 
-  if (!task.plan(15) || task.solutions().empty()) {
+  const int mtc_solution_target_count =
+    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
+  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
     return false;
   }
@@ -1788,7 +1848,9 @@ bool WordleBotController::openGripper()
     return false;
   }
 
-  if (!task.plan(15) || task.solutions().empty()) {
+  const int mtc_solution_target_count =
+    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
+  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
     return false;
   }
@@ -1830,7 +1892,9 @@ bool WordleBotController::closeGripper()
     return false;
   }
 
-  if (!task.plan(15) || task.solutions().empty()) {
+  const int mtc_solution_target_count =
+    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
+  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
     return false;
   }

@@ -93,7 +93,7 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/scan_and_sweep", 10,
     std::bind(&WordleBotControlNode::scanAndSweepCallback, this, std::placeholders::_1));
 
-  // Load working-pose parameters from config/pose_working.yaml.
+  // Load controller runtime parameters from config/wordle_bot_controller.yaml.
   if (!node_->has_parameter("working_joints.shoulder_pan_joint"))
     node_->declare_parameter<double>("working_joints.shoulder_pan_joint",  0.5236);
   if (!node_->has_parameter("working_joints.shoulder_lift_joint"))
@@ -107,7 +107,6 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   if (!node_->has_parameter("working_joints.wrist_3_joint"))
     node_->declare_parameter<double>("working_joints.wrist_3_joint",       -1.0647);
 
-  // Load scan-and-sweep parameters from config/scan_sweep_poses.yaml.
   // Guard each declaration: if the YAML was loaded via --params-file the parameters
   // are already declared by the time the constructor runs.
   if (!node_->has_parameter("scan_sweep_dwell_time"))
@@ -124,6 +123,46 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<std::vector<double>>("scan_sweep_pose_4", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
   if (!node_->has_parameter("scan_sweep_pose_5"))
     node_->declare_parameter<std::vector<double>>("scan_sweep_pose_5", {0.0, 0.0, 0.5, 0.0, 1.5708, 0.0});
+
+  if (!node_->has_parameter("mtc_default_solution_target_count"))
+    node_->declare_parameter<int>("mtc_default_solution_target_count", 15);
+
+  if (!node_->has_parameter("pick_place.task_solution_target_count"))
+    node_->declare_parameter<int>("pick_place.task_solution_target_count", 15);
+  if (!node_->has_parameter("pick_place.grasp_max_ik_solutions"))
+    node_->declare_parameter<int>("pick_place.grasp_max_ik_solutions", 32);
+  if (!node_->has_parameter("pick_place.place_max_ik_solutions"))
+    node_->declare_parameter<int>("pick_place.place_max_ik_solutions", 32);
+  if (!node_->has_parameter("pick_place.grasp_min_solution_distance"))
+    node_->declare_parameter<double>("pick_place.grasp_min_solution_distance", 1.0);
+  if (!node_->has_parameter("pick_place.place_min_solution_distance"))
+    node_->declare_parameter<double>("pick_place.place_min_solution_distance", 1.0);
+  if (!node_->has_parameter("pick_place.cartesian_velocity_scaling"))
+    node_->declare_parameter<double>("pick_place.cartesian_velocity_scaling", 0.5);
+  if (!node_->has_parameter("pick_place.cartesian_acceleration_scaling"))
+    node_->declare_parameter<double>("pick_place.cartesian_acceleration_scaling", 0.5);
+  if (!node_->has_parameter("pick_place.cartesian_step_size"))
+    node_->declare_parameter<double>("pick_place.cartesian_step_size", 0.001);
+  if (!node_->has_parameter("pick_place.retreat_min_fraction"))
+    node_->declare_parameter<double>("pick_place.retreat_min_fraction", 0.0);
+  if (!node_->has_parameter("pick_place.move_to_pick_timeout"))
+    node_->declare_parameter<double>("pick_place.move_to_pick_timeout", 0.20);
+  if (!node_->has_parameter("pick_place.move_to_place_timeout"))
+    node_->declare_parameter<double>("pick_place.move_to_place_timeout", 0.20);
+  if (!node_->has_parameter("pick_place.approach_min_distance"))
+    node_->declare_parameter<double>("pick_place.approach_min_distance", 0.05);
+  if (!node_->has_parameter("pick_place.approach_max_distance"))
+    node_->declare_parameter<double>("pick_place.approach_max_distance", 0.15);
+  if (!node_->has_parameter("pick_place.lift_min_distance"))
+    node_->declare_parameter<double>("pick_place.lift_min_distance", 0.05);
+  if (!node_->has_parameter("pick_place.lift_max_distance"))
+    node_->declare_parameter<double>("pick_place.lift_max_distance", 0.15);
+  if (!node_->has_parameter("pick_place.retreat_min_distance"))
+    node_->declare_parameter<double>("pick_place.retreat_min_distance", 0.03);
+  if (!node_->has_parameter("pick_place.retreat_max_distance"))
+    node_->declare_parameter<double>("pick_place.retreat_max_distance", 0.15);
+  if (!node_->has_parameter("pick_place.grasp_z_offset"))
+    node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
 
   scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
 
