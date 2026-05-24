@@ -47,6 +47,7 @@ set(DEPENDENCIES
 add_library(wordle_bot_lib
   src/wordle_bot_controller.cpp
   src/wordle_bot_control_node.cpp
+  src/wordle_mtc_planner.cpp
 )
 target_include_directories(wordle_bot_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
