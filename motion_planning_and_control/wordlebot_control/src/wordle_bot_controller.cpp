@@ -1,10 +1,15 @@
 #include "wordlebot_control/wordle_bot_controller.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
 
+#include <rclcpp_action/rclcpp_action.hpp>
+
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
+#include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 namespace mtc = moveit::task_constructor;
 
@@ -18,6 +23,62 @@ namespace mtc = moveit::task_constructor;
 #include <shape_msgs/msg/solid_primitive.hpp>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotController");
+
+namespace
+{
+constexpr const char * kWrist3JointName = "wrist_3_joint";
+constexpr double kTwoPi = 2.0 * M_PI;
+
+std::optional<std::size_t> findJointIndex(
+  const std::vector<std::string> & joint_names,
+  const std::string & joint_name)
+{
+  const auto it = std::find(joint_names.begin(), joint_names.end(), joint_name);
+  if (it == joint_names.end()) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(std::distance(joint_names.begin(), it));
+}
+
+bool alignWrist3JointTrajectoryToReference(
+  trajectory_msgs::msg::JointTrajectory & joint_trajectory,
+  double & reference_wrist3,
+  const std::string & context)
+{
+  const auto wrist3_index = findJointIndex(joint_trajectory.joint_names, kWrist3JointName);
+  if (!wrist3_index) {
+    return false;
+  }
+
+  auto first_point = std::find_if(
+    joint_trajectory.points.begin(), joint_trajectory.points.end(),
+    [wrist3_index](const auto & point) {
+      return point.positions.size() > *wrist3_index;
+    });
+  if (first_point == joint_trajectory.points.end()) {
+    return false;
+  }
+
+  const double first_wrist3 = first_point->positions[*wrist3_index];
+  const double reference_before = reference_wrist3;
+  const double offset =
+    WordleBotController::computeContinuousJointRevolutionOffset(reference_wrist3, first_wrist3);
+
+  for (auto & point : joint_trajectory.points) {
+    if (point.positions.size() > *wrist3_index) {
+      point.positions[*wrist3_index] += offset;
+      reference_wrist3 = point.positions[*wrist3_index];
+    }
+  }
+
+  if (std::abs(offset) >= 1e-9) {
+    RCLCPP_DEBUG(LOGGER,
+      "%s: aligned wrist_3 trajectory by %.6f rad (%+.0f rev): reference=%.6f, first_raw=%.6f, first_aligned=%.6f.",
+      context.c_str(), offset, offset / kTwoPi, reference_before, first_wrist3, first_wrist3 + offset);
+  }
+  return true;
+}
+}  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
 : node_(node),
@@ -694,7 +755,9 @@ bool WordleBotController::executePlannedTask(PlannedPickPlace & planned)
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
   RCLCPP_INFO(LOGGER, "executePlannedTask [%s]: executing...", planned.object_id.c_str());
-  const auto result = planned.task->execute(*planned.best_solution);
+  const auto result = executeAlignedTaskSolution(
+    *planned.task, *planned.best_solution,
+    "executePlannedTask [" + planned.object_id + "]");
 
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
     RCLCPP_ERROR(LOGGER,
@@ -758,7 +821,7 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
   RCLCPP_INFO(LOGGER, "doPickAndPlace: executing...");
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  auto result = task.execute(*task.solutions().front());
+  auto result = executeAlignedTaskSolution(task, *task.solutions().front(), "doPickAndPlace");
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "MTC task execution failed (error code %d).", result.val);
     return false;
@@ -882,7 +945,8 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
   RCLCPP_INFO(LOGGER, "executePlannedMoveToGoal: executing...");
-  const auto result = planned.task->execute(*planned.best_solution);
+  const auto result = executeAlignedTaskSolution(
+    *planned.task, *planned.best_solution, "executePlannedMoveToGoal");
 
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "executePlannedMoveToGoal: execution failed (error code %d).", result.val);
@@ -942,22 +1006,69 @@ std::vector<double> WordleBotController::computeBestIK(
   double best_cost  = std::numeric_limits<double>::infinity();
   int ik_successes  = 0;
 
+  struct IkDiagnostics {
+    int total_attempts = 0;
+    int solver_failures = 0;
+    int collision_callback_rejections = 0;
+    int collision_rejected_attempts = 0;
+    int wrist3_filter_rejections = 0;
+    int wrist1_filter_rejections = 0;
+    int accepted_candidates = 0;
+  } ik_diag;
+
+  auto get_joint_value = [&](const std::vector<double> & values,
+                             const char * joint_name) -> double {
+    for (std::size_t i = 0; i < joint_names.size() && i < values.size(); ++i) {
+      if (joint_names[i] == joint_name) {
+        return values[i];
+      }
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+  };
+
+  auto log_rejection = [&](int attempt, const char * reason,
+                           double wrist1, double wrist2, double wrist3) {
+    RCLCPP_DEBUG(LOGGER,
+      "computeBestIK: attempt %d rejected by %s. "
+      "wrist_1=%.4f wrist_2=%.4f wrist_3=%.4f. "
+      "target xyz=(%.3f, %.3f, %.3f) quat=(%.3f, %.3f, %.3f, %.3f).",
+      attempt, reason, wrist1, wrist2, wrist3,
+      target_pose.position.x, target_pose.position.y, target_pose.position.z,
+      target_pose.orientation.x, target_pose.orientation.y,
+      target_pose.orientation.z, target_pose.orientation.w);
+  };
+
   // Collision-aware IK: reject any candidate that puts the robot in collision.
   // LockedPlanningSceneRO holds the read lock for the full IK loop so the scene
   // cannot change mid-loop and the lambda can safely query it.
   planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  int active_ik_attempt = -1;
   auto isCollisionFree = [&](moveit::core::RobotState* state,
                               const moveit::core::JointModelGroup* group,
                               const double* ik_solution) -> bool
   {
     state->setJointGroupPositions(group, ik_solution);
     state->update();
-    return !lps->isStateColliding(*state, group->getName());
+    const bool colliding = lps->isStateColliding(*state, group->getName());
+    if (colliding) {
+      ++ik_diag.collision_callback_rejections;
+      std::vector<double> rejected_values;
+      state->copyJointGroupPositions(group, rejected_values);
+      log_rejection(active_ik_attempt, "collision callback",
+        get_joint_value(rejected_values, "wrist_1_joint"),
+        get_joint_value(rejected_values, "wrist_2_joint"),
+        get_joint_value(rejected_values, "wrist_3_joint"));
+    }
+    return !colliding;
   };
 
   // One IK attempt: seed → solve → normalise → validate → cost. Uses return
   // in place of continue so the retry loop below can reuse the same logic.
   auto runIKAttempt = [&](int attempt) {
+    ++ik_diag.total_attempts;
+    active_ik_attempt = attempt;
+    const int collision_rejections_before = ik_diag.collision_callback_rejections;
+
     moveit::core::RobotState ik_state(*current_state);
     if (attempt < kWarmAttempts) {
       ik_state.setJointGroupPositions(jmg, kWarmStart);
@@ -967,6 +1078,11 @@ std::vector<double> WordleBotController::computeBestIK(
     }
 
     if (!ik_state.setFromIK(jmg, target_pose, "gripper_tcp", 0.1, isCollisionFree)) {
+      if (ik_diag.collision_callback_rejections > collision_rejections_before) {
+        ++ik_diag.collision_rejected_attempts;
+      } else {
+        ++ik_diag.solver_failures;
+      }
       return;
     }
     ++ik_successes;
@@ -995,30 +1111,6 @@ std::vector<double> WordleBotController::computeBestIK(
       candidate[i] = best_norm;
     }
 
-    // Reject candidates where wrist_3_joint is outside [-π, π].
-    // The normalization above picks the 2π-equivalent closest to the current
-    // joint value, which can push wrist_3 further out of range each move (e.g.
-    // current=-3.89 rad, IK=+1.0 rad → normalized=-5.28 rad). Rejecting those
-    // solutions forces the IK to find one whose normalized wrist_3 stays in
-    // [-π, π], making the controller reverse direction rather than accumulate.
-    bool wrist3_in_range = true;
-    double wrist3_val = 0.0;
-    for (std::size_t i = 0; i < joint_names.size(); ++i) {
-      if (joint_names[i] == "wrist_3_joint" && i < candidate.size()) {
-        wrist3_val = candidate[i];
-        if (wrist3_val < -3.0 * M_PI / 2.0 || wrist3_val > 3.0 * M_PI / 2.0) {
-          wrist3_in_range = false;
-        }
-        break;
-      }
-    }
-    if (!wrist3_in_range) {
-      RCLCPP_DEBUG(LOGGER,
-        "computeBestIK: attempt %d rejected — wrist_3=%.3f rad outside [-3π/2, 3π/2].",
-        attempt, wrist3_val);
-      return;
-    }
-
     // Reject candidates where wrist_1_joint is outside [-180°, +15°].
     static constexpr double kWrist1Min = -M_PI;
     static constexpr double kWrist1Max =  M_PI / 12.0;
@@ -1034,11 +1126,15 @@ std::vector<double> WordleBotController::computeBestIK(
       }
     }
     if (!wrist1_in_range) {
-      RCLCPP_DEBUG(LOGGER,
-        "computeBestIK: attempt %d rejected — wrist_1=%.3f rad outside [%.3f, %.3f].",
-        attempt, wrist1_val, kWrist1Min, kWrist1Max);
+      ++ik_diag.wrist1_filter_rejections;
+      log_rejection(attempt, "wrist_1 range filter",
+        wrist1_val,
+        get_joint_value(candidate, "wrist_2_joint"),
+        get_joint_value(candidate, "wrist_3_joint"));
       return;
     }
+
+    ++ik_diag.accepted_candidates;
 
     double movement_cost      = 0.0;
     double functional_penalty = 0.0;
@@ -1074,6 +1170,15 @@ std::vector<double> WordleBotController::computeBestIK(
     ik_successes, best_cost);
 
   if (best_joint_values.empty()) {
+    RCLCPP_WARN(LOGGER,
+      "computeBestIK diagnostics: no accepted candidate after %d attempt(s). "
+      "solver_failures=%d, solver_successes=%d, accepted=%d, "
+      "collision_callback_rejections=%d, collision_rejected_attempts=%d, "
+      "wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
+      ik_diag.total_attempts, ik_diag.solver_failures, ik_successes,
+      ik_diag.accepted_candidates, ik_diag.collision_callback_rejections,
+      ik_diag.collision_rejected_attempts, ik_diag.wrist3_filter_rejections,
+      ik_diag.wrist1_filter_rejections);
     RCLCPP_INFO(LOGGER,
       "computeBestIK: IK FAILED for target pose (x=%.3f y=%.3f z=%.3f qx=%.3f qy=%.3f qz=%.3f qw=%.3f).",
       target_pose.position.x, target_pose.position.y, target_pose.position.z,
@@ -1202,6 +1307,7 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
     move_group_.setJointValueTarget(flipped_q);
     moveit::planning_interface::MoveGroupInterface::Plan flip_plan;
     if (static_cast<bool>(move_group_.plan(flip_plan)) &&
+        alignWrist3TrajectoryToCurrentState(flip_plan.trajectory_, "moveToGoal flip recovery") &&
         move_group_.execute(flip_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
       current_state = move_group_.getCurrentState(2.0);
       if (current_state) {
@@ -1238,7 +1344,7 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
     return false;
   }
 
-  const auto plan = selectBestPlan(plans);
+  auto plan = selectBestPlan(plans);
   if (plan.trajectory_.joint_trajectory.points.empty()) {
     RCLCPP_ERROR(LOGGER, "moveToGoal: selectBestPlan returned an empty plan.");
     return false;
@@ -1252,6 +1358,9 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
   RCLCPP_INFO(LOGGER, "moveToGoal: executing plan (total_joint_disp=%.4f rad).",
     computeTotalJointDisplacement(plan));
 
+  if (!alignWrist3TrajectoryToCurrentState(plan.trajectory_, "moveToGoal")) {
+    return false;
+  }
   const auto exec_result = move_group_.execute(plan);
   if (exec_result != moveit::core::MoveItErrorCode::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "moveToGoal: execution failed (error code %d).", exec_result.val);
@@ -1294,6 +1403,9 @@ bool WordleBotController::moveCartesianToWaypoint(
       target_pose.position.x, target_pose.position.y, target_pose.position.z);
 
     if (fraction >= kCartesianMinFraction) {
+      if (!alignWrist3TrajectoryToCurrentState(trajectory, "moveCartesianToWaypoint")) {
+        return false;
+      }
       const auto result = move_group_.execute(trajectory);
       if (result != moveit::core::MoveItErrorCode::SUCCESS) {
         RCLCPP_WARN(LOGGER,
@@ -1472,7 +1584,8 @@ bool WordleBotController::runScanAndSweep(
     rclcpp::sleep_for(std::chrono::milliseconds(500));
 
     if (stop_requested_.load()) { return false; }
-    const auto exec_result = sweep_task.execute(*sweep_task.solutions().front());
+    const auto exec_result = executeAlignedTaskSolution(
+      sweep_task, *sweep_task.solutions().front(), "runScanAndSweep (MTC)");
     if (exec_result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
       RCLCPP_ERROR(LOGGER, "runScanAndSweep (MTC): sweep execution failed (error code %d).",
         exec_result.val);
@@ -1602,7 +1715,7 @@ bool WordleBotController::returnToHome()
   task.introspection().publishSolution(*task.solutions().front());
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  auto result = task.execute(*task.solutions().front());
+  auto result = executeAlignedTaskSolution(task, *task.solutions().front(), "returnToHome");
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
     return false;
@@ -1634,6 +1747,9 @@ bool WordleBotController::returnToWorkingPose()
     return false;
   }
 
+  if (!alignWrist3TrajectoryToCurrentState(plan.trajectory_, "returnToWorkingPose")) {
+    return false;
+  }
   auto result = move_group_.execute(plan);
   if (result != moveit::core::MoveItErrorCode::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "returnToWorkingPose: execution failed (error code %d).", result.val);
@@ -1881,6 +1997,152 @@ void WordleBotController::clearStopFlag()
 // buildPathConstraints         — return the MoveIt path constraints used by
 //                                MTC planning stages
 // ---------------------------------------------------------------------------
+
+bool WordleBotController::alignWrist3TrajectoryToCurrentState(
+  moveit_msgs::msg::RobotTrajectory & trajectory,
+  const std::string & context)
+{
+  if (trajectory.joint_trajectory.points.empty()) {
+    return true;
+  }
+
+  const auto wrist3_index =
+    findJointIndex(trajectory.joint_trajectory.joint_names, kWrist3JointName);
+  if (!wrist3_index) {
+    return true;
+  }
+
+  auto state = move_group_.getCurrentState(2.0);
+  if (!state) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot align wrist_3 trajectory because getCurrentState() returned null.",
+      context.c_str());
+    return false;
+  }
+
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+  if (jmg == nullptr) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot align wrist_3 trajectory because group 'ur_onrobot_manipulator' was not found.",
+      context.c_str());
+    return false;
+  }
+
+  std::vector<double> joint_values;
+  state->copyJointGroupPositions(jmg, joint_values);
+  const auto current_index = findJointIndex(jmg->getVariableNames(), kWrist3JointName);
+  if (!current_index || joint_values.size() <= *current_index) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot align wrist_3 trajectory because the live state has no wrist_3 value.",
+      context.c_str());
+    return false;
+  }
+
+  double reference_wrist3 = joint_values[*current_index];
+  alignWrist3JointTrajectoryToReference(
+    trajectory.joint_trajectory, reference_wrist3, context);
+  return true;
+}
+
+moveit::core::MoveItErrorCode WordleBotController::executeAlignedTaskSolution(
+  mtc::Task & task,
+  const mtc::SolutionBase & solution,
+  const std::string & context)
+{
+  using ExecuteTaskSolutionAction =
+    moveit_task_constructor_msgs::action::ExecuteTaskSolution;
+
+  moveit_msgs::msg::MoveItErrorCodes error_code;
+  error_code.val = moveit_msgs::msg::MoveItErrorCodes::FAILURE;
+
+  auto state = move_group_.getCurrentState(2.0);
+  if (!state) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot execute aligned MTC solution because getCurrentState() returned null.",
+      context.c_str());
+    return error_code;
+  }
+
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+  if (jmg == nullptr) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot execute aligned MTC solution because group 'ur_onrobot_manipulator' was not found.",
+      context.c_str());
+    return error_code;
+  }
+
+  std::vector<double> joint_values;
+  state->copyJointGroupPositions(jmg, joint_values);
+  const auto current_index = findJointIndex(jmg->getVariableNames(), kWrist3JointName);
+  if (!current_index || joint_values.size() <= *current_index) {
+    RCLCPP_ERROR(LOGGER,
+      "%s: cannot execute aligned MTC solution because the live state has no wrist_3 value.",
+      context.c_str());
+    return error_code;
+  }
+
+  ExecuteTaskSolutionAction::Goal goal;
+  solution.toMsg(goal.solution, &task.introspection());
+
+  double reference_wrist3 = joint_values[*current_index];
+  std::size_t aligned_subtrajectories = 0;
+  for (std::size_t i = 0; i < goal.solution.sub_trajectory.size(); ++i) {
+    auto & sub_trajectory = goal.solution.sub_trajectory[i].trajectory;
+    if (alignWrist3JointTrajectoryToReference(
+        sub_trajectory.joint_trajectory, reference_wrist3,
+        context + " subtrajectory " + std::to_string(i + 1))) {
+      ++aligned_subtrajectories;
+    }
+  }
+  RCLCPP_DEBUG(LOGGER, "%s: checked %zu MTC subtrajectory(s), aligned %zu containing wrist_3.",
+    context.c_str(), goal.solution.sub_trajectory.size(), aligned_subtrajectories);
+
+  auto execute_node = rclcpp::Node::make_shared("wordlebot_mtc_executor");
+  auto execute_client =
+    rclcpp_action::create_client<ExecuteTaskSolutionAction>(execute_node, "execute_task_solution");
+
+  if (!execute_client->wait_for_action_server(std::chrono::milliseconds(500))) {
+    RCLCPP_ERROR(LOGGER, "%s: failed to connect to the 'execute_task_solution' action server.",
+      context.c_str());
+    return error_code;
+  }
+
+  auto goal_handle_future = execute_client->async_send_goal(goal);
+  if (rclcpp::spin_until_future_complete(execute_node, goal_handle_future) !=
+      rclcpp::FutureReturnCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "%s: send goal call failed.", context.c_str());
+    return error_code;
+  }
+
+  const auto goal_handle = goal_handle_future.get();
+  if (!goal_handle) {
+    RCLCPP_ERROR(LOGGER, "%s: execute_task_solution goal was rejected.", context.c_str());
+    return error_code;
+  }
+
+  auto result_future = execute_client->async_get_result(goal_handle);
+  while (result_future.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+    if (stop_requested_.load()) {
+      auto cancel_future = execute_client->async_cancel_goal(goal_handle);
+      if (rclcpp::spin_until_future_complete(execute_node, cancel_future) !=
+          rclcpp::FutureReturnCode::SUCCESS) {
+        RCLCPP_ERROR(LOGGER, "%s: could not cancel MTC execution.", context.c_str());
+      }
+      error_code.val = moveit_msgs::msg::MoveItErrorCodes::PREEMPTED;
+      return error_code;
+    }
+    rclcpp::spin_some(execute_node);
+  }
+
+  const auto result = result_future.get();
+  if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+    RCLCPP_ERROR(LOGGER, "%s: execute_task_solution goal was aborted or canceled.",
+      context.c_str());
+    return error_code;
+  }
+
+  return result.result->error_code;
+}
 
 geometry_msgs::msg::Pose WordleBotController::buildPose(
   double x, double y, double z,
