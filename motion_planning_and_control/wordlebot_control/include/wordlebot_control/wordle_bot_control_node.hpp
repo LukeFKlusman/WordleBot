@@ -73,7 +73,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_sub_;
 
   // ---------------------------------------------------------------------------
-  // Scan-and-sweep parameters (loaded from config/scan_sweep_poses.yaml)
+  // Scan-and-sweep parameters (loaded from config/wordle_bot_controller.yaml)
   // ---------------------------------------------------------------------------
   std::array<geometry_msgs::msg::Pose, 6> scan_sweep_poses_;
   double scan_sweep_dwell_time_{1.5};

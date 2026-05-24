@@ -20,6 +20,44 @@ namespace
 {
 constexpr double kTwoPi = 2.0 * M_PI;
 const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleMtcPlanner");
+const std::vector<double> kDefaultIkJoints = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
+const std::vector<double> kDefaultIkWeights = {0.3, 0.5, 0.5, 0.5, 0.3, 0.3};
+
+int getIntParam(const rclcpp::Node::SharedPtr & node, const std::string & name, int default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<int>(name, default_value);
+  }
+  return static_cast<int>(node->get_parameter(name).as_int());
+}
+
+double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & name, double default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<double>(name, default_value);
+  }
+  return node->get_parameter(name).as_double();
+}
+
+std::vector<double> getDoubleArrayParam(
+  const rclcpp::Node::SharedPtr & node,
+  const std::string & name,
+  const std::vector<double> & default_value,
+  std::size_t expected_size)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<std::vector<double>>(name, default_value);
+  }
+
+  auto values = node->get_parameter(name).as_double_array();
+  if (values.size() != expected_size) {
+    RCLCPP_WARN(LOGGER,
+      "Parameter '%s' has %zu values, expected %zu. Using defaults.",
+      name.c_str(), values.size(), expected_size);
+    return default_value;
+  }
+  return values;
+}
 
 double computeTotalJointDisplacement(
   const robot_trajectory::RobotTrajectory & trajectory,
@@ -46,16 +84,45 @@ double computeTotalJointDisplacement(
 WordleMtcPlanner::WordleMtcPlanner(rclcpp::Node::SharedPtr node, std::string pipeline_name)
 : node_(std::move(node)), pipeline_name_(std::move(pipeline_name))
 {
+  const uint candidate_plans = static_cast<uint>(
+    std::max(1, getIntParam(node_, "wordle_mtc_planner.candidate_plans", 5)));
+  const uint num_planning_attempts = static_cast<uint>(
+    std::max(1, getIntParam(node_, "wordle_mtc_planner.num_planning_attempts", 1)));
+  const double goal_joint_tolerance =
+    getDoubleParam(node_, "wordle_mtc_planner.goal_joint_tolerance", 1e-4);
+  const double max_velocity_scaling =
+    getDoubleParam(node_, "wordle_mtc_planner.max_velocity_scaling_factor", 1.0);
+  const double max_acceleration_scaling =
+    getDoubleParam(node_, "wordle_mtc_planner.max_acceleration_scaling_factor", 1.0);
+
+  ik_warm_attempts_ = std::max(0, getIntParam(node_, "wordle_mtc_planner.ik_warm_attempts", 5));
+  ik_total_attempts_ = std::max(1, getIntParam(node_, "wordle_mtc_planner.ik_total_attempts", 10));
+  ik_retry_multiplier_ = std::max(1, getIntParam(node_, "wordle_mtc_planner.ik_retry_multiplier", 2));
+  ik_warm_start_ = getDoubleArrayParam(
+    node_, "wordle_mtc_planner.ik_warm_start_joints", kDefaultIkJoints, 6);
+  ik_functional_reference_ = getDoubleArrayParam(
+    node_, "wordle_mtc_planner.ik_functional_reference_joints", kDefaultIkJoints, 6);
+  ik_functional_weights_ = getDoubleArrayParam(
+    node_, "wordle_mtc_planner.ik_functional_weights", kDefaultIkWeights, 6);
+  ik_wrist_1_min_ = getDoubleParam(node_, "wordle_mtc_planner.ik_wrist_1_min", -M_PI);
+  ik_wrist_1_max_ = getDoubleParam(node_, "wordle_mtc_planner.ik_wrist_1_max", M_PI / 12.0);
+  ik_movement_cost_weight_ =
+    getDoubleParam(node_, "wordle_mtc_planner.ik_movement_cost_weight", 2.0);
+  ik_functional_cost_weight_ =
+    getDoubleParam(node_, "wordle_mtc_planner.ik_functional_cost_weight", 0.3);
+
   auto & p = properties();
   p.declare<std::string>("planner", "", "planner id");
-  p.declare<uint>("num_planning_attempts", 1u, "number of planning attempts per candidate");
-  p.declare<uint>("candidate_plans", 5u, "number of candidate trajectories to generate and score");
+  p.declare<uint>("num_planning_attempts", num_planning_attempts, "number of planning attempts per candidate");
+  p.declare<uint>("candidate_plans", candidate_plans, "number of candidate trajectories to generate and score");
   p.declare<moveit_msgs::msg::WorkspaceParameters>(
     "workspace_parameters", moveit_msgs::msg::WorkspaceParameters(),
     "allowed workspace of mobile base?");
-  p.declare<double>("goal_joint_tolerance", 1e-4, "tolerance for reaching joint goals");
+  p.declare<double>("goal_joint_tolerance", goal_joint_tolerance, "tolerance for reaching joint goals");
   p.declare<double>("goal_position_tolerance", 1e-4, "tolerance for reaching position goals");
   p.declare<double>("goal_orientation_tolerance", 1e-4, "tolerance for reaching orientation goals");
+  setMaxVelocityScalingFactor(max_velocity_scaling);
+  setMaxAccelerationScalingFactor(max_acceleration_scaling);
 }
 
 void WordleMtcPlanner::init(const moveit::core::RobotModelConstPtr & robot_model)
@@ -208,12 +275,6 @@ std::vector<double> WordleMtcPlanner::computeBestIK(
     return {};
   }
 
-  static const std::vector<double> kWarmStart = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
-  static const std::vector<double> kFuncPos = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
-  static const std::vector<double> kFuncWeights = {0.3, 0.5, 0.5, 0.5, 0.3, 0.3};
-  static constexpr int kWarmAttempts = 5;
-  static constexpr int kTotalAttempts = 15;
-
   const auto & start_state = scene->getCurrentState();
   const auto & joint_names = jmg->getVariableNames();
   const auto & active_joints = jmg->getActiveJointModels();
@@ -249,8 +310,8 @@ std::vector<double> WordleMtcPlanner::computeBestIK(
 
   auto run_attempt = [&](int attempt) {
     moveit::core::RobotState ik_state(start_state);
-    if (attempt < kWarmAttempts && kWarmStart.size() == jmg->getVariableCount()) {
-      ik_state.setJointGroupPositions(jmg, kWarmStart);
+    if (attempt < ik_warm_attempts_ && ik_warm_start_.size() == jmg->getVariableCount()) {
+      ik_state.setJointGroupPositions(jmg, ik_warm_start_);
     } else {
       ik_state.setToRandomPositions(jmg);
     }
@@ -282,10 +343,8 @@ std::vector<double> WordleMtcPlanner::computeBestIK(
       candidate[i] = best_norm;
     }
 
-    static constexpr double kWrist1Min = -M_PI;
-    static constexpr double kWrist1Max = M_PI / 12.0;
     const double wrist1 = get_joint_value(candidate, "wrist_1_joint");
-    if (std::isfinite(wrist1) && (wrist1 < kWrist1Min || wrist1 > kWrist1Max)) {
+    if (std::isfinite(wrist1) && (wrist1 < ik_wrist_1_min_ || wrist1 > ik_wrist_1_max_)) {
       return;
     }
 
@@ -293,23 +352,25 @@ std::vector<double> WordleMtcPlanner::computeBestIK(
     double functional_penalty = 0.0;
     for (std::size_t i = 0; i < candidate.size(); ++i) {
       movement_cost += std::abs(candidate[i] - current_joint_values[i]);
-      if (i < kFuncPos.size()) {
-        const double d = candidate[i] - kFuncPos[i];
-        functional_penalty += kFuncWeights[i] * d * d;
+      if (i < ik_functional_reference_.size() && i < ik_functional_weights_.size()) {
+        const double d = candidate[i] - ik_functional_reference_[i];
+        functional_penalty += ik_functional_weights_[i] * d * d;
       }
     }
-    const double cost = 2.0 * movement_cost + 0.3 * functional_penalty;
+    const double cost =
+      ik_movement_cost_weight_ * movement_cost +
+      ik_functional_cost_weight_ * functional_penalty;
     if (cost < best_cost) {
       best_cost = cost;
       best_joint_values = candidate;
     }
   };
 
-  for (int attempt = 0; attempt < kTotalAttempts; ++attempt) {
+  for (int attempt = 0; attempt < ik_total_attempts_; ++attempt) {
     run_attempt(attempt);
   }
   if (best_joint_values.empty()) {
-    for (int attempt = kTotalAttempts; attempt < kTotalAttempts * 2; ++attempt) {
+    for (int attempt = ik_total_attempts_; attempt < ik_total_attempts_ * ik_retry_multiplier_; ++attempt) {
       run_attempt(attempt);
     }
   }
