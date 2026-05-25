@@ -177,6 +177,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 
   if (!node_->has_parameter("pick_place.task_solution_target_count"))
     node_->declare_parameter<int>("pick_place.task_solution_target_count", 15);
+  if (!node_->has_parameter("pick_place.backend"))
+    node_->declare_parameter<std::string>("pick_place.backend", "move_group");
   if (!node_->has_parameter("pick_place.grasp_max_ik_solutions"))
     node_->declare_parameter<int>("pick_place.grasp_max_ik_solutions", 32);
   if (!node_->has_parameter("pick_place.place_max_ik_solutions"))
@@ -635,6 +637,19 @@ void WordleBotControlNode::missionLoop()
         RCLCPP_INFO(LOGGER, "  Added collision object '%s'.", entry.object_id.c_str());
       }
 
+      std::string pick_place_backend =
+        node_->get_parameter("pick_place.backend").as_string();
+      if (pick_place_backend != "mtc" && pick_place_backend != "move_group") {
+        RCLCPP_WARN(LOGGER,
+          "Mission: unsupported pick_place.backend='%s'; defaulting to 'move_group'.",
+          pick_place_backend.c_str());
+        pick_place_backend = "move_group";
+      }
+
+      if (pick_place_backend == "mtc") {
+        RCLCPP_INFO(LOGGER,
+          "Mission: pick-and-place backend is MTC — planning all tasks before execution.");
+
       // ── Phase 1: Plan all tasks sequentially, chaining via FixedState ───────
       std::vector<WordleBotController::PlannedPickPlace> planned_tasks;
       planned_tasks.reserve(current_tasks.size());
@@ -720,6 +735,51 @@ void WordleBotControlNode::missionLoop()
           RCLCPP_INFO(LOGGER, "Pick-and-place mission fully complete.");
         } else {
           RCLCPP_ERROR(LOGGER, "Pick-and-place mission did not complete fully.");
+        }
+      }
+      } else {
+        RCLCPP_INFO(LOGGER,
+          "Mission: pick-and-place backend is MoveGroupInterface — planning and executing each task live.");
+
+        bool all_ok = true;
+        for (std::size_t i = 0; i < current_tasks.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER,
+              "Pick-and-place mission (MGI): stop requested before task %zu — aborting.",
+              i + 1);
+            pp_resume_from = i;
+            all_ok = false;
+            break;
+          }
+
+          const bool is_last = (i == current_tasks.size() - 1);
+          RCLCPP_INFO(LOGGER,
+            "Pick-and-place mission (MGI): executing task %zu of %zu: '%s' (return_working=%s).",
+            i + 1, current_tasks.size(), current_tasks[i].object_id.c_str(),
+            is_last ? "yes" : "no");
+
+          if (!controller_->executePickAndPlaceMoveGroup(current_tasks[i], is_last) ||
+              stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER,
+              "Pick-and-place mission (MGI): FAILED at task %zu ('%s').",
+              i + 1, current_tasks[i].object_id.c_str());
+            pp_resume_from = i;
+            all_ok = false;
+            break;
+          }
+
+          goal_reached_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER,
+            "Pick-and-place mission (MGI): task %zu of %zu complete.",
+            i + 1, current_tasks.size());
+        }
+
+        if (all_ok && !stop_requested_.load()) {
+          mission_complete_pub_->publish(signal);
+          motion_complete_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Pick-and-place mission (MGI): fully complete.");
+        } else {
+          RCLCPP_ERROR(LOGGER, "Pick-and-place mission (MGI): did not complete fully.");
         }
       }
 

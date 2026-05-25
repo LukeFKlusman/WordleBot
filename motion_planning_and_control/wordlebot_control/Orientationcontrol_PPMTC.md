@@ -154,3 +154,12 @@ If MTC remains too unpredictable, the fallback is to implement pick/place using 
 - release and retreat
 
 That would provide more direct control over repeated planning and candidate selection, but would lose much of the MTC staged visualization unless recreated separately.
+
+## MoveGroupInterface Backend Decision
+
+Pick/place now has a configurable backend via `pick_place.backend`:
+
+- `move_group` is the default. It uses exact incoming pick/place poses and executes explicit phases sequentially at runtime.
+- `mtc` keeps the existing MoveIt Task Constructor implementation for staged visualization and plan-all-then-execute behavior.
+
+Decision: use MoveGroupInterface as the default because exact pick/place orientation control is more important than whole-task pre-planning for the current application. The accepted limitation is that MoveGroupInterface cannot pre-plan the entire pick/place batch as one staged task; each phase is planned and executed live.

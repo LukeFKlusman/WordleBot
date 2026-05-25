@@ -118,6 +118,13 @@ public:
                       const geometry_msgs::msg::Pose & place_pose,
                       const std::string & object_id);
 
+  // Execute one pick-and-place operation with MoveGroupInterface as a sequence
+  // of live plan/execute phases. The incoming pick/place poses are used as exact
+  // gripper_tcp targets. include_return_working returns to the configured
+  // working pose after the final task in a batch.
+  bool executePickAndPlaceMoveGroup(const PickPlaceEntry & entry,
+                                    bool include_return_working);
+
   // ---------------------------------------------------------------------------
   // Goal Navigation
   // ---------------------------------------------------------------------------
@@ -319,6 +326,13 @@ private:
   // Move the end-effector to target_pose via computeCartesianPath.
   // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
   bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
+
+  // Cartesian helper with explicit velocity profile for non-scan use cases.
+  bool moveCartesianToWaypointWithScaling(const geometry_msgs::msg::Pose & target_pose,
+                                          double velocity_scaling,
+                                          double acceleration_scaling,
+                                          double min_fraction,
+                                          const std::string & context);
 
   // Shift wrist_3 trajectory positions by whole revolutions so the first
   // commanded point is numerically close to the live continuous-joint state.

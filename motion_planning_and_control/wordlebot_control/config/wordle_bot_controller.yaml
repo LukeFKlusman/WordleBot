@@ -27,6 +27,9 @@ wordle_bot_control_node:
     # Pick-and-place MTC task tuning. Solution target count is passed to
     # task.plan(N); the task still proceeds if at least one valid solution exists.
     pick_place:
+      # move_group: exact-pose sequential MoveGroupInterface backend.
+      # mtc: existing plan-all-then-execute-all MoveIt Task Constructor backend.
+      backend: "move_group"
       task_solution_target_count: 10
       grasp_max_ik_solutions: 32
       place_max_ik_solutions: 32
@@ -49,6 +52,11 @@ wordle_bot_control_node:
       retreat_min_distance: 0.03
       retreat_max_distance: 0.15
       grasp_z_offset: 0.01
+      mgi_pre_pick_distance: 0.075
+      mgi_lift_distance: 0.05
+      mgi_pre_place_distance: 0.05
+      mgi_retreat_distance: 0.03
+      mgi_cartesian_min_fraction: 0.95
 
     # Velocity scaling profiles and proximity-based selection thresholds.
     # All values are scaling factors in [0.0, 1.0] applied to each joint's

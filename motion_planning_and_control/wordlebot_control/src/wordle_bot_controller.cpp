@@ -6,6 +6,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
 
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -35,6 +36,26 @@ constexpr const char * kWrist3JointName = "wrist_3_joint";
 constexpr double kTwoPi = 2.0 * M_PI;
 
 double yawFromPose(const geometry_msgs::msg::Pose & pose);
+
+std::vector<std::string> gripperTouchLinks()
+{
+  return {
+    "wrist_3_link", "flange", "tool0", "ft_frame",
+    "onrobot_base_link",
+    "cable_connector_0", "cable_connector_1",
+    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
+    "finger_width_mock_link",
+    "left_inner_knuckle", "right_inner_knuckle",
+    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
+    "gripper_tcp"
+  };
+}
+
+geometry_msgs::msg::Pose offsetWorldZ(geometry_msgs::msg::Pose pose, double dz)
+{
+  pose.position.z += dz;
+  return pose;
+}
 
 struct SolutionMotionScore {
   double joint_motion{0.0};
@@ -530,16 +551,7 @@ void WordleBotController::attachSensorCollisionObject()
 
   // Allow all links that physically overlap with the sensor guard cylinder.
   // Includes the full gripper chain beyond tool0 (onrobot RG2).
-  attached_object.touch_links = {
-    "wrist_3_link", "flange", "tool0", "ft_frame",
-    "onrobot_base_link",
-    "cable_connector_0", "cable_connector_1",
-    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
-    "finger_width_mock_link",
-    "left_inner_knuckle", "right_inner_knuckle",
-    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
-    "gripper_tcp"
-  };
+  attached_object.touch_links = gripperTouchLinks();
 
   planning_scene_.applyAttachedCollisionObject(attached_object);
 
@@ -1369,6 +1381,204 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
   return true;
 }
 
+bool WordleBotController::executePickAndPlaceMoveGroup(
+  const PickPlaceEntry & entry,
+  bool include_return_working)
+{
+  auto pick_pose = entry.pick_pose;
+  auto place_pose = entry.place_pose;
+  normalizePoseOrientation(pick_pose, "executePickAndPlaceMoveGroup pick");
+  normalizePoseOrientation(place_pose, "executePickAndPlaceMoveGroup place");
+
+  const double pre_pick_distance =
+    getDoubleParam(node_, "pick_place.mgi_pre_pick_distance",
+      getDoubleParam(node_, "pick_place.approach_max_distance", 0.15));
+  const double lift_distance =
+    getDoubleParam(node_, "pick_place.mgi_lift_distance",
+      getDoubleParam(node_, "pick_place.lift_min_distance", 0.05));
+  const double pre_place_distance =
+    getDoubleParam(node_, "pick_place.mgi_pre_place_distance",
+      getDoubleParam(node_, "pick_place.lift_min_distance", 0.05));
+  const double retreat_distance =
+    getDoubleParam(node_, "pick_place.mgi_retreat_distance",
+      getDoubleParam(node_, "pick_place.retreat_min_distance", 0.03));
+  const double cartesian_min_fraction =
+    getDoubleParam(node_, "pick_place.mgi_cartesian_min_fraction", kCartesianMinFraction);
+
+  const auto pre_pick_pose = offsetWorldZ(pick_pose, pre_pick_distance);
+  const auto lifted_pick_pose = offsetWorldZ(pick_pose, lift_distance);
+  const auto pre_place_pose = offsetWorldZ(place_pose, pre_place_distance);
+  const auto retreat_pose = offsetWorldZ(place_pose, retreat_distance);
+
+  auto stop_or_fail = [this, &entry](const std::string & phase) {
+    if (stop_requested_.load()) {
+      RCLCPP_INFO(LOGGER,
+        "executePickAndPlaceMoveGroup [%s]: stop requested during '%s'.",
+        entry.object_id.c_str(), phase.c_str());
+      return true;
+    }
+    return false;
+  };
+
+  auto run_phase = [this, &entry, &stop_or_fail](const std::string & phase, auto && fn) {
+    if (stop_or_fail(phase)) {
+      return false;
+    }
+    RCLCPP_INFO(LOGGER, "executePickAndPlaceMoveGroup [%s]: %s.",
+      entry.object_id.c_str(), phase.c_str());
+    if (!fn()) {
+      RCLCPP_ERROR(LOGGER, "executePickAndPlaceMoveGroup [%s]: phase failed: %s.",
+        entry.object_id.c_str(), phase.c_str());
+      return false;
+    }
+    return !stop_or_fail(phase);
+  };
+
+  RCLCPP_INFO(LOGGER,
+    "executePickAndPlaceMoveGroup [%s]: starting exact-pose MGI pick/place. "
+    "pick=(%.3f, %.3f, %.3f yaw=%.3f) place=(%.3f, %.3f, %.3f yaw=%.3f).",
+    entry.object_id.c_str(),
+    pick_pose.position.x, pick_pose.position.y, pick_pose.position.z, yawFromPose(pick_pose),
+    place_pose.position.x, place_pose.position.y, place_pose.position.z, yawFromPose(place_pose));
+
+  if (!run_phase("open gripper", [this]() {
+        return openGripper();
+      })) {
+    return false;
+  }
+
+  if (!run_phase("move to pre-pick", [this, &pre_pick_pose]() {
+        return moveToGoal(pre_pick_pose);
+      })) {
+    return false;
+  }
+
+  // The target object itself would otherwise block the final exact approach.
+  if (!run_phase("remove target object before approach", [this, &entry]() {
+        planning_scene_.removeCollisionObjects({entry.object_id});
+        rclcpp::sleep_for(std::chrono::milliseconds(300));
+        return true;
+      })) {
+    return false;
+  }
+
+  if (!run_phase("Cartesian approach to exact pick pose", [this, &pick_pose, cartesian_min_fraction]() {
+        return moveCartesianToWaypointWithScaling(
+          pick_pose, vel_profiles_.precise_vel, vel_profiles_.precise_acc,
+          cartesian_min_fraction, "pick approach");
+      })) {
+    return false;
+  }
+
+  if (!run_phase("close gripper", [this]() {
+        return closeGripper();
+      })) {
+    return false;
+  }
+
+  if (!run_phase("attach object", [this, &entry]() {
+        moveit_msgs::msg::AttachedCollisionObject attached;
+        attached.link_name = "gripper_tcp";
+        attached.object.id = entry.object_id;
+        attached.object.header.frame_id = "gripper_tcp";
+        attached.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+        if (!entry.collision_object.primitives.empty()) {
+          attached.object.primitives.push_back(entry.collision_object.primitives.front());
+        } else {
+          shape_msgs::msg::SolidPrimitive box;
+          box.type = shape_msgs::msg::SolidPrimitive::BOX;
+          box.dimensions = {0.05, 0.05, 0.05};
+          attached.object.primitives.push_back(box);
+        }
+
+        geometry_msgs::msg::Pose attached_pose;
+        attached_pose.orientation.w = 1.0;
+        attached.object.primitive_poses.push_back(attached_pose);
+        attached.touch_links = gripperTouchLinks();
+
+        planning_scene_.applyAttachedCollisionObject(attached);
+        rclcpp::sleep_for(std::chrono::milliseconds(300));
+        return true;
+      })) {
+    return false;
+  }
+
+  if (!run_phase("Cartesian lift", [this, &lifted_pick_pose, cartesian_min_fraction]() {
+        return moveCartesianToWaypointWithScaling(
+          lifted_pick_pose, vel_profiles_.precise_vel, vel_profiles_.precise_acc,
+          cartesian_min_fraction, "pick lift");
+      })) {
+    return false;
+  }
+
+  if (!run_phase("move to pre-place", [this, &pre_place_pose]() {
+        return moveToGoal(pre_place_pose);
+      })) {
+    return false;
+  }
+
+  if (!run_phase("Cartesian descent to exact place pose", [this, &place_pose, cartesian_min_fraction]() {
+        return moveCartesianToWaypointWithScaling(
+          place_pose, vel_profiles_.precise_vel, vel_profiles_.precise_acc,
+          cartesian_min_fraction, "place descent");
+      })) {
+    return false;
+  }
+
+  if (!run_phase("open gripper", [this]() {
+        return openGripper();
+      })) {
+    return false;
+  }
+
+  if (!run_phase("detach object and update scene", [this, &entry, &place_pose]() {
+        moveit_msgs::msg::AttachedCollisionObject detach;
+        detach.link_name = "gripper_tcp";
+        detach.object.id = entry.object_id;
+        detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
+        planning_scene_.applyAttachedCollisionObject(detach);
+        rclcpp::sleep_for(std::chrono::milliseconds(200));
+
+        auto placed_object = entry.collision_object;
+        placed_object.header.frame_id =
+          placed_object.header.frame_id.empty() ? move_group_.getPlanningFrame() : placed_object.header.frame_id;
+        placed_object.header.stamp = node_->get_clock()->now();
+        placed_object.operation = moveit_msgs::msg::CollisionObject::ADD;
+        if (placed_object.primitive_poses.empty()) {
+          placed_object.primitive_poses.push_back(place_pose);
+        } else {
+          placed_object.primitive_poses.front() = place_pose;
+        }
+        planning_scene_.applyCollisionObject(placed_object);
+        rclcpp::sleep_for(std::chrono::milliseconds(300));
+        return true;
+      })) {
+    return false;
+  }
+
+  if (!run_phase("Cartesian retreat", [this, &retreat_pose, cartesian_min_fraction]() {
+        return moveCartesianToWaypointWithScaling(
+          retreat_pose, vel_profiles_.precise_vel, vel_profiles_.precise_acc,
+          cartesian_min_fraction, "place retreat");
+      })) {
+    return false;
+  }
+
+  if (include_return_working) {
+    if (!run_phase("return to working pose", [this]() {
+          return returnToWorkingPose();
+        })) {
+      return false;
+    }
+  }
+
+  RCLCPP_INFO(LOGGER,
+    "executePickAndPlaceMoveGroup [%s]: pick-and-place succeeded.",
+    entry.object_id.c_str());
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Goal Navigation
 // Plan and execute free-space goal-pose moves using the OMPL sampling planner.
@@ -1940,8 +2150,26 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
 bool WordleBotController::moveCartesianToWaypoint(
   const geometry_msgs::msg::Pose & target_pose)
 {
-  move_group_.setMaxVelocityScalingFactor(vel_profiles_.scan_vel);
-  move_group_.setMaxAccelerationScalingFactor(vel_profiles_.scan_acc);
+  return moveCartesianToWaypointWithScaling(
+    target_pose, vel_profiles_.scan_vel, vel_profiles_.scan_acc,
+    kCartesianMinFraction, "moveCartesianToWaypoint");
+}
+
+bool WordleBotController::moveCartesianToWaypointWithScaling(
+  const geometry_msgs::msg::Pose & target_pose,
+  double velocity_scaling,
+  double acceleration_scaling,
+  double min_fraction,
+  const std::string & context)
+{
+  if (stop_requested_.load()) {
+    RCLCPP_INFO(LOGGER, "%s: stop requested — aborting before Cartesian plan.",
+      context.c_str());
+    return false;
+  }
+
+  move_group_.setMaxVelocityScalingFactor(velocity_scaling);
+  move_group_.setMaxAccelerationScalingFactor(acceleration_scaling);
 
   static constexpr double kStepSizes[] = {kCartesianEefStep, 0.03, 0.05};
 
@@ -1952,31 +2180,37 @@ bool WordleBotController::moveCartesianToWaypoint(
       {target_pose}, step, kCartesianJumpThreshold, trajectory);
 
     RCLCPP_INFO(LOGGER,
-      "moveCartesianToWaypoint: step=%.3f  fraction=%.3f  target xyz=(%.3f, %.3f, %.3f)",
+      "%s: step=%.3f  fraction=%.3f  target xyz=(%.3f, %.3f, %.3f)",
+      context.c_str(),
       step, fraction,
       target_pose.position.x, target_pose.position.y, target_pose.position.z);
 
-    if (fraction >= kCartesianMinFraction) {
-      if (!alignWrist3TrajectoryToCurrentState(trajectory, "moveCartesianToWaypoint")) {
+    if (fraction >= min_fraction) {
+      if (!alignWrist3TrajectoryToCurrentState(trajectory, context)) {
+        return false;
+      }
+      if (stop_requested_.load()) {
+        RCLCPP_INFO(LOGGER, "%s: stop requested — aborting before execute.",
+          context.c_str());
         return false;
       }
       const auto result = move_group_.execute(trajectory);
       if (result != moveit::core::MoveItErrorCode::SUCCESS) {
         RCLCPP_WARN(LOGGER,
-          "moveCartesianToWaypoint: execution failed (%d) — falling back to moveToGoal.",
-          result.val);
+          "%s: execution failed (%d) — falling back to moveToGoal.",
+          context.c_str(), result.val);
         return moveToGoal(target_pose);
       }
       return true;
     }
 
     RCLCPP_WARN(LOGGER,
-      "moveCartesianToWaypoint: step=%.3f fraction=%.3f < %.3f — trying next step size.",
-      step, fraction, kCartesianMinFraction);
+      "%s: step=%.3f fraction=%.3f < %.3f — trying next step size.",
+      context.c_str(), step, fraction, min_fraction);
   }
 
   RCLCPP_WARN(LOGGER,
-    "moveCartesianToWaypoint: all step sizes failed — falling back to moveToGoal.");
+    "%s: all step sizes failed — falling back to moveToGoal.", context.c_str());
   return moveToGoal(target_pose);
 }
 

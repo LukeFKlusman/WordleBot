@@ -12,6 +12,7 @@ Pick pose:  original raw robot-space XYZW preserved for perception accuracy.
 Place pose: RL output cell centre ÷ 10, z = PLACE_Z, identity orientation.
 """
 
+import math
 import os
 import sys
 
@@ -125,6 +126,19 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
         """Convert RL-space (x, y) to robot-space (x, y)."""
         return x_rl / ROBOT_SCALE, y_rl / ROBOT_SCALE
 
+    @staticmethod
+    def _perception_to_ee_quat(
+        qx: float, qy: float, qz: float, qw: float
+    ) -> tuple[float, float, float, float]:
+        """Map a pure-Z perception quaternion to an EE-pointing-down quaternion.
+
+        Perception supplies yaw-only: (0, 0, sin(θ/2), cos(θ/2)).
+        EE must always point down (roll=π, pitch=0) with the same yaw θ.
+        Resulting quaternion: (cos(θ/2), sin(θ/2), 0, 0).
+        """
+        yaw = 2.0 * math.atan2(qz, qw)
+        return math.cos(yaw / 2.0), math.sin(yaw / 2.0), 0.0, 0.0
+
     # ------------------------------------------------------------------
     # Sequence enrichment
     # ------------------------------------------------------------------
@@ -161,16 +175,21 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
             dst_x_rl, dst_y_rl = ALL_POSITIONS[dst_id]
             place_x, place_y = self._rl_to_robot(dst_x_rl, dst_y_rl)
 
+            pick_eq = self._perception_to_ee_quat(
+                item.get('qx', 0.0), item.get('qy', 0.0),
+                item.get('qz', 0.0), item.get('qw', 1.0),
+            )
+
             enriched.append({
                 'step':           step['step'],
                 'description':    step['description'],
                 'pick_x':         item['x'],
                 'pick_y':         item['y'],
                 'pick_z':         item['z'],
-                'pick_qx':        item.get('qx', 0.0),
-                'pick_qy':        item.get('qy', 0.0),
-                'pick_qz':        item.get('qz', 0.0),
-                'pick_qw':        item.get('qw', 1.0),
+                'pick_qx':        pick_eq[0],
+                'pick_qy':        pick_eq[1],
+                'pick_qz':        pick_eq[2],
+                'pick_qw':        pick_eq[3],
                 'place_x':        place_x,
                 'place_y':        place_y,
                 'place_z':        PLACE_Z,
