@@ -689,6 +689,10 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     getDoubleParam(node_, "pick_place.grasp_min_solution_distance", 0.10);
   const double place_min_solution_distance =
     getDoubleParam(node_, "pick_place.place_min_solution_distance", 0.10);
+  const double gripper_open_op =
+    getDoubleParam(node_, "pick_place.gripper_open_operational_width", 0.075);
+  const double gripper_closed_op =
+    getDoubleParam(node_, "pick_place.gripper_closed_operational_width", 0.0495);
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
   cartesian_planner->setMaxVelocityScalingFactor(vel_profiles_.precise_vel);
@@ -741,10 +745,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
   // ── Stage 2: open gripper ─────────────────────────────────────────────────
   {
-    RCLCPP_DEBUG(LOGGER, "\ncreateTask: adding stage 2 — open hand (goal='open').");
+    RCLCPP_DEBUG(LOGGER, "\ncreateTask: adding stage 2 — open hand (operational width=%.4f m).",
+      gripper_open_op);
     auto stage_open_hand = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
     stage_open_hand->setGroup(hand_group);
-    stage_open_hand->setGoal("open");
+    stage_open_hand->setGoal(std::map<std::string, double>{{"finger_width", gripper_open_op}});
     task.add(std::move(stage_open_hand));
   }
 
@@ -851,10 +856,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
     // 4d. Close gripper
     {
-      RCLCPP_DEBUG(LOGGER, "createTask: 4d — MoveTo 'close hand' (goal='close').");
+      RCLCPP_DEBUG(LOGGER, "createTask: 4d — MoveTo 'close hand' (operational width=%.4f m).",
+        gripper_closed_op);
       auto stage = std::make_unique<mtc::stages::MoveTo>("close hand", interpolation_planner);
       stage->setGroup(hand_group);
-      stage->setGoal("closed");
+      stage->setGoal(std::map<std::string, double>{{"finger_width", gripper_closed_op}});
       grasp->insert(std::move(stage));
     }
 
@@ -947,10 +953,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
     // 6b. Open gripper to release the object
     {
-      RCLCPP_DEBUG(LOGGER, "createTask: 6b — MoveTo 'open hand' (goal='open').");
+      RCLCPP_DEBUG(LOGGER, "createTask: 6b — MoveTo 'open hand' (operational width=%.4f m).",
+        gripper_open_op);
       auto stage = std::make_unique<mtc::stages::MoveTo>("open hand", interpolation_planner);
       stage->setGroup(hand_group);
-      stage->setGoal("open");
+      stage->setGoal(std::map<std::string, double>{{"finger_width", gripper_open_op}});
       place->insert(std::move(stage));
     }
 
@@ -1475,7 +1482,7 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
     place_pose.position.x, place_pose.position.y, place_pose.position.z, yawFromPose(place_pose));
 
   if (!run_phase("open gripper", [this]() {
-        return openGripper();
+        return openGripperOperational();
       })) {
     return false;
   }
@@ -1504,7 +1511,7 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
   }
 
   if (!run_phase("close gripper", [this]() {
-        return closeGripper();
+        return closeGripperOperational();
       })) {
     return false;
   }
@@ -1560,7 +1567,7 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
   }
 
   if (!run_phase("open gripper", [this]() {
-        return openGripper();
+        return openGripperOperational();
       })) {
     return false;
   }
@@ -2500,9 +2507,11 @@ bool WordleBotController::runScanAndSweep(
 // Simple one-shot MTC tasks for moving the arm to known named states.
 // These are available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
-// returnToHome  — move the arm to the SRDF "home" named state
-// openGripper   — move the gripper to the SRDF "open" named state
-// closeGripper  — move the gripper to the SRDF "closed" named state
+// returnToHome            — move the arm to the SRDF "home" named state
+// openGripperFull         — move the gripper to the SRDF "open" named state (full travel)
+// closeGripperFull        — move the gripper to the SRDF "closed" named state (full travel)
+// openGripperOperational  — command operational open width via /onrobot/finger_width_controller/commands
+// closeGripperOperational — command operational closed width via /onrobot/finger_width_controller/commands
 // ---------------------------------------------------------------------------
 
 bool WordleBotController::returnToHome()
@@ -2593,9 +2602,9 @@ bool WordleBotController::returnToWorkingPose()
   return true;
 }
 
-bool WordleBotController::openGripper()
+bool WordleBotController::openGripperFull()
 {
-  RCLCPP_INFO(LOGGER, "openGripper: building MTC task.");
+  RCLCPP_INFO(LOGGER, "openGripperFull: building MTC task.");
 
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
@@ -2613,14 +2622,14 @@ bool WordleBotController::openGripper()
   try {
     task.init();
   } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "openGripper: task init failed: " << e);
+    RCLCPP_ERROR_STREAM(LOGGER, "openGripperFull: task init failed: " << e);
     return false;
   }
 
   const int mtc_solution_target_count =
     std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
   if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "openGripper: planning failed — no solutions found.");
+    RCLCPP_ERROR(LOGGER, "openGripperFull: planning failed — no solutions found.");
     return false;
   }
 
@@ -2629,17 +2638,17 @@ bool WordleBotController::openGripper()
 
   auto result = task.execute(*task.solutions().front());
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "openGripper: execution failed (error code %d).", result.val);
+    RCLCPP_ERROR(LOGGER, "openGripperFull: execution failed (error code %d).", result.val);
     return false;
   }
 
-  RCLCPP_INFO(LOGGER, "openGripper: succeeded.");
+  RCLCPP_INFO(LOGGER, "openGripperFull: succeeded.");
   return true;
 }
 
-bool WordleBotController::closeGripper()
+bool WordleBotController::closeGripperFull()
 {
-  RCLCPP_INFO(LOGGER, "closeGripper: building MTC task.");
+  RCLCPP_INFO(LOGGER, "closeGripperFull: building MTC task.");
 
   auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
 
@@ -2657,14 +2666,14 @@ bool WordleBotController::closeGripper()
   try {
     task.init();
   } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "closeGripper: task init failed: " << e);
+    RCLCPP_ERROR_STREAM(LOGGER, "closeGripperFull: task init failed: " << e);
     return false;
   }
 
   const int mtc_solution_target_count =
     std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
   if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "closeGripper: planning failed — no solutions found.");
+    RCLCPP_ERROR(LOGGER, "closeGripperFull: planning failed — no solutions found.");
     return false;
   }
 
@@ -2673,11 +2682,103 @@ bool WordleBotController::closeGripper()
 
   auto result = task.execute(*task.solutions().front());
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
-    RCLCPP_ERROR(LOGGER, "closeGripper: execution failed (error code %d).", result.val);
+    RCLCPP_ERROR(LOGGER, "closeGripperFull: execution failed (error code %d).", result.val);
     return false;
   }
 
-  RCLCPP_INFO(LOGGER, "closeGripper: succeeded.");
+  RCLCPP_INFO(LOGGER, "closeGripperFull: succeeded.");
+  return true;
+}
+
+bool WordleBotController::openGripperOperational()
+{
+  const double width =
+    getDoubleParam(node_, "pick_place.gripper_open_operational_width", 0.075);
+  RCLCPP_INFO(LOGGER, "openGripperOperational: building MTC task (width=%.4f m).", width);
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("open gripper operational");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("open hand operational", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal(std::map<std::string, double>{{"finger_width", width}});
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "openGripperOperational: task init failed: " << e);
+    return false;
+  }
+
+  const int mtc_solution_target_count =
+    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
+  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "openGripperOperational: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "openGripperOperational: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "openGripperOperational: succeeded.");
+  return true;
+}
+
+bool WordleBotController::closeGripperOperational()
+{
+  const double width =
+    getDoubleParam(node_, "pick_place.gripper_closed_operational_width", 0.0495);
+  RCLCPP_INFO(LOGGER, "closeGripperOperational: building MTC task (width=%.4f m).", width);
+
+  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
+
+  mtc::Task task;
+  task.stages()->setName("close gripper operational");
+  task.loadRobotModel(node_);
+
+  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+
+  auto stage = std::make_unique<mtc::stages::MoveTo>("close hand operational", interpolation_planner);
+  stage->setGroup("ur_onrobot_gripper");
+  stage->setGoal(std::map<std::string, double>{{"finger_width", width}});
+  task.add(std::move(stage));
+
+  try {
+    task.init();
+  } catch (const mtc::InitStageException & e) {
+    RCLCPP_ERROR_STREAM(LOGGER, "closeGripperOperational: task init failed: " << e);
+    return false;
+  }
+
+  const int mtc_solution_target_count =
+    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
+  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
+    RCLCPP_ERROR(LOGGER, "closeGripperOperational: planning failed — no solutions found.");
+    return false;
+  }
+
+  task.introspection().publishSolution(*task.solutions().front());
+  rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+  auto result = task.execute(*task.solutions().front());
+  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "closeGripperOperational: execution failed (error code %d).", result.val);
+    return false;
+  }
+
+  RCLCPP_INFO(LOGGER, "closeGripperOperational: succeeded.");
   return true;
 }
 
@@ -2779,8 +2880,8 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
   }
 
   RCLCPP_INFO(LOGGER, "recoverObject: opening gripper.");
-  if (!openGripper()) {
-    RCLCPP_ERROR(LOGGER, "recoverObject: openGripper failed — continuing.");
+  if (!openGripperFull()) {
+    RCLCPP_ERROR(LOGGER, "recoverObject: openGripperFull failed — continuing.");
     ok = false;
   }
 

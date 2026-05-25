@@ -486,8 +486,8 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
 // Standalone arm motions available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
 // returnHomeCallback   — return the arm to its SRDF "home" named state
-// openGripperCallback  — open the gripper to the SRDF "open" named state
-// closeGripperCallback — close the gripper to the SRDF "closed" named state
+// openGripperCallback  — fully open the gripper to the SRDF "open" named state
+// closeGripperCallback — fully close the gripper to the SRDF "closed" named state
 // scanAndSweepCallback — execute the four-pose camera scan sweep sequence
 // ---------------------------------------------------------------------------
 
@@ -515,8 +515,8 @@ void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::Shared
       return;
     }
   }
-  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
-  controller_->openGripper();
+  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper (full).");
+  controller_->openGripperFull();
 }
 
 void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -529,8 +529,8 @@ void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::Share
       return;
     }
   }
-  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
-  controller_->closeGripper();
+  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper (full).");
+  controller_->closeGripperFull();
 }
 
 void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg)

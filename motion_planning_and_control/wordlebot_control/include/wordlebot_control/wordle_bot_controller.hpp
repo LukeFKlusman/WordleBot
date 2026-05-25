@@ -172,11 +172,19 @@ public:
   // Move the arm to the working pose defined in config/wordle_bot_controller.yaml.
   bool returnToWorkingPose();
 
-  // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
-  bool openGripper();
+  // Open the gripper to the SRDF "open" named state (hardware limit, full travel).
+  bool openGripperFull();
 
-  // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
-  bool closeGripper();
+  // Close the gripper to the SRDF "closed" named state (hardware limit, full travel).
+  bool closeGripperFull();
+
+  // Open the gripper to the operational pick/place width (pick_place.gripper_open_operational_width).
+  // Publishes directly to /onrobot/finger_width_controller/commands.
+  bool openGripperOperational();
+
+  // Close the gripper to the operational pick/place width (pick_place.gripper_closed_operational_width).
+  // Publishes directly to /onrobot/finger_width_controller/commands.
+  bool closeGripperOperational();
 
   // Returns true if the gripper joint positions are closer to the "closed" SRDF named state
   // than to the "open" state. Returns false on any state-monitor failure (safe default = open).
