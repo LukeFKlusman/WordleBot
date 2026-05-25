@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <thread>
+#include <unordered_set>
 #include <moveit/planning_scene/planning_scene.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -76,7 +77,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   // - /wordle_bot/abort_mission (std_msgs/Bool): Abort the current mission (not yet implemented).
   // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object.
   // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger pick-and-place mode.
-  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all letter collision objects and reset queue.
+  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all board collision objects and reset queue.
+  // - /wordle_bot/clear_board_objects (std_msgs/Bool): Alias for clearing letters and distractors.
   // - /wordle_bot/open_gripper (std_msgs/Bool): Open the gripper (IDLE only).
   // - /wordle_bot/close_gripper (std_msgs/Bool): Close the gripper (IDLE only).
   // - /wordle_bot/return_home (std_msgs/Bool): Return arm to home position (IDLE only).
@@ -123,6 +125,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 
   clear_letter_objects_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     "/wordle_bot/clear_letter_objects", 10,
+    std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
+
+  clear_board_objects_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/clear_board_objects", 10,
     std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
 
   open_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
@@ -225,6 +231,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<double>("pick_place.retreat_max_distance", 0.15);
   if (!node_->has_parameter("pick_place.grasp_z_offset"))
     node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
+  if (!node_->has_parameter("pick_place.mgi_place_open_recovery_yaw_delta"))
+    node_->declare_parameter<double>("pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 
   scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
 
@@ -377,8 +385,8 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
 //                              to the controller's planning scene interface
 // letterObjectCallback       — receive a pick/place task, register the letter
 //                              collision object, and queue the task
-// clearLetterObjectsCallback — remove all letter collision objects from the
-//                              planning scene and reset the task queue
+// clearLetterObjectsCallback — remove all tracked board collision objects from
+//                              the planning scene and reset the task queue
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
@@ -386,6 +394,21 @@ void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::Colli
   RCLCPP_INFO(LOGGER, "collisionObjectCallback: received object '%s' (operation=%d).",
     msg->id.c_str(), static_cast<int>(msg->operation));
   controller_->addCollisionObject(*msg);
+
+  if (msg->id.empty()) {
+    RCLCPP_WARN(LOGGER,
+      "collisionObjectCallback: received collision object with empty id; not tracking it.");
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (msg->operation == moveit_msgs::msg::CollisionObject::REMOVE) {
+      tracked_scene_objects_.erase(msg->id);
+    } else {
+      tracked_scene_objects_[msg->id] = *msg;
+    }
+  }
 }
 
 void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg)
@@ -466,18 +489,26 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (mission_running_) {
       RCLCPP_WARN(LOGGER,
-        "clearLetterObjectsCallback: mission is running — cannot clear letter objects now.");
+        "clearLetterObjectsCallback: mission is running — cannot clear board objects now.");
       return;
     }
     ids_to_remove = tracked_letter_ids_;
+    std::unordered_set<std::string> ids_seen(ids_to_remove.begin(), ids_to_remove.end());
+    for (const auto & [id, object] : tracked_scene_objects_) {
+      (void)object;
+      if (ids_seen.insert(id).second) {
+        ids_to_remove.push_back(id);
+      }
+    }
     tracked_letter_ids_.clear();
+    tracked_scene_objects_.clear();
     pick_place_queue_.clear();
     letter_object_counter_ = 0;
   }
 
   controller_->clearLetterObjects(ids_to_remove);
   RCLCPP_INFO(LOGGER,
-    "clearLetterObjectsCallback: cleared %zu letter object(s) and reset queue.",
+    "clearLetterObjectsCallback: cleared %zu tracked board object(s) and reset queue.",
     ids_to_remove.size());
 }
 
@@ -486,8 +517,8 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
 // Standalone arm motions available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
 // returnHomeCallback   — return the arm to its SRDF "home" named state
-// openGripperCallback  — open the gripper to the SRDF "open" named state
-// closeGripperCallback — close the gripper to the SRDF "closed" named state
+// openGripperCallback  — fully open the gripper to the SRDF "open" named state
+// closeGripperCallback — fully close the gripper to the SRDF "closed" named state
 // scanAndSweepCallback — execute the four-pose camera scan sweep sequence
 // ---------------------------------------------------------------------------
 
@@ -515,8 +546,8 @@ void WordleBotControlNode::openGripperCallback(const std_msgs::msg::Bool::Shared
       return;
     }
   }
-  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper.");
-  controller_->openGripper();
+  RCLCPP_INFO(LOGGER, "openGripperCallback: opening gripper (full).");
+  controller_->openGripperFull();
 }
 
 void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -529,8 +560,8 @@ void WordleBotControlNode::closeGripperCallback(const std_msgs::msg::Bool::Share
       return;
     }
   }
-  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper.");
-  controller_->closeGripper();
+  RCLCPP_INFO(LOGGER, "closeGripperCallback: closing gripper (full).");
+  controller_->closeGripperFull();
 }
 
 void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -587,6 +618,7 @@ void WordleBotControlNode::missionLoop()
     bool do_pick_and_place = false;
     std::vector<geometry_msgs::msg::Pose> current_mission;
     std::vector<WordleBotController::PickPlaceEntry> current_tasks;
+    std::vector<moveit_msgs::msg::CollisionObject> current_scene_objects;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
       cv_.wait(lock, [this]() {
@@ -599,6 +631,11 @@ void WordleBotControlNode::missionLoop()
       if (do_pick_and_place) {
         current_tasks = std::move(pick_place_queue_);
         pick_place_queue_.clear();
+        current_scene_objects.reserve(tracked_scene_objects_.size());
+        for (const auto & [id, object] : tracked_scene_objects_) {
+          (void)id;
+          current_scene_objects.push_back(object);
+        }
       } else {
         current_mission = std::move(goal_queue_);
         goal_queue_.clear();
@@ -630,10 +667,28 @@ void WordleBotControlNode::missionLoop()
       // All objects must be present in the live scene so that CurrentState (task 1)
       // and the chained FixedState scenes (tasks 2..N) all see the full workspace.
       RCLCPP_INFO(LOGGER,
-        "Mission: adding all %zu collision objects to scene before planning.",
+        "Mission: adding %zu externally supplied collision object(s) to scene before planning.",
+        current_scene_objects.size());
+      std::unordered_set<std::string> scene_object_ids;
+      scene_object_ids.reserve(current_scene_objects.size() + current_tasks.size());
+      for (const auto & object : current_scene_objects) {
+        controller_->addCollisionObject(object);
+        scene_object_ids.insert(object.id);
+        RCLCPP_INFO(LOGGER, "  Added scene collision object '%s'.", object.id.c_str());
+      }
+
+      RCLCPP_INFO(LOGGER,
+        "Mission: adding all %zu pick target collision object(s) to scene before planning.",
         current_tasks.size());
       for (const auto & entry : current_tasks) {
+        if (scene_object_ids.find(entry.object_id) != scene_object_ids.end()) {
+          RCLCPP_INFO(LOGGER,
+            "  Pick target '%s' already supplied as a scene collision object.",
+            entry.object_id.c_str());
+          continue;
+        }
         controller_->addCollisionObject(entry.collision_object);
+        scene_object_ids.insert(entry.object_id);
         RCLCPP_INFO(LOGGER, "  Added collision object '%s'.", entry.object_id.c_str());
       }
 
@@ -970,8 +1025,17 @@ void WordleBotControlNode::missionLoop()
           goal_queue_.clear();
           resume_pick_tasks_.clear();
           resume_goal_tasks_.clear();
-          controller_->clearLetterObjects(tracked_letter_ids_);
+          std::vector<std::string> ids_to_remove = tracked_letter_ids_;
+          std::unordered_set<std::string> ids_seen(ids_to_remove.begin(), ids_to_remove.end());
+          for (const auto & [id, object] : tracked_scene_objects_) {
+            (void)object;
+            if (ids_seen.insert(id).second) {
+              ids_to_remove.push_back(id);
+            }
+          }
+          controller_->clearLetterObjects(ids_to_remove);
           tracked_letter_ids_.clear();
+          tracked_scene_objects_.clear();
           letter_object_counter_ = 0;
           mission_running_ = false;
           mission_armed_   = false;
@@ -1012,7 +1076,9 @@ void WordleBotControlNode::missionLoop()
           letter_object_counter_ = 0;
           pick_place_queue_ = std::move(resume_pick_tasks_);
           for (const auto & t : pick_place_queue_) {
-            controller_->addCollisionObject(t.collision_object);
+            if (tracked_scene_objects_.find(t.object_id) == tracked_scene_objects_.end()) {
+              controller_->addCollisionObject(t.collision_object);
+            }
             tracked_letter_ids_.push_back(t.object_id);
           }
           mission_armed_ = true;

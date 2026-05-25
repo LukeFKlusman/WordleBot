@@ -52,11 +52,14 @@ wordle_bot_control_node:
       retreat_min_distance: 0.03
       retreat_max_distance: 0.15
       grasp_z_offset: 0.01
-      mgi_pre_pick_distance: 0.075
-      mgi_lift_distance: 0.05
-      mgi_pre_place_distance: 0.05
-      mgi_retreat_distance: 0.03
+      mgi_pre_pick_distance: 0.05
+      mgi_lift_distance: 0.01
+      mgi_pre_place_distance: 0.01
+      mgi_retreat_distance: 0.05
       mgi_cartesian_min_fraction: 0.95
+      mgi_place_open_recovery_yaw_delta: 1.5708
+      gripper_open_operational_width: 0.075    # metres — operational open position for pick/place
+      gripper_closed_operational_width: 0.0495 # metres — operational closed position for pick/place
 
     # Velocity scaling profiles and proximity-based selection thresholds.
     # All values are scaling factors in [0.0, 1.0] applied to each joint's
