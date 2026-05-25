@@ -100,10 +100,25 @@ class HLControlNode(Node, RLTaskOptimiser):
 
     def _board_callback(self, msg: GameboardState) -> None:
         self._board_letters = []
-        for lo in msg.letters:
+        seen_object_ids: set[str] = set()
+        for index, lo in enumerate(msg.letters, start=1):
+            letter = lo.letter.strip().upper()
+            requested_object_id = lo.object_id.strip()
+            object_id = requested_object_id or f'{letter or "block"}_object_{index}'
+            if object_id in seen_object_ids:
+                base_id = object_id
+                suffix = 2
+                while f'{base_id}_{suffix}' in seen_object_ids:
+                    suffix += 1
+                object_id = f'{base_id}_{suffix}'
+                self.get_logger().warn(
+                    f'Duplicate object_id "{base_id}" in GameboardState; '
+                    f'using "{object_id}" for letter "{letter}".')
+            seen_object_ids.add(object_id)
+
             self._board_letters.append({
-                'letter':    lo.letter.strip().upper(),
-                'object_id': lo.object_id,
+                'letter':    letter,
+                'object_id': object_id,
                 'x':         lo.pose.pose.position.x,
                 'y':         lo.pose.pose.position.y,
                 'z':         lo.pose.pose.position.z,

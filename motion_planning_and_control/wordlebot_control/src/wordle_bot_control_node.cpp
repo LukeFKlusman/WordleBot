@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <thread>
+#include <unordered_set>
 #include <moveit/planning_scene/planning_scene.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -386,6 +387,21 @@ void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::Colli
   RCLCPP_INFO(LOGGER, "collisionObjectCallback: received object '%s' (operation=%d).",
     msg->id.c_str(), static_cast<int>(msg->operation));
   controller_->addCollisionObject(*msg);
+
+  if (msg->id.empty()) {
+    RCLCPP_WARN(LOGGER,
+      "collisionObjectCallback: received collision object with empty id; not tracking it.");
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (msg->operation == moveit_msgs::msg::CollisionObject::REMOVE) {
+      tracked_scene_objects_.erase(msg->id);
+    } else {
+      tracked_scene_objects_[msg->id] = *msg;
+    }
+  }
 }
 
 void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg)
@@ -470,7 +486,15 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
       return;
     }
     ids_to_remove = tracked_letter_ids_;
+    std::unordered_set<std::string> ids_seen(ids_to_remove.begin(), ids_to_remove.end());
+    for (const auto & [id, object] : tracked_scene_objects_) {
+      (void)object;
+      if (ids_seen.insert(id).second) {
+        ids_to_remove.push_back(id);
+      }
+    }
     tracked_letter_ids_.clear();
+    tracked_scene_objects_.clear();
     pick_place_queue_.clear();
     letter_object_counter_ = 0;
   }
@@ -587,6 +611,7 @@ void WordleBotControlNode::missionLoop()
     bool do_pick_and_place = false;
     std::vector<geometry_msgs::msg::Pose> current_mission;
     std::vector<WordleBotController::PickPlaceEntry> current_tasks;
+    std::vector<moveit_msgs::msg::CollisionObject> current_scene_objects;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
       cv_.wait(lock, [this]() {
@@ -599,6 +624,11 @@ void WordleBotControlNode::missionLoop()
       if (do_pick_and_place) {
         current_tasks = std::move(pick_place_queue_);
         pick_place_queue_.clear();
+        current_scene_objects.reserve(tracked_scene_objects_.size());
+        for (const auto & [id, object] : tracked_scene_objects_) {
+          (void)id;
+          current_scene_objects.push_back(object);
+        }
       } else {
         current_mission = std::move(goal_queue_);
         goal_queue_.clear();
@@ -630,10 +660,28 @@ void WordleBotControlNode::missionLoop()
       // All objects must be present in the live scene so that CurrentState (task 1)
       // and the chained FixedState scenes (tasks 2..N) all see the full workspace.
       RCLCPP_INFO(LOGGER,
-        "Mission: adding all %zu collision objects to scene before planning.",
+        "Mission: adding %zu externally supplied collision object(s) to scene before planning.",
+        current_scene_objects.size());
+      std::unordered_set<std::string> scene_object_ids;
+      scene_object_ids.reserve(current_scene_objects.size() + current_tasks.size());
+      for (const auto & object : current_scene_objects) {
+        controller_->addCollisionObject(object);
+        scene_object_ids.insert(object.id);
+        RCLCPP_INFO(LOGGER, "  Added scene collision object '%s'.", object.id.c_str());
+      }
+
+      RCLCPP_INFO(LOGGER,
+        "Mission: adding all %zu pick target collision object(s) to scene before planning.",
         current_tasks.size());
       for (const auto & entry : current_tasks) {
+        if (scene_object_ids.find(entry.object_id) != scene_object_ids.end()) {
+          RCLCPP_INFO(LOGGER,
+            "  Pick target '%s' already supplied as a scene collision object.",
+            entry.object_id.c_str());
+          continue;
+        }
         controller_->addCollisionObject(entry.collision_object);
+        scene_object_ids.insert(entry.object_id);
         RCLCPP_INFO(LOGGER, "  Added collision object '%s'.", entry.object_id.c_str());
       }
 
@@ -970,8 +1018,17 @@ void WordleBotControlNode::missionLoop()
           goal_queue_.clear();
           resume_pick_tasks_.clear();
           resume_goal_tasks_.clear();
-          controller_->clearLetterObjects(tracked_letter_ids_);
+          std::vector<std::string> ids_to_remove = tracked_letter_ids_;
+          std::unordered_set<std::string> ids_seen(ids_to_remove.begin(), ids_to_remove.end());
+          for (const auto & [id, object] : tracked_scene_objects_) {
+            (void)object;
+            if (ids_seen.insert(id).second) {
+              ids_to_remove.push_back(id);
+            }
+          }
+          controller_->clearLetterObjects(ids_to_remove);
           tracked_letter_ids_.clear();
+          tracked_scene_objects_.clear();
           letter_object_counter_ = 0;
           mission_running_ = false;
           mission_armed_   = false;
@@ -1012,7 +1069,9 @@ void WordleBotControlNode::missionLoop()
           letter_object_counter_ = 0;
           pick_place_queue_ = std::move(resume_pick_tasks_);
           for (const auto & t : pick_place_queue_) {
-            controller_->addCollisionObject(t.collision_object);
+            if (tracked_scene_objects_.find(t.object_id) == tracked_scene_objects_.end()) {
+              controller_->addCollisionObject(t.collision_object);
+            }
             tracked_letter_ids_.push_back(t.object_id);
           }
           mission_armed_ = true;

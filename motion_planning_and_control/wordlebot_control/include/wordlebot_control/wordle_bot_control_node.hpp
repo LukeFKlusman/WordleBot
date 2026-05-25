@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -84,6 +85,7 @@ private:
   // ---------------------------------------------------------------------------
   std::vector<WordleBotController::PickPlaceEntry> pick_place_queue_;
   std::vector<std::string> tracked_letter_ids_;  // IDs of all letter objects added this session
+  std::unordered_map<std::string, moveit_msgs::msg::CollisionObject> tracked_scene_objects_;
   int letter_object_counter_{0};
 
   // ---------------------------------------------------------------------------
