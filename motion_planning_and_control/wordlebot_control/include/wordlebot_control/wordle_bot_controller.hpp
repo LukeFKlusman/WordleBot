@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
@@ -160,11 +161,24 @@ public:
   // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
   bool returnToHome();
 
+  // Move the arm to the working pose defined in config/wordle_bot_controller.yaml.
+  bool returnToWorkingPose();
+
   // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
   bool openGripper();
 
   // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
   bool closeGripper();
+
+  // Returns true if the gripper joint positions are closer to the "closed" SRDF named state
+  // than to the "open" state. Returns false on any state-monitor failure (safe default = open).
+  bool isGripperClosed();
+
+  // Move to safe recovery position (0.15, 0.15, 0.03), open gripper, return home.
+  // held_object_id: if non-empty, the object is detached from gripper_tcp at the safe position
+  // before the gripper opens. Pass "" when no object is known to be attached.
+  // clearStopFlag() must be called before this.
+  bool recoverObject(const std::string & held_object_id = "");
 
   // ---------------------------------------------------------------------------
   // Motion Control
@@ -188,10 +202,23 @@ public:
   // Return shoulder_lift_joint and wrist_3_joint path constraints used by MTC planning stages.
   static moveit_msgs::msg::Constraints buildPathConstraints();
 
+  // Return joint constraints that clamp wrist_2 and wrist_3 to [-π, π], applied
+  // to all MTC Connect stages and MGI Cartesian planning to prevent drift.
+  static moveit_msgs::msg::Constraints buildJointLimitConstraints();
+
   // Compute the total joint displacement of a plan: Σ|Δq| over all joints and trajectory steps.
   // This is the L1 path length in joint space — used to validate motion efficiency.
   static double computeTotalJointDisplacement(
     const moveit::planning_interface::MoveGroupInterface::Plan & plan);
+
+  // Return the whole-2π offset that places a continuous joint waypoint on the
+  // same revolution as a reference state while preserving the planned motion.
+  static double computeContinuousJointRevolutionOffset(double reference_position,
+                                                       double first_waypoint_position)
+  {
+    constexpr double two_pi = 6.28318530717958647692;
+    return std::round((reference_position - first_waypoint_position) / two_pi) * two_pi;
+  }
 
   // ---------------------------------------------------------------------------
   // Constants
@@ -265,6 +292,18 @@ private:
   // Move the end-effector to target_pose via computeCartesianPath.
   // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
   bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
+
+  // Shift wrist_3 trajectory positions by whole revolutions so the first
+  // commanded point is numerically close to the live continuous-joint state.
+  bool alignWrist3TrajectoryToCurrentState(moveit_msgs::msg::RobotTrajectory & trajectory,
+                                           const std::string & context);
+
+  // Execute an MTC solution after applying the same wrist_3 alignment to each
+  // serialized sub-trajectory in the ExecuteTaskSolution goal.
+  moveit::core::MoveItErrorCode executeAlignedTaskSolution(
+    moveit::task_constructor::Task & task,
+    const moveit::task_constructor::SolutionBase & solution,
+    const std::string & context);
 
   // ---------------------------------------------------------------------------
   // Member variables

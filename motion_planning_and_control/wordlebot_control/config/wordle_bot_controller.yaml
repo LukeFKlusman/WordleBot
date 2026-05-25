@@ -1,0 +1,47 @@
+wordle_bot_control_node:
+  ros__parameters:
+    # Generic MTC solution target for utility MTC tasks. This is a target
+    # solution count, not a strict minimum required to continue.
+    mtc_default_solution_target_count: 15
+
+    # Working pose used after pick-and-place batches and direct return-to-working.
+    # Joint angles are in radians.
+    working_joints:
+      shoulder_pan_joint:   0.5236
+      shoulder_lift_joint: -2.0071
+      elbow_joint:          0.8901
+      wrist_1_joint:       -0.4887
+      wrist_2_joint:       -1.5184
+      wrist_3_joint:       -1.0647
+
+    # Scan-and-sweep poses in world frame.
+    # Pose format: [x, y, z, roll, pitch, yaw] in metres/radians.
+    scan_sweep_dwell_time: 1.5
+    scan_sweep_pose_0: [-0.25, 0.100, 0.1, 3.14159, -0.1745, 3.14159]
+    scan_sweep_pose_1: [-0.25, 0.325, 0.1, 3.14159, -0.1745, 3.14159]
+    scan_sweep_pose_2: [-0.25, 0.325, 0.1, 3.14159, -0.1745, 1.5708 ]
+    scan_sweep_pose_3: [ 0.25, 0.325, 0.1, 3.14159, -0.1745, 1.5708 ]
+    scan_sweep_pose_4: [ 0.25, 0.325, 0.1, 3.14159, -0.1745, 0.0    ]
+    scan_sweep_pose_5: [ 0.25, 0.100, 0.1, 3.14159, -0.1745, 0.0    ]
+
+    # Pick-and-place MTC task tuning. Solution target count is passed to
+    # task.plan(N); the task still proceeds if at least one valid solution exists.
+    pick_place:
+      task_solution_target_count: 15
+      grasp_max_ik_solutions: 32
+      place_max_ik_solutions: 32
+      grasp_min_solution_distance: 1.0
+      place_min_solution_distance: 1.0
+      cartesian_velocity_scaling: 0.5
+      cartesian_acceleration_scaling: 0.5
+      cartesian_step_size: 0.001
+      retreat_min_fraction: 0.0
+      move_to_pick_timeout: 0.20
+      move_to_place_timeout: 0.20
+      approach_min_distance: 0.05
+      approach_max_distance: 0.15
+      lift_min_distance: 0.05
+      lift_max_distance: 0.15
+      retreat_min_distance: 0.03
+      retreat_max_distance: 0.15
+      grasp_z_offset: 0.01

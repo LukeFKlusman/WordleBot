@@ -77,8 +77,8 @@ DETECTION_MODE = "CARD"   # switch to "BLOCK" when on the robot
 # ── Detection tuning ──────────────────────────────────────
 BLOCK_DEPTH_MIN_M   = 0.10   # EE-mounted camera — blocks are 10-30cm away
 BLOCK_DEPTH_MAX_M   = 0.30   # tight gate — only objects at block distance
-MIN_BLOCK_AREA      = 5000   # minimum contour area (pixels²)
-MAX_BLOCK_AREA      = 200000 # maximum contour area (pixels²)
+MIN_BLOCK_AREA      = 16000  # minimum contour area (pixels²)
+MAX_BLOCK_AREA      = 240000 # maximum contour area (pixels²)
 MAX_BLOCKS          = 5      # max blocks expected in workspace
 CNN_CONF_THRESHOLD  = 32.0   # min confidence % to publish a letter
 FRAMES_TO_AVERAGE   = 15     # temporal smoothing frames
@@ -93,11 +93,13 @@ import numpy as np
 import os
 import collections
 import json
+import statistics
 if ENABLE_HUMAN_DETECTION:
     import mediapipe as mp
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
+import math
 
 # Model path — absolute, works from any working directory
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../outputs/letter_cnn.pt")
@@ -107,10 +109,10 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../output
 # rs2_intrinsics after running: ros2 topic echo /camera/camera/color/camera_info
 # fx, fy = focal lengths in pixels
 # cx, cy = principal point (optical centre) in pixels
-CAM_FX = 615.0
-CAM_FY = 615.0
-CAM_CX = 320.0
-CAM_CY = 240.0
+CAM_FX = 914.617
+CAM_FY = 912.751
+CAM_CX = 641.396
+CAM_CY = 359.803
 # TF frame broadcast by the RealSense ROS2 driver for the colour camera
 CAMERA_FRAME = "camera_color_optical_frame"
 
@@ -166,6 +168,96 @@ def estimate_theta(contour):
     if angle < -45:
         angle += 90
     return round(float(angle), 2)
+
+def detect_dot(frame, x, y, w, h):
+    """
+    Find the most circular small blob on the card face.
+    Searches full inner card — returns raw pixel position or None.
+    Smoothing is applied externally on the pixel position itself.
+    """
+    margin_x = int(w * CARD_MARGIN)
+    margin_y = int(h * CARD_MARGIN)
+    roi = frame[y+margin_y : y+h-margin_y,
+                x+margin_x : x+w-margin_x]
+    if roi.size == 0:
+        return None
+
+    gray      = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY_INV)
+    kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    cleaned   = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    DOT_MIN_AREA = 8
+    DOT_MAX_AREA = 300
+    best_circ = 0
+    best_M    = None
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if not (DOT_MIN_AREA <= area <= DOT_MAX_AREA):
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * math.pi * area / (perimeter ** 2)
+        if circularity > best_circ:
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+            best_circ = circularity
+            best_M    = M
+
+    if best_M is None or best_circ < 0.45:
+        return None
+
+    dot_px = int(best_M["m10"] / best_M["m00"]) + x + margin_x
+    dot_py = int(best_M["m01"] / best_M["m00"]) + y + margin_y
+    return (dot_px, dot_py)
+
+
+def estimate_theta_from_dot(frame, x, y, w, h, dot_pos_buffer=None):
+    """
+    Calculate true block rotation from dot position.
+    Smooths the dot pixel position over N frames before calculating theta.
+    This stops theta jumping when the detector flickers between the dot
+    and a letter feature — the smoothed position barely moves.
+    Dot in top-left = 0 degrees. Falls back to minAreaRect if dot not found.
+    """
+    cx_px = x + w // 2
+    cy_px = y + h // 2
+
+    raw_dot = detect_dot(frame, x, y, w, h)
+
+    if raw_dot is not None and dot_pos_buffer is not None:
+        dot_pos_buffer.append(raw_dot)
+
+    # Use smoothed dot position if buffer has enough frames
+    if dot_pos_buffer and len(dot_pos_buffer) >= 3:
+        # Median of x and y separately — robust to outlier frames
+        xs = [p[0] for p in dot_pos_buffer]
+        ys = [p[1] for p in dot_pos_buffer]
+        dot_px = int(statistics.median(xs))
+        dot_py = int(statistics.median(ys))
+        dot_found = True
+    elif raw_dot is not None:
+        dot_px, dot_py = raw_dot
+        dot_found = True
+    else:
+        dot_found = False
+
+    if dot_found:
+        dx = dot_px - cx_px
+        dy = dot_py - cy_px
+        # dot at top-left of card = ~225 deg from centre in image space
+        # offset so that position reads as 0 deg
+        raw_angle = math.degrees(math.atan2(dy, dx))
+        theta = (raw_angle - 225.0 + 360.0) % 360.0
+        if theta > 180:
+            theta -= 360
+        return round(theta, 2), True, (dot_px, dot_py)
+
+    return estimate_theta(None), False, None
 
 # Must match LABEL_MAP in train_letter_cnn.py exactly
 LABEL_MAP = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -370,6 +462,8 @@ class Perception:
         self.at_position     = False
         self.last_detections = []
         self.human_detected  = False
+        self.theta_buffers   = {}    # x-bucket -> deque of theta values
+        self.dot_pos_buffers = {}    # x-bucket -> deque of (dot_px, dot_py) positions
 
         if ENABLE_HUMAN_DETECTION:
             self.mp_holistic = mp.solutions.holistic
@@ -436,29 +530,50 @@ class Perception:
                 depth_m = depth_info.get((x,y,w,h), 0.0)
                 x_m, y_m, z_m = pixel_to_camera_frame(cx_px, cy_px, depth_m)
 
-                # Rotation estimate from contour minAreaRect
-                theta = estimate_theta(cnt)
+                # Get or create dot position buffer for this block x-bucket
+                bucket = x // 64
+                if bucket not in self.dot_pos_buffers:
+                    self.dot_pos_buffers[bucket] = collections.deque(maxlen=FRAMES_TO_AVERAGE)
 
-                detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta))
+                # Rotation from smoothed dot position — passes buffer so position
+                # is smoothed over N frames before theta is calculated
+                theta, dot_found, smoothed_dot = estimate_theta_from_dot(
+                    frame, x, y, w, h, self.dot_pos_buffers[bucket])
+
+                # If dot found and block too rotated, suppress letter
+                # CNN cannot read reliably beyond +-45 degrees
+                if dot_found and abs(theta) > 45:
+                    letter = None
+                    conf = 0.0
+
+                detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot))
             self.last_detections = detections
 
         # ── Draw detection boxes ──────────────────────────
-        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.last_detections:
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.last_detections:
             box_color = (0, 200, 255) if self.at_position else (100, 100, 100)
             depth_str = f" {z_m:.2f}m" if z_m else ""
 
             cv2.rectangle(frame, (x,y), (x+w,y+h), box_color, 2)
 
+            # Draw smoothed dot position — green filled circle
+            if smoothed_dot is not None:
+                cv2.circle(frame, smoothed_dot, 6, (0, 255, 0), -1)
+                cv2.circle(frame, smoothed_dot, 8, (0, 0, 0), 1)
+
             if letter:
-                label = f"{letter} {conf:.0f}%{depth_str} r{theta:.0f}deg"
+                label = f"{letter} {conf:.0f}%{depth_str} r{theta:.0f}deg {'[dot]' if dot_found else '[rect]'}"
                 (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
                 cv2.rectangle(frame, (x, y-th-bl-6), (x+tw+4, y), box_color, -1)
                 cv2.putText(frame, label, (x+2, y-bl-2),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,0,0), 2)
             else:
-                low = f"?{depth_str} ({conf:.0f}%)"
+                low = f"?{depth_str} ({conf:.0f}%) r{theta:.0f}deg {'[dot]' if dot_found else '[rect]'}"
                 cv2.putText(frame, low, (x+4, y+h//2+8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+            
+            
+            
 
         # ── HUD ───────────────────────────────────────────
         status_color = (0,255,100) if self.at_position else (0,100,255)
@@ -512,7 +627,7 @@ class Perception:
         If depth is unavailable for a block, x_m/y_m/z_m will be null.
         """
         blocks = []
-        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.last_detections:
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.last_detections:
             if letter:
                 blocks.append({
                     "letter":    letter,
@@ -528,6 +643,8 @@ class Perception:
         self.at_position = not self.at_position
         self.last_detections = []
         self.cnn.clear_votes()
+        self.theta_buffers.clear()
+        self.dot_pos_buffers.clear()
         print(f"[Trigger] -> {'AT POSITION' if self.at_position else 'MOVING'}")
 
     def close(self):
@@ -543,8 +660,8 @@ def run_sdk():
     import pyrealsense2 as rs
     pipeline  = rs.pipeline()
     config    = rs.config()
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16,  30)
+    config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
+    config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16,  30)
     align      = rs.align(rs.stream.color)
     colorizer  = rs.colorizer()
     perception = Perception()
@@ -757,7 +874,7 @@ def run_ros2():
                         detections = self.perception.last_detections
                         if detections:
                             lines = []
-                            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in detections:
+                            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in detections:
                                 if not letter:
                                     continue
                                 cam_str = f'cam=({x_m:.3f}, {y_m:.3f}, {z_m:.3f})' \
@@ -935,7 +1052,7 @@ def run_ros2():
             now    = self.get_clock().now().to_msg()
             counts = {}   # per-letter counter for unique object IDs
 
-            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta) in self.perception.last_detections:
+            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.perception.last_detections:
                 if not letter:
                     continue
                 if x_m is None:
@@ -957,14 +1074,16 @@ def run_ros2():
                     ps.pose.position.x    = wx
                     ps.pose.position.y    = wy
                     ps.pose.position.z    = wz
-                    # Identity orientation — block is flat on the table.
-                    # Theta from the CNN is published separately in the
-                    # detections JSON and will feed into grasp yaw once
-                    # dot-based disambiguation is implemented.
-                    ps.pose.orientation.w = 1.0
+                    # Yaw from minAreaRect theta — rotation around Z axis.
+                    # Gives Connor gripper yaw to align with block orientation.
+                    theta_rad = math.radians(theta)
+                    ps.pose.orientation.w = math.cos(theta_rad / 2.0)
                     ps.pose.orientation.x = 0.0
                     ps.pose.orientation.y = 0.0
-                    ps.pose.orientation.z = 0.0
+                    ps.pose.orientation.z = math.sin(theta_rad / 2.0)
+
+
+
                 else:
                     # TF not yet available — fall back to camera frame
                     ps.header.frame_id    = CAMERA_FRAME
