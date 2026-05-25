@@ -20,13 +20,28 @@ Finally, run this in a third terminal:
     ros2 launch interaction_execution gui.launch.py
 
 
-    colcon build --packages-select interaction_execution wordleBot_control perception
+    colcon build --packages-select interaction_execution wordleBot_control 
     source install/setup.bash
     ros2 launch interaction_execution gui.launch.py
 
 
-UI SHIT TO DO:
-- FIX THE FCKING MISSION TAB POPPING UP OVER OTHER WINDOWS
-- Add a "(?) Help" menu option, which explains how to use the program 
-- Change the tabs system to instead have a drop-down menu which allows for switching between Sim View, MoveIt view and camera view,
-    camera view should also be able to toggle between "raw footage" and "computer vision" modes
+TO FIX:
+Guess not incremented when told to by gamification
+CONFIRMED must be shown before next guess
+
+
+THe POIEPLINE
+START GUI
+Mode A, give word
+Place words underneath
+Then press confirm button to "Start Scanning"
+Once all letters are found, blocks are moved to location
+Once mission finished, attempt 2 starts, then AI guesses word after feedback is given.
+AI figures out missing letters, we put it on the board. Then rinse and repeat.
+
+
+CONFIRM Button makes movement go go go
+
+
+ADD DRIVERS TO DEPENDENCIES
+ADD IMAGES TO

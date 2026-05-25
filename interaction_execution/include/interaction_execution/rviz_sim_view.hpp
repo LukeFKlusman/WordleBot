@@ -23,11 +23,15 @@ class RvizSimView : public QWidget
   Q_OBJECT
 
 public:
-  explicit RvizSimView(rclcpp::Node::SharedPtr node, QWidget * parent = nullptr);
+  explicit RvizSimView(
+    rclcpp::Node::SharedPtr node,
+    std::shared_ptr<rviz_common::ros_integration::RosNodeAbstraction> rviz_node = nullptr,
+    QWidget * parent = nullptr);
   ~RvizSimView() override;
 
 private:
   void showEvent(QShowEvent * event) override;
+  void hideEvent(QHideEvent * event) override;
   void buildUi();
   void initializeRvizPanel();
   void createDisplays();

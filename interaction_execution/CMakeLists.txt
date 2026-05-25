@@ -25,11 +25,13 @@ add_executable(interaction_execution_node
   include/interaction_execution/main_window.hpp
   include/interaction_execution/camera_view.hpp
   include/interaction_execution/rviz_sim_view.hpp
+  include/interaction_execution/rviz_moveit_view.hpp
   include/interaction_execution/wordle_view.hpp
   src/main.cpp
   src/main_window.cpp
   src/camera_view.cpp
   src/rviz_sim_view.cpp
+  src/rviz_moveit_view.cpp
   src/wordle_view.cpp
   src/rs2_concept.ui
 )

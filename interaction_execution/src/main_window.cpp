@@ -2,6 +2,7 @@
 
 #include "interaction_execution/camera_view.hpp"
 #include "interaction_execution/rviz_sim_view.hpp"
+#include "interaction_execution/rviz_moveit_view.hpp"
 #include "interaction_execution/wordle_view.hpp"
 #include "ui_rs2_concept.h"
 
@@ -44,6 +45,8 @@
 #include <QWidget>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+
+#include <rviz_common/ros_integration/ros_node_abstraction.hpp>
 
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -368,23 +371,21 @@ void MainWindow::setupDrawer()
 
 void MainWindow::setupContentStack()
 {
+  // Create shared RViz node abstraction for both visualization managers
+  rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>(
+    "interaction_execution_rviz_panels");
+
   // Sim View page
   auto * sim_layout = new QVBoxLayout(ui_->pageSimView);
   sim_layout->setContentsMargins(0, 0, 0, 0);
-  rviz_view_ = new RvizSimView(node_, ui_->pageSimView);
+  rviz_view_ = new RvizSimView(node_, rviz_node_, ui_->pageSimView);
   sim_layout->addWidget(rviz_view_);
 
-  // MoveIt View page (placeholder)
+  // MoveIt View page
   auto * moveit_layout = new QVBoxLayout(ui_->pageMoveItView);
-  auto * moveit_label = new QLabel(tr("MoveIt View — connect MoveIt2 to enable"));
-  moveit_label->setAlignment(Qt::AlignCenter);
-  moveit_label->setStyleSheet(
-    "QLabel {"
-    "  color: #6e7681;"
-    "  font-size: 12pt;"
-    "  background-color: #0f151c;"
-    "}");
-  moveit_layout->addWidget(moveit_label);
+  moveit_layout->setContentsMargins(0, 0, 0, 0);
+  rviz_moveit_view_ = new RvizMoveItView(node_, rviz_node_, ui_->pageMoveItView);
+  moveit_layout->addWidget(rviz_moveit_view_);
 
   // Camera View page
   setupCameraPage();

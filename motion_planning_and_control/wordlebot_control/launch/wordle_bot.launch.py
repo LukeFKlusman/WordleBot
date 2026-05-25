@@ -30,7 +30,7 @@ def generate_launch_description():
     # these parameters in the node's namespace.  Without them it falls back to CHOMP
     # and segfaults.  MoveGroupInterface is unaffected (it delegates to move_group node).
     ompl_planning = load_yaml(
-        "ur_onrobot_moveit_config", "config/ompl_planning.yaml"
+        "ur_moveit_config", "config/ompl_planning.yaml"
     )
     # ompl_planning.yaml only has planner_configs; MTC PipelinePlanner("ompl") needs
     # ompl.planning_plugin to exist or it falls back to CHOMP and hangs.
@@ -43,7 +43,7 @@ def generate_launch_description():
         "default_planner_request_adapters/FixStartStatePathConstraints"
     )
     joint_limits = load_yaml(
-        "ur_onrobot_moveit_config", "config/joint_limits.yaml"
+        "ur_moveit_config", "config/joint_limits.yaml"
     )
 
     wordlebot_control = Node(

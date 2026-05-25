@@ -9,6 +9,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include <rviz_common/ros_integration/ros_node_abstraction.hpp>
+
 class QAbstractAnimation;
 class QEvent;
 class QLabel;
@@ -21,6 +23,7 @@ class QScrollArea;
 class QVBoxLayout;
 class CameraView;
 class RvizSimView;
+class RvizMoveItView;
 class WordleView;
 
 namespace Ui
@@ -121,8 +124,10 @@ private:
 
   std::unique_ptr<Ui::MainWindow> ui_;
   rclcpp::Node::SharedPtr node_;
+  std::shared_ptr<rviz_common::ros_integration::RosNodeAbstraction> rviz_node_;
   CameraView * camera_view_{nullptr};
   RvizSimView * rviz_view_{nullptr};
+  RvizMoveItView * rviz_moveit_view_{nullptr};
   WordleView * wordle_view_{nullptr};
   QWidget * diagnostics_window_{nullptr};
 
