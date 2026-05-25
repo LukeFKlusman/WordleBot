@@ -147,7 +147,9 @@ class HLControlNode(Node, RLTaskOptimiser):
             self.get_logger().info(
                 f"  Step {task['step']}: {task['description']} | "
                 f"pick=({task['pick_x']:.3f},{task['pick_y']:.3f},{task['pick_z']:.3f}) "
+                f"pick_q=({task['pick_qx']:.3f},{task['pick_qy']:.3f},{task['pick_qz']:.3f},{task['pick_qw']:.3f}) "
                 f"place=({task['place_x']:.3f},{task['place_y']:.3f},{task['place_z']:.3f}) "
+                f"place_q=(0.000,0.000,0.000,1.000) "
                 f"id='{task['object_id']}'"
             )
 
@@ -203,6 +205,9 @@ class HLControlNode(Node, RLTaskOptimiser):
             msg.place_pose.position.x = task['place_x']
             msg.place_pose.position.y = task['place_y']
             msg.place_pose.position.z = task['place_z']
+            msg.place_pose.orientation.x = 0.0
+            msg.place_pose.orientation.y = 0.0
+            msg.place_pose.orientation.z = 0.0
             msg.place_pose.orientation.w = 1.0
 
             msg.object_id = task['object_id']

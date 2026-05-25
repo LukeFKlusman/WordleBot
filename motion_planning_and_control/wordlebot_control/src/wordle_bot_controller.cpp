@@ -230,11 +230,11 @@ void WordleBotController::setupCollisionScene()
 
   shape_msgs::msg::SolidPrimitive floor_shape;
   floor_shape.type = shape_msgs::msg::SolidPrimitive::BOX;
-  floor_shape.dimensions = {2.0, 2.0, 0.01};
+  floor_shape.dimensions = {0.975, 0.525, 0.01};
 
   geometry_msgs::msg::Pose floor_pose;
   floor_pose.position.x = 0.0;
-  floor_pose.position.y = 0.0;
+  floor_pose.position.y = 0.2275;
   floor_pose.position.z = -0.015;
   floor_pose.orientation.w = 1.0;
 
