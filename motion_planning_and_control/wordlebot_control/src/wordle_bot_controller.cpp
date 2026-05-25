@@ -346,6 +346,32 @@ double yawFromPose(const geometry_msgs::msg::Pose & pose)
   return yaw;
 }
 
+geometry_msgs::msg::Pose rotatePoseYaw(
+  geometry_msgs::msg::Pose pose,
+  double yaw_delta)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+  tf2::Quaternion rotated;
+  rotated.setRPY(roll, pitch, yaw + yaw_delta);
+  rotated.normalize();
+  pose.orientation.x = rotated.x();
+  pose.orientation.y = rotated.y();
+  pose.orientation.z = rotated.z();
+  pose.orientation.w = rotated.w();
+  return pose;
+}
+
 }  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
@@ -1444,11 +1470,13 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
       getDoubleParam(node_, "pick_place.retreat_min_distance", 0.03));
   const double cartesian_min_fraction =
     getDoubleParam(node_, "pick_place.mgi_cartesian_min_fraction", kCartesianMinFraction);
+  const double place_open_recovery_yaw_delta =
+    getDoubleParam(node_, "pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 
   const auto pre_pick_pose = offsetWorldZ(pick_pose, pre_pick_distance);
   const auto lifted_pick_pose = offsetWorldZ(pick_pose, lift_distance);
   const auto pre_place_pose = offsetWorldZ(place_pose, pre_place_distance);
-  const auto retreat_pose = offsetWorldZ(place_pose, retreat_distance);
+  auto final_place_pose = place_pose;
 
   auto stop_or_fail = [this, &entry](const std::string & phase) {
     if (stop_requested_.load()) {
@@ -1472,6 +1500,65 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
       return false;
     }
     return !stop_or_fail(phase);
+  };
+
+  auto open_gripper_at_place = [&]() {
+    const std::string phase = "open gripper";
+    if (stop_or_fail(phase)) {
+      return false;
+    }
+
+    RCLCPP_INFO(LOGGER, "executePickAndPlaceMoveGroup [%s]: %s.",
+      entry.object_id.c_str(), phase.c_str());
+    if (openGripperOperational()) {
+      return !stop_or_fail(phase);
+    }
+
+    RCLCPP_WARN(LOGGER,
+      "executePickAndPlaceMoveGroup [%s]: open gripper failed at place pose; "
+      "closing gripper and retrying after yaw recovery of %.3f rad.",
+      entry.object_id.c_str(), place_open_recovery_yaw_delta);
+
+    if (stop_or_fail("place open yaw recovery")) {
+      return false;
+    }
+    if (!closeGripperOperational()) {
+      RCLCPP_ERROR(LOGGER,
+        "executePickAndPlaceMoveGroup [%s]: phase failed: close gripper before yaw recovery.",
+        entry.object_id.c_str());
+      return false;
+    }
+
+    auto recovery_pose = rotatePoseYaw(final_place_pose, place_open_recovery_yaw_delta);
+    normalizePoseOrientation(recovery_pose, "executePickAndPlaceMoveGroup place open yaw recovery");
+    RCLCPP_INFO(LOGGER,
+      "executePickAndPlaceMoveGroup [%s]: moving to yaw-recovered place pose "
+      "(x=%.3f y=%.3f z=%.3f yaw=%.3f).",
+      entry.object_id.c_str(),
+      recovery_pose.position.x, recovery_pose.position.y, recovery_pose.position.z,
+      yawFromPose(recovery_pose));
+    if (!moveToGoal(recovery_pose)) {
+      RCLCPP_ERROR(LOGGER,
+        "executePickAndPlaceMoveGroup [%s]: phase failed: move to yaw-recovered place pose.",
+        entry.object_id.c_str());
+      return false;
+    }
+    final_place_pose = recovery_pose;
+
+    if (stop_or_fail("open gripper after yaw recovery")) {
+      return false;
+    }
+    RCLCPP_INFO(LOGGER,
+      "executePickAndPlaceMoveGroup [%s]: open gripper after yaw recovery.",
+      entry.object_id.c_str());
+    if (!openGripperOperational()) {
+      RCLCPP_ERROR(LOGGER,
+        "executePickAndPlaceMoveGroup [%s]: phase failed: open gripper after yaw recovery.",
+        entry.object_id.c_str());
+      return false;
+    }
+
+    return !stop_or_fail("open gripper after yaw recovery");
   };
 
   RCLCPP_INFO(LOGGER,
@@ -1566,13 +1653,11 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
     return false;
   }
 
-  if (!run_phase("open gripper", [this]() {
-        return openGripperOperational();
-      })) {
+  if (!open_gripper_at_place()) {
     return false;
   }
 
-  if (!run_phase("detach object and update scene", [this, &entry, &place_pose]() {
+  if (!run_phase("detach object and update scene", [this, &entry, &final_place_pose]() {
         moveit_msgs::msg::AttachedCollisionObject detach;
         detach.link_name = "gripper_tcp";
         detach.object.id = entry.object_id;
@@ -1586,9 +1671,9 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
         placed_object.header.stamp = node_->get_clock()->now();
         placed_object.operation = moveit_msgs::msg::CollisionObject::ADD;
         if (placed_object.primitive_poses.empty()) {
-          placed_object.primitive_poses.push_back(place_pose);
+          placed_object.primitive_poses.push_back(final_place_pose);
         } else {
-          placed_object.primitive_poses.front() = place_pose;
+          placed_object.primitive_poses.front() = final_place_pose;
         }
         planning_scene_.applyCollisionObject(placed_object);
         rclcpp::sleep_for(std::chrono::milliseconds(300));
@@ -1597,7 +1682,8 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
     return false;
   }
 
-  if (!run_phase("Cartesian retreat", [this, &retreat_pose, cartesian_min_fraction]() {
+  if (!run_phase("Cartesian retreat", [this, &final_place_pose, retreat_distance, cartesian_min_fraction]() {
+        const auto retreat_pose = offsetWorldZ(final_place_pose, retreat_distance);
         return moveCartesianToWaypointWithScaling(
           retreat_pose, vel_profiles_.precise_vel, vel_profiles_.precise_acc,
           cartesian_min_fraction, "place retreat");

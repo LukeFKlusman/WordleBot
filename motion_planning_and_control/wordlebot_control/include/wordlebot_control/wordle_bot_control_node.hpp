@@ -64,6 +64,7 @@ private:
   rclcpp::Subscription<moveit_msgs::msg::CollisionObject>::SharedPtr         add_collision_object_sub_;
   rclcpp::Subscription<wordlebot_control::msg::PickPlaceTask>::SharedPtr     letter_object_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                       clear_letter_objects_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                       clear_board_objects_sub_;
 
   // ---------------------------------------------------------------------------
   // Arm utility subscriptions

@@ -77,7 +77,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   // - /wordle_bot/abort_mission (std_msgs/Bool): Abort the current mission (not yet implemented).
   // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object.
   // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger pick-and-place mode.
-  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all letter collision objects and reset queue.
+  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all board collision objects and reset queue.
+  // - /wordle_bot/clear_board_objects (std_msgs/Bool): Alias for clearing letters and distractors.
   // - /wordle_bot/open_gripper (std_msgs/Bool): Open the gripper (IDLE only).
   // - /wordle_bot/close_gripper (std_msgs/Bool): Close the gripper (IDLE only).
   // - /wordle_bot/return_home (std_msgs/Bool): Return arm to home position (IDLE only).
@@ -124,6 +125,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 
   clear_letter_objects_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     "/wordle_bot/clear_letter_objects", 10,
+    std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
+
+  clear_board_objects_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    "/wordle_bot/clear_board_objects", 10,
     std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
 
   open_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
@@ -226,6 +231,8 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<double>("pick_place.retreat_max_distance", 0.15);
   if (!node_->has_parameter("pick_place.grasp_z_offset"))
     node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
+  if (!node_->has_parameter("pick_place.mgi_place_open_recovery_yaw_delta"))
+    node_->declare_parameter<double>("pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 
   scan_sweep_dwell_time_ = node_->get_parameter("scan_sweep_dwell_time").as_double();
 
@@ -378,8 +385,8 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
 //                              to the controller's planning scene interface
 // letterObjectCallback       — receive a pick/place task, register the letter
 //                              collision object, and queue the task
-// clearLetterObjectsCallback — remove all letter collision objects from the
-//                              planning scene and reset the task queue
+// clearLetterObjectsCallback — remove all tracked board collision objects from
+//                              the planning scene and reset the task queue
 // ---------------------------------------------------------------------------
 
 void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
@@ -482,7 +489,7 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (mission_running_) {
       RCLCPP_WARN(LOGGER,
-        "clearLetterObjectsCallback: mission is running — cannot clear letter objects now.");
+        "clearLetterObjectsCallback: mission is running — cannot clear board objects now.");
       return;
     }
     ids_to_remove = tracked_letter_ids_;
@@ -501,7 +508,7 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
 
   controller_->clearLetterObjects(ids_to_remove);
   RCLCPP_INFO(LOGGER,
-    "clearLetterObjectsCallback: cleared %zu letter object(s) and reset queue.",
+    "clearLetterObjectsCallback: cleared %zu tracked board object(s) and reset queue.",
     ids_to_remove.size());
 }
 
