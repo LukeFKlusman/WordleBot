@@ -192,7 +192,7 @@ class RLTaskOptimiser(TaskSequencerEvaluator):
                 'pick_qw':        pick_eq[3],
                 'place_x':        place_x,
                 'place_y':        place_y,
-                'place_z':        PLACE_Z,
+                'place_z':        item['z'],
                 'object_id':      item.get('object_id', ''),
                 'letter':         step['letter'],
                 'source_cell_id': src_id,

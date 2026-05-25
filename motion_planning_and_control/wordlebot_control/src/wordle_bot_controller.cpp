@@ -495,15 +495,48 @@ void WordleBotController::setupCollisionScene()
 
   planning_scene_.applyCollisionObject(floor);
 
+  moveit_msgs::msg::CollisionObject gameboard;
+  gameboard.header.frame_id = move_group_.getPlanningFrame();
+  gameboard.id = "gameboard";
+
+  shape_msgs::msg::SolidPrimitive gameboard_shape;
+  gameboard_shape.type = shape_msgs::msg::SolidPrimitive::BOX;
+  gameboard_shape.dimensions = {0.957, 0.525, 0.0149};
+
+  geometry_msgs::msg::Pose gameboard_pose;
+  gameboard_pose.position.x = 0.0;
+  gameboard_pose.position.y = 0.225;
+  gameboard_pose.position.z = 0.0075;
+  gameboard_pose.orientation.w = 1.0;
+
+  gameboard.primitives.push_back(gameboard_shape);
+  gameboard.primitive_poses.push_back(gameboard_pose);
+  gameboard.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+  planning_scene_.applyCollisionObject(gameboard);
+
+  // Allow contact between gameboard and robot base links (not treated as collisions)
+  moveit_msgs::msg::PlanningScene ps_diff;
+  ps_diff.is_diff = true;
+  {
+    planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+    collision_detection::AllowedCollisionMatrix acm = lps->getAllowedCollisionMatrix();
+    acm.setEntry("gameboard", "base_link", true);
+    acm.setEntry("gameboard", "base", true);
+    acm.setEntry("gameboard", "base_link_inertia", true);
+    acm.getMessage(ps_diff.allowed_collision_matrix);
+  }
+  planning_scene_.applyPlanningScene(ps_diff);
+
   attachSensorCollisionObject();
-  RCLCPP_INFO(LOGGER, "Collision scene set up: floor added, sensor guard attached.");
+  RCLCPP_INFO(LOGGER, "Collision scene set up: floor, gameboard added, sensor guard attached.");
 }
 
 
 void WordleBotController::clearCollisionScene()
 {
   detachSensorCollisionObject();
-  planning_scene_.removeCollisionObjects({"box1", "floor"});
+  planning_scene_.removeCollisionObjects({"box1", "floor", "gameboard"});
   RCLCPP_INFO(LOGGER, "Collision scene cleared.");
 }
 
