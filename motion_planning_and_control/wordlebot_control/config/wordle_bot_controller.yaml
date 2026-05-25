@@ -2,7 +2,7 @@ wordle_bot_control_node:
   ros__parameters:
     # Generic MTC solution target for utility MTC tasks. This is a target
     # solution count, not a strict minimum required to continue.
-    mtc_default_solution_target_count: 15
+    mtc_default_solution_target_count: 10
 
     # Working pose used after pick-and-place batches and direct return-to-working.
     # Joint angles are in radians.
@@ -27,15 +27,21 @@ wordle_bot_control_node:
     # Pick-and-place MTC task tuning. Solution target count is passed to
     # task.plan(N); the task still proceeds if at least one valid solution exists.
     pick_place:
-      task_solution_target_count: 15
+      task_solution_target_count: 10
       grasp_max_ik_solutions: 32
       place_max_ik_solutions: 32
-      grasp_min_solution_distance: 1.0
-      place_min_solution_distance: 1.0
+      grasp_min_solution_distance: 0.10
+      place_min_solution_distance: 0.10
+      grasp_angle_delta: 0.261799
       cartesian_step_size: 0.001
       retreat_min_fraction: 0.0
       move_to_pick_timeout: 0.20
       move_to_place_timeout: 0.20
+      solution_wrist_spin_weight: 4.0
+      solution_wrist_spin_reject_threshold: 7.0
+      accept_solution_score_threshold: 25.0
+      place_yaw_tolerance: 0.0872665
+      place_yaw_penalty_weight: 100.0
       approach_min_distance: 0.05
       approach_max_distance: 0.15
       lift_min_distance: 0.05

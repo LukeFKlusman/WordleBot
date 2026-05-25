@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <limits>
 
 #include <rclcpp_action/rclcpp_action.hpp>
 
 #include <moveit_msgs/msg/move_it_error_codes.hpp>
+#include <moveit/task_constructor/storage.h>
 #include <moveit_task_constructor_msgs/action/execute_task_solution.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
@@ -22,6 +24,8 @@ namespace mtc = moveit::task_constructor;
 #include <moveit_msgs/msg/joint_constraint.hpp>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotController");
 
@@ -29,6 +33,19 @@ namespace
 {
 constexpr const char * kWrist3JointName = "wrist_3_joint";
 constexpr double kTwoPi = 2.0 * M_PI;
+
+double yawFromPose(const geometry_msgs::msg::Pose & pose);
+
+struct SolutionMotionScore {
+  double joint_motion{0.0};
+  double wrist_spin{0.0};
+  double place_yaw_error{0.0};
+  double place_yaw_penalty{0.0};
+  double total{0.0};
+  bool rejected{false};
+  bool has_place_yaw{false};
+  std::size_t trajectory_count{0};
+};
 
 std::optional<std::size_t> findJointIndex(
   const std::vector<std::string> & joint_names,
@@ -39,6 +56,172 @@ std::optional<std::size_t> findJointIndex(
     return std::nullopt;
   }
   return static_cast<std::size_t>(std::distance(joint_names.begin(), it));
+}
+
+double shortestRevoluteDelta(double from, double to)
+{
+  double delta = to - from;
+  while (delta > M_PI) {
+    delta -= kTwoPi;
+  }
+  while (delta < -M_PI) {
+    delta += kTwoPi;
+  }
+  return delta;
+}
+
+double yawPenalty(
+  double actual_yaw,
+  double desired_yaw,
+  double tolerance,
+  double weight,
+  double & yaw_error)
+{
+  yaw_error = std::abs(shortestRevoluteDelta(desired_yaw, actual_yaw));
+  const double excess = std::max(0.0, yaw_error - std::max(0.0, tolerance));
+  return std::max(0.0, weight) * excess * excess;
+}
+
+bool isPlaceYawSolution(const mtc::SolutionBase & solution)
+{
+  const auto * creator = solution.creator();
+  if (creator == nullptr) {
+    return false;
+  }
+
+  const std::string & name = creator->name();
+  return name == "generate place pose" ||
+         name == "place pose IK";
+}
+
+std::optional<double> targetYawFromInterfaceState(const mtc::InterfaceState * state)
+{
+  if (state == nullptr || !state->properties().hasProperty("target_pose")) {
+    return std::nullopt;
+  }
+
+  try {
+    const auto & target_pose =
+      state->properties().get<geometry_msgs::msg::PoseStamped>("target_pose");
+    return yawFromPose(target_pose.pose);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+std::optional<double> placeYawFromSolution(const mtc::SolutionBase & solution)
+{
+  if (isPlaceYawSolution(solution)) {
+    if (auto yaw = targetYawFromInterfaceState(solution.end())) {
+      return yaw;
+    }
+    if (auto yaw = targetYawFromInterfaceState(solution.start())) {
+      return yaw;
+    }
+  }
+
+  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
+    for (const auto * child : sequence->solutions()) {
+      if (child != nullptr) {
+        if (auto yaw = placeYawFromSolution(*child)) {
+          return yaw;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
+    if (wrapped->wrapped() != nullptr) {
+      return placeYawFromSolution(*wrapped->wrapped());
+    }
+  }
+
+  return std::nullopt;
+}
+
+void accumulateTrajectoryMotionScore(
+  const robot_trajectory::RobotTrajectory & trajectory,
+  const moveit::core::JointModelGroup * jmg,
+  SolutionMotionScore & score)
+{
+  if (jmg == nullptr || trajectory.getWayPointCount() < 2) {
+    return;
+  }
+
+  ++score.trajectory_count;
+  const auto & joint_names = jmg->getVariableNames();
+  const auto wrist2_index = findJointIndex(joint_names, "wrist_2_joint");
+  const auto wrist3_index = findJointIndex(joint_names, "wrist_3_joint");
+
+  std::vector<double> prev;
+  std::vector<double> curr;
+  for (std::size_t i = 1; i < trajectory.getWayPointCount(); ++i) {
+    trajectory.getWayPoint(i - 1).copyJointGroupPositions(jmg, prev);
+    trajectory.getWayPoint(i).copyJointGroupPositions(jmg, curr);
+    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
+      const double delta = std::abs(shortestRevoluteDelta(prev[j], curr[j]));
+      score.joint_motion += delta;
+      if ((wrist2_index && j == *wrist2_index) || (wrist3_index && j == *wrist3_index)) {
+        score.wrist_spin += delta;
+      }
+    }
+  }
+}
+
+void accumulateSolutionMotionScore(
+  const mtc::SolutionBase & solution,
+  const moveit::core::JointModelGroup * jmg,
+  SolutionMotionScore & score)
+{
+  if (const auto * sub = dynamic_cast<const mtc::SubTrajectory *>(&solution)) {
+    if (sub->trajectory()) {
+      accumulateTrajectoryMotionScore(*sub->trajectory(), jmg, score);
+    }
+    return;
+  }
+
+  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
+    for (const auto * child : sequence->solutions()) {
+      if (child != nullptr) {
+        accumulateSolutionMotionScore(*child, jmg, score);
+      }
+    }
+    return;
+  }
+
+  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
+    if (wrapped->wrapped() != nullptr) {
+      accumulateSolutionMotionScore(*wrapped->wrapped(), jmg, score);
+    }
+  }
+}
+
+SolutionMotionScore scoreTaskSolution(
+  const mtc::SolutionBase & solution,
+  const moveit::core::JointModelGroup * jmg,
+  double wrist_spin_weight,
+  double wrist_spin_reject_threshold,
+  double desired_place_yaw,
+  double place_yaw_tolerance,
+  double place_yaw_penalty_weight)
+{
+  SolutionMotionScore score;
+  accumulateSolutionMotionScore(solution, jmg, score);
+  if (const auto place_yaw = placeYawFromSolution(solution)) {
+    score.has_place_yaw = true;
+    score.place_yaw_penalty = yawPenalty(
+      *place_yaw, desired_place_yaw, place_yaw_tolerance,
+      place_yaw_penalty_weight, score.place_yaw_error);
+  }
+  score.total =
+    score.joint_motion +
+    wrist_spin_weight * score.wrist_spin +
+    score.place_yaw_penalty +
+    1e-3 * solution.cost();
+  score.rejected =
+    wrist_spin_reject_threshold > 0.0 && score.wrist_spin > wrist_spin_reject_threshold;
+  return score;
 }
 
 bool alignWrist3JointTrajectoryToReference(
@@ -94,6 +277,52 @@ double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & 
     node->declare_parameter<double>(name, default_value);
   }
   return node->get_parameter(name).as_double();
+}
+
+bool normalizePoseOrientation(
+  geometry_msgs::msg::Pose & pose,
+  const std::string & label,
+  bool identity_if_invalid = true)
+{
+  const double norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+
+  if (norm < 1e-9) {
+    if (identity_if_invalid) {
+      pose.orientation.x = 0.0;
+      pose.orientation.y = 0.0;
+      pose.orientation.z = 0.0;
+      pose.orientation.w = 1.0;
+      RCLCPP_WARN(LOGGER,
+        "%s orientation quaternion was invalid/near-zero; using identity orientation.",
+        label.c_str());
+    }
+    return false;
+  }
+
+  pose.orientation.x /= norm;
+  pose.orientation.y /= norm;
+  pose.orientation.z /= norm;
+  pose.orientation.w /= norm;
+  return true;
+}
+
+double yawFromPose(const geometry_msgs::msg::Pose & pose)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return yaw;
 }
 
 }  // namespace
@@ -230,7 +459,8 @@ void WordleBotController::setupCollisionScene()
 
   shape_msgs::msg::SolidPrimitive floor_shape;
   floor_shape.type = shape_msgs::msg::SolidPrimitive::BOX;
-  floor_shape.dimensions = {0.975, 0.525, 0.01};
+  // floor_shape.dimensions = {0.975, 0.525, 0.01}; gamebaord
+  floor_shape.dimensions = {2.0, 2.0, 0.01};  // large flat plane to catch dropped letters
 
   geometry_msgs::msg::Pose floor_pose;
   floor_pose.position.x = 0.0;
@@ -353,6 +583,11 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
                                           bool include_return_home)
 {
   RCLCPP_DEBUG(LOGGER, "createTask: initialising MTC task.");
+  auto normalized_object_pose = object_pose;
+  auto normalized_place_pose = place_pose;
+  normalizePoseOrientation(normalized_object_pose, "createTask pick");
+  normalizePoseOrientation(normalized_place_pose, "createTask place");
+
   mtc::Task task;
   task.stages()->setName("pick and place letter");
   task.loadRobotModel(node_);
@@ -366,6 +601,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   task.setProperty("ik_frame", hand_frame);
   RCLCPP_DEBUG(LOGGER, "createTask: arm='%s', hand_group='%s', ik_frame='%s'.",
     arm_group.c_str(), hand_group.c_str(), hand_frame.c_str());
+  RCLCPP_INFO(LOGGER,
+    "createTask [%s]: soft place-yaw mode enabled: pick_yaw=%.3f rad, desired_place_yaw=%.3f rad.",
+    object_id.c_str(), yawFromPose(normalized_object_pose), yawFromPose(normalized_place_pose));
 
   // Explicitly name the OMPL pipeline so MTC never falls back to CHOMP.
   // ompl_planning.yaml must be loaded into the node's parameters (see wordle_bot.launch.py).
@@ -379,9 +617,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
   const double retreat_min_fraction =
     getDoubleParam(node_, "pick_place.retreat_min_fraction", 0.0);
   const double move_to_pick_timeout =
-    getDoubleParam(node_, "pick_place.move_to_pick_timeout", 0.20);
+    getDoubleParam(node_, "pick_place.move_to_pick_timeout", 0.50);
   const double move_to_place_timeout =
-    getDoubleParam(node_, "pick_place.move_to_place_timeout", 0.20);
+    getDoubleParam(node_, "pick_place.move_to_place_timeout", 0.50);
   const double approach_min_distance =
     getDoubleParam(node_, "pick_place.approach_min_distance", 0.05);
   const double approach_max_distance =
@@ -396,14 +634,16 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     getDoubleParam(node_, "pick_place.retreat_max_distance", 0.15);
   const double grasp_z_offset =
     getDoubleParam(node_, "pick_place.grasp_z_offset", 0.01);
+  const double grasp_angle_delta =
+    getDoubleParam(node_, "pick_place.grasp_angle_delta", M_PI / 12.0);
   const int grasp_max_ik_solutions =
     std::max(1, getIntParam(node_, "pick_place.grasp_max_ik_solutions", 32));
   const int place_max_ik_solutions =
     std::max(1, getIntParam(node_, "pick_place.place_max_ik_solutions", 32));
   const double grasp_min_solution_distance =
-    getDoubleParam(node_, "pick_place.grasp_min_solution_distance", 1.0);
+    getDoubleParam(node_, "pick_place.grasp_min_solution_distance", 0.10);
   const double place_min_solution_distance =
-    getDoubleParam(node_, "pick_place.place_min_solution_distance", 1.0);
+    getDoubleParam(node_, "pick_place.place_min_solution_distance", 0.10);
 
   auto cartesian_planner = std::make_shared<mtc::solvers::CartesianPath>();
   cartesian_planner->setMaxVelocityScalingFactor(vel_profiles_.precise_vel);
@@ -465,7 +705,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
   // ── Stage 3: free-space move to pick region ───────────────────────────────
   {
-    RCLCPP_INFO(LOGGER, "createTask: adding stage 3 — Connect 'move to pick' (timeout=10 s).");
+    RCLCPP_INFO(LOGGER,
+      "createTask: adding stage 3 — Connect 'move to pick' (timeout=%.2f s).",
+      move_to_pick_timeout);
     auto stage_move_to_pick = std::make_unique<mtc::stages::Connect>(
       "move to pick",
       mtc::stages::Connect::GroupPlannerVector{{arm_group, sampling_planner}});
@@ -502,18 +744,20 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       grasp->insert(std::move(stage));
     }
 
-    // 4b. Sample grasp pose around the object + solve IK
+    // 4b. Sample object-frame grasp poses + solve IK.
     {
-      RCLCPP_DEBUG(LOGGER, "createTask: 4b — GenerateGraspPose for object '%s' "
-        "(angle_delta=π/12, IK solutions=8, z_offset=0.08 m).",
-        object_id.c_str());
+      RCLCPP_INFO(LOGGER,
+        "createTask: 4b — GenerateGraspPose for object '%s' "
+        "(angle_delta=%.6f rad, pick_yaw=%.3f rad, IK solutions=%d, z_offset=%.3f m).",
+        object_id.c_str(), grasp_angle_delta, yawFromPose(normalized_object_pose),
+        grasp_max_ik_solutions, grasp_z_offset);
       auto stage =
         std::make_unique<mtc::stages::GenerateGraspPose>("generate grasp pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
       stage->properties().set("marker_ns", "grasp_pose");
       stage->setPreGraspPose("open");
       stage->setObject(object_id);
-      stage->setAngleDelta(M_PI / 12);
+      stage->setAngleDelta(grasp_angle_delta);
       stage->setMonitoredStage(current_state_ptr);
 
       // Transform from gripper_tcp to the object centre when grasping top-down.
@@ -525,14 +769,14 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       grasp_frame_transform.linear() = q.matrix();
       grasp_frame_transform.translation().z() = grasp_z_offset;
 
-      const double expected_grasp_z   = object_pose.position.z + grasp_z_offset;
+      const double expected_grasp_z   = normalized_object_pose.position.z + grasp_z_offset;
       const double expected_approach_z_min = expected_grasp_z + approach_min_distance;
       const double expected_approach_z_max = expected_grasp_z + approach_max_distance;
       RCLCPP_INFO(LOGGER,
         "createTask [grasp geometry]: object_z=%.4f m  grasp_z_offset=%.3f m  "
         "=> expected gripper_tcp z AT GRASP = %.4f m  "
         "| pre-approach z range = [%.4f, %.4f] m (world frame, top-down).",
-        object_pose.position.z, grasp_z_offset,
+        normalized_object_pose.position.z, grasp_z_offset,
         expected_grasp_z, expected_approach_z_min, expected_approach_z_max);
 
       auto wrapper =
@@ -569,7 +813,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
       grasp->insert(std::move(stage));
     }
 
-    // 4e. Attach object to the gripper link — GeneratePlacePose monitors this stage
+    // 4e. Attach object to the gripper link — the place pose generator monitors this stage.
     {
       RCLCPP_DEBUG(LOGGER, "createTask: 4e — ModifyPlanningScene attach '%s' to '%s'.",
         object_id.c_str(), hand_frame.c_str());
@@ -604,7 +848,9 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
   // ── Stage 5: free-space move to place region ──────────────────────────────
   {
-    RCLCPP_INFO(LOGGER, "createTask: adding stage 5 — Connect 'move to place' (timeout=10 s).");
+    RCLCPP_INFO(LOGGER,
+      "createTask: adding stage 5 — Connect 'move to place' (timeout=%.2f s).",
+      move_to_place_timeout);
     auto stage = std::make_unique<mtc::stages::Connect>(
       "move to place",
       mtc::stages::Connect::GroupPlannerVector{
@@ -622,12 +868,15 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
     task.properties().exposeTo(place->properties(), {"eef", "group", "ik_frame"});
     place->properties().configureInitFrom(mtc::Stage::PARENT, {"eef", "group", "ik_frame"});
 
-    // 6a. Generate place pose + solve IK (object must reach the requested slot in world)
+    // 6a. Generate place pose alternatives + solve IK (object must reach the requested slot in world)
     {
-      RCLCPP_DEBUG(LOGGER, "\ncreateTask: 6a — GeneratePlacePose for '%s' "
-        "target=(%.3f, %.3f, %.3f) world, IK solutions=4.",
+      RCLCPP_INFO(LOGGER,
+        "createTask: 6a — GeneratePlacePose for '%s' in soft-yaw mode "
+        "target=(%.3f, %.3f, %.3f) world, place_yaw=%.3f rad, IK solutions=%d.",
         object_id.c_str(),
-        place_pose.position.x, place_pose.position.y, place_pose.position.z);
+        normalized_place_pose.position.x, normalized_place_pose.position.y,
+        normalized_place_pose.position.z, yawFromPose(normalized_place_pose),
+        place_max_ik_solutions);
       auto stage =
         std::make_unique<mtc::stages::GeneratePlacePose>("generate place pose");
       stage->properties().configureInitFrom(mtc::Stage::PARENT);
@@ -636,10 +885,7 @@ mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & objec
 
       geometry_msgs::msg::PoseStamped target_pose;
       target_pose.header.frame_id = "world";
-      target_pose.pose.position.x = place_pose.position.x;
-      target_pose.pose.position.y = place_pose.position.y;
-      target_pose.pose.position.z = place_pose.position.z;
-      target_pose.pose.orientation.w = 1.0;
+      target_pose.pose = normalized_place_pose;
       stage->setPose(target_pose);
       stage->setMonitoredStage(attach_object_stage);
 
@@ -764,16 +1010,63 @@ WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
 
   const int task_solution_target_count =
     std::max(1, getIntParam(node_, "pick_place.task_solution_target_count", 15));
-  RCLCPP_INFO(LOGGER, "planPickAndPlace [%s]: planning (target %d solution(s))...",
-              entry.object_id.c_str(), task_solution_target_count);
+  const double accept_solution_score_threshold =
+    getDoubleParam(node_, "pick_place.accept_solution_score_threshold", 25.0);
+  RCLCPP_INFO(LOGGER,
+    "planPickAndPlace [%s]: planning incrementally (target %d solution(s), accept score <= %.3f)...",
+    entry.object_id.c_str(), task_solution_target_count, accept_solution_score_threshold);
   moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = result.task->plan(task_solution_target_count);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER,
-      "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
-    result.task.reset();
-    return result;
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+  const double solution_wrist_spin_weight =
+    getDoubleParam(node_, "pick_place.solution_wrist_spin_weight", 4.0);
+  const double solution_wrist_spin_reject_threshold =
+    getDoubleParam(node_, "pick_place.solution_wrist_spin_reject_threshold", 7.0);
+  auto normalized_place_pose = entry.place_pose;
+  normalizePoseOrientation(normalized_place_pose, "planPickAndPlace place");
+  const double desired_place_yaw = yawFromPose(normalized_place_pose);
+  const double place_yaw_tolerance =
+    getDoubleParam(node_, "pick_place.place_yaw_tolerance", 0.0872665);
+  const double place_yaw_penalty_weight =
+    getDoubleParam(node_, "pick_place.place_yaw_penalty_weight", 100.0);
+
+  for (int target_count = 1; target_count <= task_solution_target_count; ++target_count) {
+    try {
+      plan_result = result.task->plan(static_cast<std::size_t>(target_count));
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER,
+        "planPickAndPlace [" << entry.object_id << "]: planning threw: " << e);
+      result.task.reset();
+      return result;
+    }
+
+    if (!result.task->solutions().empty()) {
+      double current_best_score = std::numeric_limits<double>::infinity();
+      for (const auto & solution : result.task->solutions()) {
+        const auto score = scoreTaskSolution(
+          *solution, jmg, solution_wrist_spin_weight, solution_wrist_spin_reject_threshold,
+          desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+        if (!score.rejected && score.total < current_best_score) {
+          current_best_score = score.total;
+        }
+      }
+
+      RCLCPP_INFO(LOGGER,
+        "planPickAndPlace [%s]: incremental planning target=%d/%d, complete_solutions=%zu, "
+        "best_non_rejected_score=%.4f.",
+        entry.object_id.c_str(), target_count, task_solution_target_count,
+        result.task->solutions().size(), current_best_score);
+
+      if (current_best_score <= accept_solution_score_threshold) {
+        RCLCPP_INFO(LOGGER,
+          "planPickAndPlace [%s]: accepting early because best score %.4f <= threshold %.4f.",
+          entry.object_id.c_str(), current_best_score, accept_solution_score_threshold);
+        break;
+      }
+    }
+
+    if (!plan_result) {
+      break;
+    }
   }
 
   if (!plan_result || result.task->solutions().empty()) {
@@ -782,15 +1075,72 @@ WordleBotController::PlannedPickPlace WordleBotController::planPickAndPlace(
     return result;
   }
 
+  double best_score = std::numeric_limits<double>::infinity();
+  const mtc::SolutionBase * best_solution = nullptr;
+  int rejected_solutions = 0;
+  std::size_t solution_index = 0;
+  for (const auto & solution : result.task->solutions()) {
+    ++solution_index;
+    const auto score = scoreTaskSolution(
+      *solution, jmg, solution_wrist_spin_weight, solution_wrist_spin_reject_threshold,
+      desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+    RCLCPP_INFO(LOGGER,
+      "planPickAndPlace [%s]: complete solution %zu/%zu: mtc_cost=%.3f "
+      "joint_motion=%.4f wrist_spin=%.4f place_yaw_error=%.4f place_yaw_penalty=%.4f "
+      "trajectories=%zu score=%.4f%s%s.",
+      entry.object_id.c_str(), solution_index, result.task->solutions().size(),
+      solution->cost(), score.joint_motion, score.wrist_spin, score.place_yaw_error,
+      score.place_yaw_penalty, score.trajectory_count, score.total,
+      score.has_place_yaw ? "" : " (no place yaw)",
+      score.rejected ? " (rejected wrist spin)" : "");
+    if (score.rejected) {
+      ++rejected_solutions;
+      continue;
+    }
+    if (score.total < best_score) {
+      best_score = score.total;
+      best_solution = solution.get();
+    }
+  }
+
+  if (best_solution == nullptr) {
+    RCLCPP_WARN(LOGGER,
+      "planPickAndPlace [%s]: all %zu complete solution(s) were rejected by wrist-spin scoring; "
+      "falling back to lowest-scored rejected solution so planning can continue.",
+      entry.object_id.c_str(), result.task->solutions().size());
+    for (const auto & solution : result.task->solutions()) {
+      const auto score = scoreTaskSolution(
+        *solution, jmg, solution_wrist_spin_weight, 0.0,
+        desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+      if (score.total < best_score) {
+        best_score = score.total;
+        best_solution = solution.get();
+      }
+    }
+  }
+
   // best_solution is a raw pointer into the task's internal storage.
   // It remains valid as long as result.task is alive — both live in PlannedPickPlace.
-  result.best_solution = result.task->solutions().front().get();
+  result.best_solution = best_solution;
 
   RCLCPP_INFO(LOGGER,
-    "planPickAndPlace [%s]: planning succeeded — %zu solution(s), best cost=%.3f.",
+    "planPickAndPlace [%s]: planning succeeded — %zu solution(s), rejected=%d, selected_mtc_cost=%.3f, "
+    "selected_motion_score=%.4f.",
     entry.object_id.c_str(),
     result.task->solutions().size(),
-    result.best_solution->cost());
+    rejected_solutions,
+    result.best_solution->cost(),
+    best_score);
+
+  const auto * grasp_ik_stage = result.task->findChild("pick object/grasp pose IK");
+  const auto * place_ik_stage = result.task->findChild("place object/place pose IK");
+  if (grasp_ik_stage != nullptr || place_ik_stage != nullptr) {
+    RCLCPP_INFO(LOGGER,
+      "planPickAndPlace [%s]: IK stage solutions — grasp=%zu, place=%zu.",
+      entry.object_id.c_str(),
+      grasp_ik_stage ? grasp_ik_stage->solutions().size() : 0,
+      place_ik_stage ? place_ik_stage->solutions().size() : 0);
+  }
 
   // Extract the terminal planning scene from the solution's end InterfaceState.
   // PlanningScene::clone() produces a fully independent non-const copy, which is
@@ -902,32 +1252,114 @@ bool WordleBotController::doPickAndPlace(const geometry_msgs::msg::Pose & object
   RCLCPP_INFO(LOGGER, "doPickAndPlace: planning...");
   const int task_solution_target_count =
     std::max(1, getIntParam(node_, "pick_place.task_solution_target_count", 15));
+  const double accept_solution_score_threshold =
+    getDoubleParam(node_, "pick_place.accept_solution_score_threshold", 25.0);
+  const auto * jmg = move_group_.getRobotModel()->getJointModelGroup("ur_onrobot_manipulator");
+  const double solution_wrist_spin_weight =
+    getDoubleParam(node_, "pick_place.solution_wrist_spin_weight", 4.0);
+  const double solution_wrist_spin_reject_threshold =
+    getDoubleParam(node_, "pick_place.solution_wrist_spin_reject_threshold", 7.0);
+  auto normalized_place_pose = place_pose;
+  normalizePoseOrientation(normalized_place_pose, "doPickAndPlace place");
+  const double desired_place_yaw = yawFromPose(normalized_place_pose);
+  const double place_yaw_tolerance =
+    getDoubleParam(node_, "pick_place.place_yaw_tolerance", 0.0872665);
+  const double place_yaw_penalty_weight =
+    getDoubleParam(node_, "pick_place.place_yaw_penalty_weight", 100.0);
   moveit::core::MoveItErrorCode plan_result;
-  try {
-    plan_result = task.plan(task_solution_target_count);
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "MTC task planning threw InitStageException: " << e);
-    return false;
+  for (int target_count = 1; target_count <= task_solution_target_count; ++target_count) {
+    try {
+      plan_result = task.plan(static_cast<std::size_t>(target_count));
+    } catch (const mtc::InitStageException & e) {
+      RCLCPP_ERROR_STREAM(LOGGER, "MTC task planning threw InitStageException: " << e);
+      return false;
+    }
+
+    if (!task.solutions().empty()) {
+      double current_best_score = std::numeric_limits<double>::infinity();
+      for (const auto & solution : task.solutions()) {
+        const auto score = scoreTaskSolution(
+          *solution, jmg, solution_wrist_spin_weight, solution_wrist_spin_reject_threshold,
+          desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+        if (!score.rejected && score.total < current_best_score) {
+          current_best_score = score.total;
+        }
+      }
+
+      RCLCPP_INFO(LOGGER,
+        "doPickAndPlace: incremental planning target=%d/%d, complete_solutions=%zu, "
+        "best_non_rejected_score=%.4f.",
+        target_count, task_solution_target_count, task.solutions().size(), current_best_score);
+
+      if (current_best_score <= accept_solution_score_threshold) {
+        RCLCPP_INFO(LOGGER,
+          "doPickAndPlace: accepting early because best score %.4f <= threshold %.4f.",
+          current_best_score, accept_solution_score_threshold);
+        break;
+      }
+    }
+
+    if (!plan_result) {
+      break;
+    }
   }
+
   if (!plan_result || task.solutions().empty()) {
     RCLCPP_ERROR(LOGGER, "MTC task planning failed — no solutions found.");
     return false;
   }
 
+  const mtc::SolutionBase * best_solution = nullptr;
+  double best_score = std::numeric_limits<double>::infinity();
+  std::size_t solution_index = 0;
+  for (const auto & solution : task.solutions()) {
+    ++solution_index;
+    const auto score = scoreTaskSolution(
+      *solution, jmg, solution_wrist_spin_weight, solution_wrist_spin_reject_threshold,
+      desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+    RCLCPP_INFO(LOGGER,
+      "doPickAndPlace: complete solution %zu/%zu: mtc_cost=%.3f joint_motion=%.4f "
+      "wrist_spin=%.4f place_yaw_error=%.4f place_yaw_penalty=%.4f "
+      "trajectories=%zu score=%.4f%s%s.",
+      solution_index, task.solutions().size(), solution->cost(), score.joint_motion,
+      score.wrist_spin, score.place_yaw_error, score.place_yaw_penalty,
+      score.trajectory_count, score.total, score.has_place_yaw ? "" : " (no place yaw)",
+      score.rejected ? " (rejected wrist spin)" : "");
+    if (!score.rejected && score.total < best_score) {
+      best_score = score.total;
+      best_solution = solution.get();
+    }
+  }
+
+  if (best_solution == nullptr) {
+    RCLCPP_WARN(LOGGER,
+      "doPickAndPlace: all complete solutions were rejected by wrist-spin scoring; "
+      "falling back to lowest-scored solution.");
+    for (const auto & solution : task.solutions()) {
+      const auto score = scoreTaskSolution(
+        *solution, jmg, solution_wrist_spin_weight, 0.0,
+        desired_place_yaw, place_yaw_tolerance, place_yaw_penalty_weight);
+      if (score.total < best_score) {
+        best_score = score.total;
+        best_solution = solution.get();
+      }
+    }
+  }
+
   RCLCPP_INFO(LOGGER,
     "doPickAndPlace: planning succeeded — %zu solution(s) found. "
-    "Executing best solution (cost=%.3f).",
-    task.solutions().size(), task.solutions().front()->cost());
+    "Executing selected solution (mtc_cost=%.3f, motion_score=%.4f).",
+    task.solutions().size(), best_solution->cost(), best_score);
 
   RCLCPP_DEBUG(LOGGER, "doPickAndPlace: publishing planned solution for visualization.");
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  task.introspection().publishSolution(*task.solutions().front());
+  task.introspection().publishSolution(*best_solution);
 
   RCLCPP_INFO(LOGGER, "doPickAndPlace: executing...");
   rclcpp::sleep_for(std::chrono::milliseconds(500));
 
-  auto result = executeAlignedTaskSolution(task, *task.solutions().front(), "doPickAndPlace");
+  auto result = executeAlignedTaskSolution(task, *best_solution, "doPickAndPlace");
   if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "MTC task execution failed (error code %d).", result.val);
     return false;
