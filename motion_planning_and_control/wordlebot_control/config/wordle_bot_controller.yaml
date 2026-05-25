@@ -2,7 +2,7 @@ wordle_bot_control_node:
   ros__parameters:
     # Generic MTC solution target for utility MTC tasks. This is a target
     # solution count, not a strict minimum required to continue.
-    mtc_default_solution_target_count: 15
+    mtc_default_solution_target_count: 10
 
     # Working pose used after pick-and-place batches and direct return-to-working.
     # Joint angles are in radians.
@@ -27,17 +27,24 @@ wordle_bot_control_node:
     # Pick-and-place MTC task tuning. Solution target count is passed to
     # task.plan(N); the task still proceeds if at least one valid solution exists.
     pick_place:
-      task_solution_target_count: 15
+      # move_group: exact-pose sequential MoveGroupInterface backend.
+      # mtc: existing plan-all-then-execute-all MoveIt Task Constructor backend.
+      backend: "move_group"
+      task_solution_target_count: 10
       grasp_max_ik_solutions: 32
       place_max_ik_solutions: 32
-      grasp_min_solution_distance: 1.0
-      place_min_solution_distance: 1.0
-      cartesian_velocity_scaling: 0.5
-      cartesian_acceleration_scaling: 0.5
+      grasp_min_solution_distance: 0.10
+      place_min_solution_distance: 0.10
+      grasp_angle_delta: 0.261799
       cartesian_step_size: 0.001
       retreat_min_fraction: 0.0
       move_to_pick_timeout: 0.20
       move_to_place_timeout: 0.20
+      solution_wrist_spin_weight: 4.0
+      solution_wrist_spin_reject_threshold: 7.0
+      accept_solution_score_threshold: 25.0
+      place_yaw_tolerance: 0.0872665
+      place_yaw_penalty_weight: 100.0
       approach_min_distance: 0.05
       approach_max_distance: 0.15
       lift_min_distance: 0.05
@@ -45,3 +52,33 @@ wordle_bot_control_node:
       retreat_min_distance: 0.03
       retreat_max_distance: 0.15
       grasp_z_offset: 0.01
+      mgi_pre_pick_distance: 0.075
+      mgi_lift_distance: 0.05
+      mgi_pre_place_distance: 0.05
+      mgi_retreat_distance: 0.03
+      mgi_cartesian_min_fraction: 0.95
+
+    # Velocity scaling profiles and proximity-based selection thresholds.
+    # All values are scaling factors in [0.0, 1.0] applied to each joint's
+    # hardware velocity and acceleration limits before trajectory time-parameterisation.
+    #
+    # scan    — slow, smooth Cartesian motion for camera stability during scan-and-sweep
+    # precise — Cartesian approach / lift / retreat near tiles and objects
+    # transit — free-space OMPL moves when the robot is clear of obstacles
+    #
+    # proximity.near_threshold: distance (m) at or below which transit moves use precise scaling
+    # proximity.far_threshold:  distance (m) at or above which transit moves use full transit scaling
+    # Between the two thresholds the scaling is linearly interpolated.
+    velocity_scaling:
+      scan:
+        velocity: 0.05
+        acceleration: 0.01
+      precise:
+        velocity: 0.30
+        acceleration: 0.15
+      transit:
+        velocity: 0.75
+        acceleration: 0.35
+      proximity:
+        near_threshold: 0.10
+        far_threshold: 0.50

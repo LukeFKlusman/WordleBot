@@ -1,11 +1,59 @@
 #include "wordlebot_control/wordle_bot_control_node.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <moveit/planning_scene/planning_scene.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
+
+namespace
+{
+bool normalizePoseOrientation(
+  geometry_msgs::msg::Pose & pose,
+  const std::string & label)
+{
+  const double norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+
+  if (norm < 1e-9) {
+    pose.orientation.x = 0.0;
+    pose.orientation.y = 0.0;
+    pose.orientation.z = 0.0;
+    pose.orientation.w = 1.0;
+    RCLCPP_WARN(LOGGER,
+      "%s orientation quaternion was invalid/near-zero; using identity orientation.",
+      label.c_str());
+    return false;
+  }
+
+  pose.orientation.x /= norm;
+  pose.orientation.y /= norm;
+  pose.orientation.z /= norm;
+  pose.orientation.w /= norm;
+  return true;
+}
+
+double yawFromPose(const geometry_msgs::msg::Pose & pose)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return yaw;
+}
+}  // namespace
 
 WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 : node_(std::make_shared<rclcpp::Node>("wordle_bot_control_node", options)),
@@ -129,14 +177,18 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 
   if (!node_->has_parameter("pick_place.task_solution_target_count"))
     node_->declare_parameter<int>("pick_place.task_solution_target_count", 15);
+  if (!node_->has_parameter("pick_place.backend"))
+    node_->declare_parameter<std::string>("pick_place.backend", "move_group");
   if (!node_->has_parameter("pick_place.grasp_max_ik_solutions"))
     node_->declare_parameter<int>("pick_place.grasp_max_ik_solutions", 32);
   if (!node_->has_parameter("pick_place.place_max_ik_solutions"))
     node_->declare_parameter<int>("pick_place.place_max_ik_solutions", 32);
   if (!node_->has_parameter("pick_place.grasp_min_solution_distance"))
-    node_->declare_parameter<double>("pick_place.grasp_min_solution_distance", 1.0);
+    node_->declare_parameter<double>("pick_place.grasp_min_solution_distance", 0.10);
   if (!node_->has_parameter("pick_place.place_min_solution_distance"))
-    node_->declare_parameter<double>("pick_place.place_min_solution_distance", 1.0);
+    node_->declare_parameter<double>("pick_place.place_min_solution_distance", 0.10);
+  if (!node_->has_parameter("pick_place.grasp_angle_delta"))
+    node_->declare_parameter<double>("pick_place.grasp_angle_delta", M_PI / 12.0);
   if (!node_->has_parameter("pick_place.cartesian_velocity_scaling"))
     node_->declare_parameter<double>("pick_place.cartesian_velocity_scaling", 0.5);
   if (!node_->has_parameter("pick_place.cartesian_acceleration_scaling"))
@@ -146,9 +198,19 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   if (!node_->has_parameter("pick_place.retreat_min_fraction"))
     node_->declare_parameter<double>("pick_place.retreat_min_fraction", 0.0);
   if (!node_->has_parameter("pick_place.move_to_pick_timeout"))
-    node_->declare_parameter<double>("pick_place.move_to_pick_timeout", 0.20);
+    node_->declare_parameter<double>("pick_place.move_to_pick_timeout", 0.50);
   if (!node_->has_parameter("pick_place.move_to_place_timeout"))
-    node_->declare_parameter<double>("pick_place.move_to_place_timeout", 0.20);
+    node_->declare_parameter<double>("pick_place.move_to_place_timeout", 0.50);
+  if (!node_->has_parameter("pick_place.solution_wrist_spin_weight"))
+    node_->declare_parameter<double>("pick_place.solution_wrist_spin_weight", 4.0);
+  if (!node_->has_parameter("pick_place.solution_wrist_spin_reject_threshold"))
+    node_->declare_parameter<double>("pick_place.solution_wrist_spin_reject_threshold", 7.0);
+  if (!node_->has_parameter("pick_place.accept_solution_score_threshold"))
+    node_->declare_parameter<double>("pick_place.accept_solution_score_threshold", 25.0);
+  if (!node_->has_parameter("pick_place.place_yaw_tolerance"))
+    node_->declare_parameter<double>("pick_place.place_yaw_tolerance", 0.0872665);
+  if (!node_->has_parameter("pick_place.place_yaw_penalty_weight"))
+    node_->declare_parameter<double>("pick_place.place_yaw_penalty_weight", 100.0);
   if (!node_->has_parameter("pick_place.approach_min_distance"))
     node_->declare_parameter<double>("pick_place.approach_min_distance", 0.05);
   if (!node_->has_parameter("pick_place.approach_max_distance"))
@@ -356,6 +418,15 @@ void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::Pi
     ? "letter_" + std::to_string(++letter_object_counter_)
     : msg->object_id;
 
+  auto normalized_pick_pose = msg->pick_pose.pose;
+  auto normalized_place_pose = msg->place_pose;
+  normalizePoseOrientation(normalized_pick_pose, "letterObjectCallback pick");
+  normalizePoseOrientation(normalized_place_pose, "letterObjectCallback place");
+  RCLCPP_INFO(LOGGER,
+    "letterObjectCallback: normalized task orientation for '%s': pick_yaw=%.3f rad, "
+    "place_yaw=%.3f rad.",
+    object_id.c_str(), yawFromPose(normalized_pick_pose), yawFromPose(normalized_place_pose));
+
   moveit_msgs::msg::CollisionObject co;
   co.id = object_id;
   co.header.frame_id = incoming_frame;
@@ -366,11 +437,11 @@ void WordleBotControlNode::letterObjectCallback(const wordlebot_control::msg::Pi
   box.type = shape_msgs::msg::SolidPrimitive::BOX;
   box.dimensions = {0.05, 0.05, 0.05};
   co.primitives.push_back(box);
-  co.primitive_poses.push_back(msg->pick_pose.pose);
+  co.primitive_poses.push_back(normalized_pick_pose);
 
   WordleBotController::PickPlaceEntry entry;
-  entry.pick_pose = msg->pick_pose.pose;
-  entry.place_pose = msg->place_pose;
+  entry.pick_pose = normalized_pick_pose;
+  entry.place_pose = normalized_place_pose;
   entry.collision_object = co;
   entry.object_id = object_id;
 
@@ -566,6 +637,19 @@ void WordleBotControlNode::missionLoop()
         RCLCPP_INFO(LOGGER, "  Added collision object '%s'.", entry.object_id.c_str());
       }
 
+      std::string pick_place_backend =
+        node_->get_parameter("pick_place.backend").as_string();
+      if (pick_place_backend != "mtc" && pick_place_backend != "move_group") {
+        RCLCPP_WARN(LOGGER,
+          "Mission: unsupported pick_place.backend='%s'; defaulting to 'move_group'.",
+          pick_place_backend.c_str());
+        pick_place_backend = "move_group";
+      }
+
+      if (pick_place_backend == "mtc") {
+        RCLCPP_INFO(LOGGER,
+          "Mission: pick-and-place backend is MTC — planning all tasks before execution.");
+
       // ── Phase 1: Plan all tasks sequentially, chaining via FixedState ───────
       std::vector<WordleBotController::PlannedPickPlace> planned_tasks;
       planned_tasks.reserve(current_tasks.size());
@@ -651,6 +735,51 @@ void WordleBotControlNode::missionLoop()
           RCLCPP_INFO(LOGGER, "Pick-and-place mission fully complete.");
         } else {
           RCLCPP_ERROR(LOGGER, "Pick-and-place mission did not complete fully.");
+        }
+      }
+      } else {
+        RCLCPP_INFO(LOGGER,
+          "Mission: pick-and-place backend is MoveGroupInterface — planning and executing each task live.");
+
+        bool all_ok = true;
+        for (std::size_t i = 0; i < current_tasks.size(); ++i) {
+          if (stop_requested_.load()) {
+            RCLCPP_INFO(LOGGER,
+              "Pick-and-place mission (MGI): stop requested before task %zu — aborting.",
+              i + 1);
+            pp_resume_from = i;
+            all_ok = false;
+            break;
+          }
+
+          const bool is_last = (i == current_tasks.size() - 1);
+          RCLCPP_INFO(LOGGER,
+            "Pick-and-place mission (MGI): executing task %zu of %zu: '%s' (return_working=%s).",
+            i + 1, current_tasks.size(), current_tasks[i].object_id.c_str(),
+            is_last ? "yes" : "no");
+
+          if (!controller_->executePickAndPlaceMoveGroup(current_tasks[i], is_last) ||
+              stop_requested_.load()) {
+            RCLCPP_ERROR(LOGGER,
+              "Pick-and-place mission (MGI): FAILED at task %zu ('%s').",
+              i + 1, current_tasks[i].object_id.c_str());
+            pp_resume_from = i;
+            all_ok = false;
+            break;
+          }
+
+          goal_reached_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER,
+            "Pick-and-place mission (MGI): task %zu of %zu complete.",
+            i + 1, current_tasks.size());
+        }
+
+        if (all_ok && !stop_requested_.load()) {
+          mission_complete_pub_->publish(signal);
+          motion_complete_pub_->publish(signal);
+          RCLCPP_INFO(LOGGER, "Pick-and-place mission (MGI): fully complete.");
+        } else {
+          RCLCPP_ERROR(LOGGER, "Pick-and-place mission (MGI): did not complete fully.");
         }
       }
 
