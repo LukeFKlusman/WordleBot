@@ -14,8 +14,7 @@ find_package(rviz_common REQUIRED)
 find_package(rviz_rendering REQUIRED)
 find_package(rviz_default_plugins REQUIRED)
 
-find_package(Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt5WebEngineWidgets QUIET)
+find_package(Qt5 REQUIRED COMPONENTS Widgets WebEngineWidgets)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -56,10 +55,8 @@ target_link_libraries(interaction_execution_node
   ${OpenCV_LIBRARIES}
 )
 
-if(Qt5WebEngineWidgets_FOUND)
-  target_compile_definitions(interaction_execution_node PRIVATE HAS_QT_WEBENGINE)
-  target_link_libraries(interaction_execution_node Qt5::WebEngineWidgets)
-endif()
+target_compile_definitions(interaction_execution_node PRIVATE HAS_QT_WEBENGINE)
+target_link_libraries(interaction_execution_node Qt5::WebEngineWidgets)
 
 add_executable(mission_coordinator_node
   include/interaction_execution/mission_coordinator.hpp
