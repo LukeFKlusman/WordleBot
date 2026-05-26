@@ -170,6 +170,7 @@ private:
   SafetyControlMode safety_mode_{SafetyControlMode::Idle};
   QStringList wordle_dictionary_;
   QString coordinator_mission_state_{QStringLiteral("IDLE")};
+  QString current_robot_state_{QStringLiteral("IDLE")};
   QString current_perception_state_{QStringLiteral("IDLE")};
   QString current_perception_status_{QStringLiteral("UNKNOWN")};
   QString current_wordle_status_{QStringLiteral("UNKNOWN")};
@@ -185,7 +186,6 @@ private:
   bool voice_result_pending_{false};
   bool human_detected_{false};
   bool scan_game_board_active_{false};
-  bool scan_game_board_return_stopped_{false};
   int voice_retry_rejections_{0};
   WordleGameMode current_wordle_mode_{WordleGameMode::Unset};
   QString pending_voice_guess_;

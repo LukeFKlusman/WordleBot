@@ -1585,22 +1585,37 @@ void MainWindow::setupSafetyControls()
     kRobotStateTopic,
     10,
     [this](const std_msgs::msg::String::SharedPtr msg) {
-      if (msg == nullptr || !scan_game_board_active_) {
+      if (msg == nullptr) {
         return;
       }
 
       const QString robot_state = QString::fromStdString(msg->data).trimmed().toUpper();
-      if (robot_state != "IDLE") {
+      if (robot_state.isEmpty()) {
+        return;
+      }
+      if (robot_state == current_robot_state_ && !(robot_state == "IDLE" && scan_game_board_active_)) {
         return;
       }
 
-      const bool return_to_stopped = scan_game_board_return_stopped_;
-      scan_game_board_active_ = false;
-      scan_game_board_return_stopped_ = false;
-      publishMissionState("IDLE");
-      coordinator_mission_state_ = return_to_stopped ? "STOPPED" : "IDLE";
-      safety_mode_ = return_to_stopped ? SafetyControlMode::Stopped : SafetyControlMode::Idle;
-      appendDiagnosticsEvent(tr("Scan game board complete"));
+      current_robot_state_ = robot_state;
+
+      if (robot_state == "IDLE" && scan_game_board_active_) {
+        scan_game_board_active_ = false;
+        publishMissionState("IDLE");
+        appendDiagnosticsEvent(tr("Scan game board complete"));
+      }
+
+      if (robot_state == "IDLE") {
+        coordinator_mission_state_ = "IDLE";
+        safety_mode_ = SafetyControlMode::Idle;
+      } else if (robot_state == "STOPPED") {
+        coordinator_mission_state_ = "STOPPED";
+        safety_mode_ = SafetyControlMode::Stopped;
+      } else if (robot_state == "RUNNING") {
+        safety_mode_ = SafetyControlMode::Active;
+      }
+
+      appendDiagnosticsEvent(tr("Robot state changed to %1").arg(current_robot_state_));
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });
@@ -1632,7 +1647,6 @@ void MainWindow::setupSafetyControls()
       publishMissionState("IDLE");
       publishMissionCommand("STOP");
       scan_game_board_active_ = false;
-      scan_game_board_return_stopped_ = false;
       coordinator_mission_state_ = "STOPPED";
       safety_mode_ = SafetyControlMode::Stopped;
       appendDiagnosticsEvent(tr("Safety stop triggered by human detection"));
@@ -1651,7 +1665,8 @@ void MainWindow::setupSafetyControls()
       return;
     }
 
-    const bool resume_requested = safety_mode_ == SafetyControlMode::Stopped;
+    const bool resume_requested =
+      current_robot_state_ == "RUNNING" || current_robot_state_ == "STOPPED";
     publishMissionCommand(resume_requested ? "RESUME" : "START");
     publishMissionSignal(
       resume_requested ? resume_mission_pub_ : start_mission_pub_,
@@ -1672,7 +1687,6 @@ void MainWindow::setupSafetyControls()
     publishMissionState("IDLE");
     publishMissionCommand("STOP");
     scan_game_board_active_ = false;
-    scan_game_board_return_stopped_ = false;
     coordinator_mission_state_ = "STOPPED";
     safety_mode_ = SafetyControlMode::Stopped;
     appendDiagnosticsEvent(tr("Operator command: STOP"));
@@ -1691,7 +1705,6 @@ void MainWindow::setupSafetyControls()
       return;
     }
 
-    scan_game_board_return_stopped_ = safety_mode_ == SafetyControlMode::Stopped;
     scan_game_board_active_ = true;
     publishMissionState("SCANNING");
     publishScanAndSweep();
@@ -1736,9 +1749,10 @@ void MainWindow::updateSafetyControlsState()
     !human_detected_ &&
     (safety_mode_ == SafetyControlMode::Idle || safety_mode_ == SafetyControlMode::Stopped);
   const bool can_home = !human_detected_ && safety_mode_ == SafetyControlMode::Stopped;
+  const bool show_resume =
+    current_robot_state_ == "RUNNING" || current_robot_state_ == "STOPPED";
 
-  ui_->pushButton->setText(
-    safety_mode_ == SafetyControlMode::Stopped ? tr("RESUME") : tr("START"));
+  ui_->pushButton->setText(show_resume ? tr("RESUME") : tr("START"));
   ui_->pushButton->setEnabled(can_start_or_resume);
   ui_->pushButton_4->setEnabled(can_stop);
   ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));

@@ -9,7 +9,7 @@
 
 namespace
 {
-constexpr const char * kCameraTopicDefault = "/camera/color/image_raw/not";
+constexpr const char * kCameraTopicDefault = "/camera/color/image_raw";
 }
 
 CameraView::CameraView(rclcpp::Node::SharedPtr node, QWidget * parent)

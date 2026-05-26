@@ -50,3 +50,7 @@ ros2 topic pub --once /wordle_bot/set_mission geometry_msgs/msg/PoseArray \
   "{header: {frame_id: 'world'}, poses: [{position: {x: 0.0, y: 0.225, z: 0.1}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}]}"
 
 ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
+
+
+FIX SCANNING GREEN TEXT
+wordlebot_control.rviz
