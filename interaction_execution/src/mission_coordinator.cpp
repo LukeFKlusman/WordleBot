@@ -19,7 +19,7 @@ constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
 constexpr const char * kStopMissionTopic = "/wordle_bot/stop_mission";
 constexpr const char * kResumeMissionTopic = "/wordle_bot/resume_mission";
 constexpr const char * kAbortMissionTopic = "/wordle_bot/abort_mission";
-constexpr const char * kMotionCompleteTopic = "/wordle_bot/motion_complete";
+constexpr const char * kMissionCompleteTopic = "/wordle_bot/mission_complete";
 
 std::string jsonEscape(const std::string & value)
 {
@@ -93,9 +93,9 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
   perception_detections_sub_ = this->create_subscription<std_msgs::msg::String>(
     kPerceptionDetectionsTopic, 10,
     std::bind(&MissionCoordinator::handlePerceptionDetections, this, std::placeholders::_1));
-  motion_complete_sub_ = this->create_subscription<std_msgs::msg::Bool>(
-    kMotionCompleteTopic, 10,
-    std::bind(&MissionCoordinator::handleMotionComplete, this, std::placeholders::_1));
+  mission_complete_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+    kMissionCompleteTopic, 10,
+    std::bind(&MissionCoordinator::handleMissionComplete, this, std::placeholders::_1));
 
   state_entered_time_ = this->now();
   last_detection_time_ = state_entered_time_;
@@ -116,7 +116,7 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
     kHumanDetectedTopic,
     kPerceptionStatusTopic,
     kPerceptionDetectionsTopic,
-    kMotionCompleteTopic);
+    kMissionCompleteTopic);
 }
 
 void MissionCoordinator::handleMissionCommand(const std_msgs::msg::String::SharedPtr msg)
@@ -181,13 +181,13 @@ void MissionCoordinator::handlePerceptionDetections(const std_msgs::msg::String:
   }
 }
 
-void MissionCoordinator::handleMotionComplete(const std_msgs::msg::Bool::SharedPtr msg)
+void MissionCoordinator::handleMissionComplete(const std_msgs::msg::Bool::SharedPtr msg)
 {
   if (msg == nullptr || !msg->data) {
     return;
   }
 
-  motion_complete_received_ = true;
+  mission_complete_received_ = true;
 }
 
 void MissionCoordinator::handleHeartbeat()
@@ -329,7 +329,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
 
   if (command == "START") {
     motion_goal_sent_ = false;
-    motion_complete_received_ = false;
+    mission_complete_received_ = false;
     awaiting_motion_completion_ = false;
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
@@ -352,7 +352,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   }
 
   if (command == "RESUME") {
-    motion_complete_received_ = false;
+    mission_complete_received_ = false;
     awaiting_motion_completion_ = false;
     motion_goal_sent_ = false;
     last_completed_goal_request_ = GoalRequest::NONE;
@@ -401,11 +401,11 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
 
 MissionCoordinator::NodeStatus MissionCoordinator::tickMotionBranch()
 {
-  if (motion_complete_received_) {
-    motion_complete_received_ = false;
+  if (mission_complete_received_) {
+    mission_complete_received_ = false;
 
     if (!awaiting_motion_completion_) {
-      RCLCPP_INFO(this->get_logger(), "Received motion complete while not awaiting motion completion.");
+      RCLCPP_INFO(this->get_logger(), "Received mission complete while not awaiting mission completion.");
       return NodeStatus::SUCCESS;
     }
 
@@ -640,7 +640,7 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
     "execute",
     "Execute robot motion",
     state_ == MissionState::MOVING ?
-      "Robot motion is in progress. Continue safety checks until motion_complete is received." :
+      "Robot motion is in progress. Continue safety checks until mission_complete is received." :
       (state_ == MissionState::MOTION_FAILED ?
         "Motion completion timed out. The coordinator requested a robot stop." :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?

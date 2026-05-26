@@ -57,7 +57,7 @@ private:
   void handleHumanDetected(const std_msgs::msg::Bool::SharedPtr msg);
   void handlePerceptionStatus(const std_msgs::msg::String::SharedPtr msg);
   void handlePerceptionDetections(const std_msgs::msg::String::SharedPtr msg);
-  void handleMotionComplete(const std_msgs::msg::Bool::SharedPtr msg);
+  void handleMissionComplete(const std_msgs::msg::Bool::SharedPtr msg);
   void handleHeartbeat();
 
   void tickTree();
@@ -93,7 +93,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr human_detected_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_status_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_detections_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motion_complete_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_complete_sub_;
 
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr perception_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
@@ -115,7 +115,7 @@ private:
   int scan_retry_count_{0};
   bool human_detected_{false};
   bool motion_goal_sent_{false};
-  bool motion_complete_received_{false};
+  bool mission_complete_received_{false};
   bool awaiting_motion_completion_{false};
   bool safety_stop_published_{false};
   bool motion_timeout_stop_published_{false};

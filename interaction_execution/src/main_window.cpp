@@ -57,7 +57,7 @@ namespace
 constexpr const char * kPerceptionStateTopic = "/mission/state";
 constexpr const char * kCoordinatorMissionStateTopic = "/wordle_bot/mission_state";
 constexpr const char * kRobotStateTopic = "/wordle_bot/robot_state";
-constexpr const char * kMotionCompleteTopic = "/wordle_bot/motion_complete";
+constexpr const char * kMissionCompleteTopic = "/wordle_bot/mission_complete";
 constexpr const char * kMissionProgressTopic = "/wordle_bot/mission_progress";
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
 constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
@@ -1592,8 +1592,8 @@ void MainWindow::setupSafetyControls()
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });
-  motion_complete_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
-    kMotionCompleteTopic,
+  mission_complete_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    kMissionCompleteTopic,
     10,
     [this](const std_msgs::msg::Bool::SharedPtr msg) {
       if (msg == nullptr || !msg->data) {
@@ -1603,7 +1603,7 @@ void MainWindow::setupSafetyControls()
       scan_game_board_active_ = false;
       current_robot_state_ = "IDLE";
       applyCoordinatorMissionState("IDLE", true);
-      appendDiagnosticsEvent(tr("Motion complete"));
+      appendDiagnosticsEvent(tr("Mission complete"));
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });

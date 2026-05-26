@@ -212,7 +212,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_detections_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_state_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_state_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motion_complete_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr mission_complete_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_progress_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_guess_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_diagnostics_sub_;
