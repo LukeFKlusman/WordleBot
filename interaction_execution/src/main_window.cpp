@@ -1693,6 +1693,7 @@ void MainWindow::setupSafetyControls()
       publishMissionSignal(resume_mission_pub_, kResumeMissionTopic);
       applyCoordinatorMissionState("MOVING", false);
     } else {
+      publishMissionSignal(start_mission_pub_, kStartMissionTopic);
       applyCoordinatorMissionState("SCANNING", false);
     }
     appendDiagnosticsEvent(
