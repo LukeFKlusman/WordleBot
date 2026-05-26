@@ -50,7 +50,7 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
   this->declare_parameter<bool>("auto_dispatch_motion", false);
   this->declare_parameter<int>("minimum_detected_blocks", 1);
   this->declare_parameter<int>("max_scan_retries", 1);
-  this->declare_parameter<double>("perception_timeout_s", 10.0);
+  this->declare_parameter<double>("perception_timeout_s", 0.0);
   this->declare_parameter<double>("motion_timeout_s", 20.0);
   this->declare_parameter<std::string>("goal_frame_id", "ur_base_link");
   this->declare_parameter<std::string>("home_frame_id", "ur_base_link");
