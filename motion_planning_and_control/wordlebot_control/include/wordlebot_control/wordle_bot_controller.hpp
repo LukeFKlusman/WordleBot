@@ -27,6 +27,7 @@
 #include <moveit/task_constructor/solvers.h>
 #include <moveit/planning_scene/planning_scene.h>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
+#include <moveit/collision_detection/collision_common.h>
 
 
 class WordleBotController
@@ -117,6 +118,13 @@ public:
                       const geometry_msgs::msg::Pose & place_pose,
                       const std::string & object_id);
 
+  // Execute one pick-and-place operation with MoveGroupInterface as a sequence
+  // of live plan/execute phases. The incoming pick/place poses are used as exact
+  // gripper_tcp targets. include_return_working returns to the configured
+  // working pose after the final task in a batch.
+  bool executePickAndPlaceMoveGroup(const PickPlaceEntry & entry,
+                                    bool include_return_working);
+
   // ---------------------------------------------------------------------------
   // Goal Navigation
   // ---------------------------------------------------------------------------
@@ -164,11 +172,19 @@ public:
   // Move the arm to the working pose defined in config/wordle_bot_controller.yaml.
   bool returnToWorkingPose();
 
-  // Open the gripper using an MTC MoveTo stage with the SRDF "open" named state.
-  bool openGripper();
+  // Open the gripper to the SRDF "open" named state (hardware limit, full travel).
+  bool openGripperFull();
 
-  // Close the gripper using an MTC MoveTo stage with the SRDF "closed" named state.
-  bool closeGripper();
+  // Close the gripper to the SRDF "closed" named state (hardware limit, full travel).
+  bool closeGripperFull();
+
+  // Open the gripper to the operational pick/place width (pick_place.gripper_open_operational_width).
+  // Publishes directly to /onrobot/finger_width_controller/commands.
+  bool openGripperOperational();
+
+  // Close the gripper to the operational pick/place width (pick_place.gripper_closed_operational_width).
+  // Publishes directly to /onrobot/finger_width_controller/commands.
+  bool closeGripperOperational();
 
   // Returns true if the gripper joint positions are closer to the "closed" SRDF named state
   // than to the "open" state. Returns false on any state-monitor failure (safe default = open).
@@ -251,6 +267,32 @@ public:
 
 private:
   // ---------------------------------------------------------------------------
+  // Velocity scaling
+  // ---------------------------------------------------------------------------
+
+  struct VelocityScalingProfiles {
+    double scan_vel, scan_acc;
+    double precise_vel, precise_acc;
+    double transit_vel, transit_acc;
+    double near_threshold, far_threshold;
+  };
+
+  VelocityScalingProfiles vel_profiles_;
+
+  // Load all eight velocity_scaling parameters from config into vel_profiles_.
+  void loadVelocityScalingProfiles();
+
+  // Return the minimum Euclidean distance (metres) from the robot's current
+  // configuration to the nearest collision object in the planning scene.
+  double queryCurrentStateMinDistance() const;
+
+  // Linearly interpolate the transit velocity scaling factor based on distance d:
+  //   d >= far_threshold  → transit_vel
+  //   d <= near_threshold → precise_vel
+  //   in between          → linear ramp
+  double computeTransitScaling(double d) const;
+
+  // ---------------------------------------------------------------------------
   // Internal MTC task builders
   // ---------------------------------------------------------------------------
 
@@ -292,6 +334,13 @@ private:
   // Move the end-effector to target_pose via computeCartesianPath.
   // Falls back to moveToGoal if the achieved fraction < kCartesianMinFraction.
   bool moveCartesianToWaypoint(const geometry_msgs::msg::Pose & target_pose);
+
+  // Cartesian helper with explicit velocity profile for non-scan use cases.
+  bool moveCartesianToWaypointWithScaling(const geometry_msgs::msg::Pose & target_pose,
+                                          double velocity_scaling,
+                                          double acceleration_scaling,
+                                          double min_fraction,
+                                          const std::string & context);
 
   // Shift wrist_3 trajectory positions by whole revolutions so the first
   // commanded point is numerically close to the live continuous-joint state.

@@ -96,7 +96,7 @@ ros2 topic pub --once /wordle_bot/goal_pose geometry_msgs/msg/PoseStamped \
 
 # Or: load a multi-goal mission then start it in two steps
 ros2 topic pub --once /wordle_bot/set_mission geometry_msgs/msg/PoseArray \
-  "{header: {frame_id: 'world'}, poses: [{position: {x: 0.0, y: 0.225, z: 0.1}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}]}"
+  "{header: {frame_id: 'world'}, poses: [{position: {x: 0.3, y: 0.15, z: 0.175}, orientation: {x: 1.0, y: 0.0, z: -0.6820, w: 0.7320}}]}"
 
 ros2 topic pub --once /wordle_bot/start_mission std_msgs/msg/Bool "{data: true}"
 ```
@@ -136,9 +136,20 @@ ros2 topic pub --once /wordle_bot/add_collision_object moveit_msgs/msg/Collision
 ### Send a letter/wordle object for pick-and-place
 
 This triggers the pick-and-place sequence using the custom `PickPlaceTask` message.
-`pick_pose` is the object's pose in the `world` frame; `place_pose` is the target pose in the `world` frame; `object_id` is the MoveIt collision object ID (e.g. `C_object_1`).
+`pick_pose` and `place_pose` are provided in the `world` frame; `object_id` is the MoveIt collision object ID (e.g. `C_object_1`).
+With the default `move_group` backend these poses are treated as exact `gripper_tcp` targets. With the `mtc` backend they retain the existing MTC object-pose semantics.
 
 > In normal operation this is published automatically by `hl_control_node`. Use the command below only for direct testing without the HL control layer.
+
+Pick-and-place has two selectable backends in `config/wordle_bot_controller.yaml`:
+
+```yaml
+pick_place:
+  backend: "move_group"  # default exact-pose sequential backend
+  # backend: "mtc"       # existing MoveIt Task Constructor plan-all-then-execute backend
+```
+
+`move_group` plans and executes each phase live, so it can use the requested pick/place orientations directly. `mtc` keeps the staged MTC task visualization and whole-task planning behavior, but requested pick/place orientation control has proven unreliable for this application.
 
 ```bash
 ros2 topic pub --once /perception/letter_objects wordlebot_control/msg/PickPlaceTask \
@@ -182,4 +193,114 @@ python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_
 
 # Run TC1.6 in isolation: Pick and Place 
 python3 -m pytest src/wordlebot_control/test/tc1_key_control_concepts.py -k tc1_6 -s -v
+```
+```bash
+ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
+  "{letters: [
+    {letter: 'C', object_id: 'C_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.15, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
+    {letter: 'R', object_id: 'R_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.30, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
+    {letter: 'A', object_id: 'A_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.075, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.389, w: 0.921}}}},
+    {letter: 'N', object_id: 'N_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'E', object_id: 'E_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.150, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}
+  ]}"
+
+ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRANE'}"
+```
+
+```bash
+ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
+  "{letters: [
+    {letter: 'A', object_id: 'A_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.15, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
+    {letter: 'R', object_id: 'R_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.30, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
+    {letter: 'B', object_id: 'B_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.225, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'C', object_id: 'C_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.075, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.389, w: 0.921}}}},
+    {letter: 'N', object_id: 'N_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'X', object_id: 'X_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'E', object_id: 'E_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.150, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}
+  ]}"
+
+ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRANE'}"
+```
+
+```bash
+ros2 topic pub --once /wordle_bot/clear_letter_objects std_msgs/msg/Bool "{data: true}"
+
+ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
+  "{letters: [
+    {letter: 'A', object_id: 'A_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.15, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
+    {letter: 'R', object_id: 'R_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.30, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
+    {letter: 'B', object_id: 'B_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.225, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'C', object_id: 'C_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.075, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.389, w: 0.921}}}},
+    {letter: 'N', object_id: 'N_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'X', object_id: 'X_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'E', object_id: 'E_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.150, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}},
+    {letter: 'W', object_id: 'W_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.15, y: 0.225, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}},
+    {letter: 'D', object_id: 'D_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.0, y: 0.225, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}}
+
+  ]}"
+
+ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRANE'}"
 ```

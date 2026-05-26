@@ -100,10 +100,25 @@ class HLControlNode(Node, RLTaskOptimiser):
 
     def _board_callback(self, msg: GameboardState) -> None:
         self._board_letters = []
-        for lo in msg.letters:
+        seen_object_ids: set[str] = set()
+        for index, lo in enumerate(msg.letters, start=1):
+            letter = lo.letter.strip().upper()
+            requested_object_id = lo.object_id.strip()
+            object_id = requested_object_id or f'{letter or "block"}_object_{index}'
+            if object_id in seen_object_ids:
+                base_id = object_id
+                suffix = 2
+                while f'{base_id}_{suffix}' in seen_object_ids:
+                    suffix += 1
+                object_id = f'{base_id}_{suffix}'
+                self.get_logger().warn(
+                    f'Duplicate object_id "{base_id}" in GameboardState; '
+                    f'using "{object_id}" for letter "{letter}".')
+            seen_object_ids.add(object_id)
+
             self._board_letters.append({
-                'letter':    lo.letter.strip().upper(),
-                'object_id': lo.object_id,
+                'letter':    letter,
+                'object_id': object_id,
                 'x':         lo.pose.pose.position.x,
                 'y':         lo.pose.pose.position.y,
                 'z':         lo.pose.pose.position.z,
@@ -147,7 +162,9 @@ class HLControlNode(Node, RLTaskOptimiser):
             self.get_logger().info(
                 f"  Step {task['step']}: {task['description']} | "
                 f"pick=({task['pick_x']:.3f},{task['pick_y']:.3f},{task['pick_z']:.3f}) "
+                f"pick_q=({task['pick_qx']:.3f},{task['pick_qy']:.3f},{task['pick_qz']:.3f},{task['pick_qw']:.3f}) "
                 f"place=({task['place_x']:.3f},{task['place_y']:.3f},{task['place_z']:.3f}) "
+                f"place_q=(1.000,0.000,0.000,0.000) "
                 f"id='{task['object_id']}'"
             )
 
@@ -203,7 +220,10 @@ class HLControlNode(Node, RLTaskOptimiser):
             msg.place_pose.position.x = task['place_x']
             msg.place_pose.position.y = task['place_y']
             msg.place_pose.position.z = task['place_z']
-            msg.place_pose.orientation.w = 1.0
+            msg.place_pose.orientation.x = 1.0  # EE pointing down: roll=π, pitch=0, yaw=0
+            msg.place_pose.orientation.y = 0.0
+            msg.place_pose.orientation.z = 0.0
+            msg.place_pose.orientation.w = 0.0
 
             msg.object_id = task['object_id']
 

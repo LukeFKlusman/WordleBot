@@ -86,6 +86,15 @@ CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-
 CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
 
 ENABLE_HUMAN_DETECTION = False
+
+# ── Out-of-category and scene reprocessing ────────────────
+# OUT_OF_CATEGORY: flag blocks that pass depth/area filters
+# but CNN confidence is below this on ALL classes — not a letter block
+OUT_OF_CATEGORY_CONF_MAX = 20.0   # if max conf across all classes < this, flag as unknown object
+
+# SCENE_CHANGE: if detected block count changes by this many
+# between scans, flag the scene as changed and clear gameboard state
+SCENE_CHANGE_THRESHOLD = 1
 # ─────────────────────────────────────────────────────────
 
 import cv2
@@ -546,12 +555,23 @@ class Perception:
                     letter = None
                     conf = 0.0
 
-                detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot))
+                # Out-of-category detection — object passed depth/area filter
+                # but CNN is not confident it's any known letter/digit
+                out_of_category = (letter is None and conf < OUT_OF_CATEGORY_CONF_MAX)
+
+                detections.append((x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot, out_of_category))
             self.last_detections = detections
 
         # ── Draw detection boxes ──────────────────────────
-        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.last_detections:
-            box_color = (0, 200, 255) if self.at_position else (100, 100, 100)
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot, out_of_category) in self.last_detections:
+            # Red box for out-of-category, cyan for normal AT POSITION, grey for MOVING
+            if out_of_category:
+                box_color = (0, 0, 255)   # red — unknown object
+            elif self.at_position:
+                box_color = (0, 200, 255) # cyan — reading
+            else:
+                box_color = (100, 100, 100) # grey — stale
+
             depth_str = f" {z_m:.2f}m" if z_m else ""
 
             cv2.rectangle(frame, (x,y), (x+w,y+h), box_color, 2)
@@ -561,7 +581,11 @@ class Perception:
                 cv2.circle(frame, smoothed_dot, 6, (0, 255, 0), -1)
                 cv2.circle(frame, smoothed_dot, 8, (0, 0, 0), 1)
 
-            if letter:
+            if out_of_category:
+                label = f"UNKNOWN{depth_str} r{theta:.0f}deg"
+                cv2.putText(frame, label, (x+4, y+h//2+8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+            elif letter:
                 label = f"{letter} {conf:.0f}%{depth_str} r{theta:.0f}deg {'[dot]' if dot_found else '[rect]'}"
                 (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
                 cv2.rectangle(frame, (x, y-th-bl-6), (x+tw+4, y), box_color, -1)
@@ -571,9 +595,7 @@ class Perception:
                 low = f"?{depth_str} ({conf:.0f}%) r{theta:.0f}deg {'[dot]' if dot_found else '[rect]'}"
                 cv2.putText(frame, low, (x+4, y+h//2+8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
-            
-            
-            
+
 
         # ── HUD ───────────────────────────────────────────
         status_color = (0,255,100) if self.at_position else (0,100,255)
@@ -627,16 +649,28 @@ class Perception:
         If depth is unavailable for a block, x_m/y_m/z_m will be null.
         """
         blocks = []
-        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.last_detections:
+        letter_counts = {}
+        unknown_count = 0
+        for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot, out_of_category) in self.last_detections:
             if letter:
-                blocks.append({
-                    "letter":    letter,
-                    "conf":      round(conf, 1),
-                    "x_m":       x_m,
-                    "y_m":       y_m,
-                    "z_m":       z_m,
-                    "theta_deg": theta,
-                })
+                letter_counts[letter] = letter_counts.get(letter, 0) + 1
+                object_id = f"{letter}_object_{letter_counts[letter]}"
+            else:
+                unknown_count += 1
+                object_id = f"unknown_object_{unknown_count}"
+
+            blocks.append({
+                "object_id":         object_id,
+                "letter":            letter,
+                "conf":              round(conf, 1) if conf else 0.0,
+                "x_m":               x_m,
+                "y_m":               y_m,
+                "z_m":               z_m,
+                "theta_deg":         theta,
+                "rotation_required": theta,
+                "dot_found":         dot_found,
+                "out_of_category":   out_of_category,
+            })
         return json.dumps({"blocks": blocks})
 
     def toggle_position(self):
@@ -780,6 +814,18 @@ def run_ros2():
             self.pub_annotated = self.create_publisher(
                 Image, '/perception/image_annotated', 10)
 
+            # Scene change — published when block count changes or human detected
+            # Elijah's behaviour tree subscribes to trigger re-scan
+            self.pub_scene_changed = self.create_publisher(
+                String, '/perception/scene_changed', 10)
+
+            # Out of category — published when unknown object detected in workspace
+            self.pub_out_of_category = self.create_publisher(
+                String, '/perception/out_of_category', 10)
+
+            # Track previous block count for scene change detection
+            self._prev_block_count = 0
+
             # ── Publisher — Connor's HL control interface ──
             # Latched so hl_control_node receives it regardless of startup order.
             # Published once per completed scan, not every frame.
@@ -804,6 +850,8 @@ def run_ros2():
                 '\n               /perception/status          (String, every frame)'
                 '\n               /perception/detections      (String JSON, when scanning)'
                 '\n               /perception/image_annotated (Image, for GUI CV mode)'
+                '\n               /perception/scene_changed   (String JSON, on count change)'
+                '\n               /perception/out_of_category (String JSON, unknown objects)'
                 '\n               /perception/gameboard_state (GameboardState, latched, on scan complete)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
@@ -868,13 +916,42 @@ def run_ros2():
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
 
+                    # ── Scene change detection ─────────────────────────
+                    current_block_count = len(self.perception.last_detections)
+                    if abs(current_block_count - self._prev_block_count) >= SCENE_CHANGE_THRESHOLD:
+                        scene_msg = String()
+                        scene_msg.data = (
+                            f'{{"event": "scene_changed", '
+                            f'"prev_count": {self._prev_block_count}, '
+                            f'"new_count": {current_block_count}}}'
+                        )
+                        self.pub_scene_changed.publish(scene_msg)
+                        self.get_logger().warn(
+                            f'[Scene] Block count changed: {self._prev_block_count} -> {current_block_count}')
+                    self._prev_block_count = current_block_count
+
+                    # ── Out-of-category publishing ─────────────────────
+                    unknown_objects = [
+                        d for d in self.perception.last_detections if d[12]
+                    ]
+                    if unknown_objects:
+                        ooc_msg = String()
+                        ooc_msg.data = (
+                            f'{{"event": "out_of_category", '
+                            f'"count": {len(unknown_objects)}}}'
+                        )
+                        self.pub_out_of_category.publish(ooc_msg)
+                        if self.frame_count % 30 == 0:
+                            self.get_logger().warn(
+                                f'[OOC] {len(unknown_objects)} unknown object(s) in workspace')
+
                     # Log at ~1 Hz (every 30 frames) to avoid flooding the terminal.
                     # Empty frames are silent — only logs when blocks are detected.
                     if self.frame_count % 30 == 0:
                         detections = self.perception.last_detections
                         if detections:
                             lines = []
-                            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in detections:
+                            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot, out_of_category) in detections:
                                 if not letter:
                                     continue
                                 cam_str = f'cam=({x_m:.3f}, {y_m:.3f}, {z_m:.3f})' \
@@ -1052,7 +1129,7 @@ def run_ros2():
             now    = self.get_clock().now().to_msg()
             counts = {}   # per-letter counter for unique object IDs
 
-            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot) in self.perception.last_detections:
+            for (x, y, w, h, letter, conf, x_m, y_m, z_m, theta, dot_found, smoothed_dot, out_of_category) in self.perception.last_detections:
                 if not letter:
                     continue
                 if x_m is None:

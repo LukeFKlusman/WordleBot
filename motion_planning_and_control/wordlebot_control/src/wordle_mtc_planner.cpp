@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -22,6 +23,13 @@ constexpr double kTwoPi = 2.0 * M_PI;
 const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleMtcPlanner");
 const std::vector<double> kDefaultIkJoints = {1.1345, -1.5708, 1.5708, -1.5708, -1.5708, 1.1345};
 const std::vector<double> kDefaultIkWeights = {0.3, 0.5, 0.5, 0.5, 0.3, 0.3};
+
+struct TrajectoryScore {
+  double joint_motion{0.0};
+  double wrist_spin{0.0};
+  double total{0.0};
+  bool rejected{false};
+};
 
 int getIntParam(const rclcpp::Node::SharedPtr & node, const std::string & name, int default_value)
 {
@@ -59,25 +67,62 @@ std::vector<double> getDoubleArrayParam(
   return values;
 }
 
-double computeTotalJointDisplacement(
-  const robot_trajectory::RobotTrajectory & trajectory,
-  const moveit::core::JointModelGroup * jmg)
+std::optional<std::size_t> findJointIndex(
+  const std::vector<std::string> & joint_names,
+  const std::string & joint_name)
 {
+  const auto it = std::find(joint_names.begin(), joint_names.end(), joint_name);
+  if (it == joint_names.end()) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(std::distance(joint_names.begin(), it));
+}
+
+double shortestRevoluteDelta(double from, double to)
+{
+  double delta = to - from;
+  while (delta > M_PI) {
+    delta -= kTwoPi;
+  }
+  while (delta < -M_PI) {
+    delta += kTwoPi;
+  }
+  return delta;
+}
+
+TrajectoryScore scoreTrajectory(
+  const robot_trajectory::RobotTrajectory & trajectory,
+  const moveit::core::JointModelGroup * jmg,
+  double wrist_spin_weight,
+  double wrist_spin_reject_threshold)
+{
+  TrajectoryScore score;
   if (jmg == nullptr || trajectory.getWayPointCount() < 2) {
-    return 0.0;
+    return score;
   }
 
-  double total = 0.0;
+  const auto & joint_names = jmg->getVariableNames();
+  const auto wrist2_index = findJointIndex(joint_names, "wrist_2_joint");
+  const auto wrist3_index = findJointIndex(joint_names, "wrist_3_joint");
+
   std::vector<double> prev;
   std::vector<double> curr;
   for (std::size_t i = 1; i < trajectory.getWayPointCount(); ++i) {
     trajectory.getWayPoint(i - 1).copyJointGroupPositions(jmg, prev);
     trajectory.getWayPoint(i).copyJointGroupPositions(jmg, curr);
     for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
-      total += std::abs(curr[j] - prev[j]);
+      const double delta = std::abs(shortestRevoluteDelta(prev[j], curr[j]));
+      score.joint_motion += delta;
+      if ((wrist2_index && j == *wrist2_index) || (wrist3_index && j == *wrist3_index)) {
+        score.wrist_spin += delta;
+      }
     }
   }
-  return total;
+
+  score.total = score.joint_motion + wrist_spin_weight * score.wrist_spin;
+  score.rejected =
+    wrist_spin_reject_threshold > 0.0 && score.wrist_spin > wrist_spin_reject_threshold;
+  return score;
 }
 }  // namespace
 
@@ -85,7 +130,7 @@ WordleMtcPlanner::WordleMtcPlanner(rclcpp::Node::SharedPtr node, std::string pip
 : node_(std::move(node)), pipeline_name_(std::move(pipeline_name))
 {
   const uint candidate_plans = static_cast<uint>(
-    std::max(1, getIntParam(node_, "wordle_mtc_planner.candidate_plans", 5)));
+    std::max(1, getIntParam(node_, "wordle_mtc_planner.candidate_plans", 20)));
   const uint num_planning_attempts = static_cast<uint>(
     std::max(1, getIntParam(node_, "wordle_mtc_planner.num_planning_attempts", 1)));
   const double goal_joint_tolerance =
@@ -110,6 +155,10 @@ WordleMtcPlanner::WordleMtcPlanner(rclcpp::Node::SharedPtr node, std::string pip
     getDoubleParam(node_, "wordle_mtc_planner.ik_movement_cost_weight", 2.0);
   ik_functional_cost_weight_ =
     getDoubleParam(node_, "wordle_mtc_planner.ik_functional_cost_weight", 0.3);
+  trajectory_wrist_spin_weight_ =
+    getDoubleParam(node_, "wordle_mtc_planner.trajectory_wrist_spin_weight", 4.0);
+  trajectory_wrist_spin_reject_threshold_ =
+    getDoubleParam(node_, "wordle_mtc_planner.trajectory_wrist_spin_reject_threshold", 7.0);
 
   auto & p = properties();
   p.declare<std::string>("planner", "", "planner id");
@@ -231,6 +280,13 @@ mtc::solvers::PlannerInterface::Result WordleMtcPlanner::planAndSelect(
   std::string last_error;
   robot_trajectory::RobotTrajectoryPtr best_trajectory;
   int successes = 0;
+  int rejected = 0;
+
+  RCLCPP_INFO(LOGGER,
+    "planAndSelect: planning %u OMPL candidate(s), allowed_time=%.3f s, wrist_spin_weight=%.2f, "
+    "wrist_reject_threshold=%.3f rad.",
+    candidate_count, req.allowed_planning_time, trajectory_wrist_spin_weight_,
+    trajectory_wrist_spin_reject_threshold_);
 
   for (uint attempt = 0; attempt < candidate_count; ++attempt) {
     planning_interface::MotionPlanResponse response;
@@ -244,10 +300,22 @@ mtc::solvers::PlannerInterface::Result WordleMtcPlanner::planAndSelect(
     }
 
     ++successes;
-    const double cost = computeTotalJointDisplacement(*response.trajectory_, jmg);
+    const auto score = scoreTrajectory(
+      *response.trajectory_, jmg, trajectory_wrist_spin_weight_,
+      trajectory_wrist_spin_reject_threshold_);
+    if (score.rejected) {
+      ++rejected;
+      RCLCPP_DEBUG(LOGGER,
+        "candidate %u/%u rejected: joint_motion=%.4f wrist_spin=%.4f score=%.4f.",
+        attempt + 1, candidate_count, score.joint_motion, score.wrist_spin, score.total);
+      continue;
+    }
+
+    const double cost = score.total;
     RCLCPP_DEBUG(LOGGER,
-      "candidate %u/%u cost=%.4f rad%s",
-      attempt + 1, candidate_count, cost, cost < best_cost ? " (best)" : "");
+      "candidate %u/%u accepted: joint_motion=%.4f wrist_spin=%.4f score=%.4f%s",
+      attempt + 1, candidate_count, score.joint_motion, score.wrist_spin,
+      score.total, cost < best_cost ? " (best)" : "");
     if (cost < best_cost) {
       best_cost = cost;
       best_trajectory = response.trajectory_;
@@ -255,13 +323,14 @@ mtc::solvers::PlannerInterface::Result WordleMtcPlanner::planAndSelect(
   }
 
   if (best_trajectory == nullptr) {
-    return {false, last_error.empty() ? "all candidate plans failed" : last_error};
+    return {false, rejected > 0 ? "all successful candidates were rejected by wrist-spin scoring" :
+      (last_error.empty() ? "all candidate plans failed" : last_error)};
   }
 
   result = best_trajectory;
-  RCLCPP_DEBUG(LOGGER,
-    "selected best of %d/%u successful candidate(s), cost=%.4f rad.",
-    successes, candidate_count, best_cost);
+  RCLCPP_INFO(LOGGER,
+    "planAndSelect: selected best of %d/%u successful candidate(s), rejected=%d, score=%.4f.",
+    successes, candidate_count, rejected, best_cost);
   return {true, ""};
 }
 
