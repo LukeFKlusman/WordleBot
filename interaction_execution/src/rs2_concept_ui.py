@@ -365,7 +365,7 @@ class Ui_MainWindow(object):
         self.voiceRetryButton.setText(QCoreApplication.translate("MainWindow", u"Retry", None))
         self.safetyLabel.setText(QCoreApplication.translate("MainWindow", u"SAFETY CONTROLS", None))
         self.pushButton.setText(QCoreApplication.translate("MainWindow", u"START", None))
-        self.pushButton_2.setText(QCoreApplication.translate("MainWindow", u"RESUME", None))
+        self.pushButton_2.setText(QCoreApplication.translate("MainWindow", u"SCAN GAME BOARD", None))
         self.pushButton_3.setText(QCoreApplication.translate("MainWindow", u"HOME", None))
         self.pushButton_4.setText(QCoreApplication.translate("MainWindow", u"STOP", None))
     # retranslateUi

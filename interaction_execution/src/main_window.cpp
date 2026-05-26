@@ -7,6 +7,7 @@
 #include "ui_rs2_concept.h"
 
 #include <algorithm>
+#include <mutex>
 #include <QAbstractAnimation>
 #include <QFile>
 #include <QFileInfo>
@@ -55,8 +56,10 @@ namespace
 {
 constexpr const char * kPerceptionStateTopic = "/mission/state";
 constexpr const char * kCoordinatorMissionStateTopic = "/wordle_bot/mission_state";
+constexpr const char * kRobotStateTopic = "/wordle_bot/robot_state";
 constexpr const char * kMissionProgressTopic = "/wordle_bot/mission_progress";
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
+constexpr const char * kScanAndSweepTopic = "/wordle_bot/scan_and_sweep";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 constexpr const char * kPerceptionStatusTopic = "/perception/status";
 constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
@@ -139,6 +142,8 @@ QIcon makeLaunchIcon()
 }
 
 }  // namespace
+
+std::mutex MainWindow::rviz_initialization_mutex_;
 
 MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
 : QMainWindow(parent), ui_(std::make_unique<Ui::MainWindow>()), node_(std::move(node))
@@ -371,21 +376,18 @@ void MainWindow::setupDrawer()
 
 void MainWindow::setupContentStack()
 {
-  // Create shared RViz node abstraction for both visualization managers
-  rviz_node_ = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>(
+  // Keep one embedded RViz VisualizationManager alive. RViz/Ogre registers default
+  // materials globally, so creating a second manager in this process can throw on
+  // duplicate material names such as RVIZ/Red.
+  auto rviz_sim_node = std::make_shared<rviz_common::ros_integration::RosNodeAbstraction>(
     "interaction_execution_rviz_panels");
-
-  // Sim View page
   auto * sim_layout = new QVBoxLayout(ui_->pageSimView);
   sim_layout->setContentsMargins(0, 0, 0, 0);
-  rviz_view_ = new RvizSimView(node_, rviz_node_, ui_->pageSimView);
+  rviz_view_ = new RvizSimView(node_, rviz_sim_node, ui_->pageSimView);
   sim_layout->addWidget(rviz_view_);
 
-  // MoveIt View page
   auto * moveit_layout = new QVBoxLayout(ui_->pageMoveItView);
   moveit_layout->setContentsMargins(0, 0, 0, 0);
-  rviz_moveit_view_ = new RvizMoveItView(node_, rviz_node_, ui_->pageMoveItView);
-  moveit_layout->addWidget(rviz_moveit_view_);
 
   // Camera View page
   setupCameraPage();
@@ -486,10 +488,16 @@ void MainWindow::switchToView(ActiveView view)
   active_view_ = view;
   switch (view) {
     case ActiveView::SimView:
+      if (rviz_view_) {
+        rviz_view_->setViewMode(RvizSimView::ViewMode::Sim);
+      }
       ui_->contentStack->setCurrentIndex(0);
       break;
     case ActiveView::MoveItView:
-      ui_->contentStack->setCurrentIndex(1);
+      if (rviz_view_) {
+        rviz_view_->setViewMode(RvizSimView::ViewMode::MoveIt);
+      }
+      ui_->contentStack->setCurrentIndex(0);
       break;
     case ActiveView::CameraView:
       ui_->contentStack->setCurrentIndex(2);
@@ -1490,6 +1498,9 @@ void MainWindow::setupSafetyControls()
 {
   mission_state_pub_ = node_->create_publisher<std_msgs::msg::String>(kPerceptionStateTopic, 10);
   mission_cmd_pub_ = node_->create_publisher<std_msgs::msg::String>(kMissionCommandTopic, 10);
+  scan_and_sweep_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kScanAndSweepTopic, 10);
+  ui_->pushButton->setText(tr("START"));
+  ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
   perception_state_sub_ = node_->create_subscription<std_msgs::msg::String>(
     kPerceptionStateTopic,
     rclcpp::QoS(1).reliable().transient_local(),
@@ -1548,14 +1559,21 @@ void MainWindow::setupSafetyControls()
       const QString next_state = QString::fromStdString(msg->data).trimmed().toUpper();
       const bool mission_state_changed = next_state != coordinator_mission_state_;
       coordinator_mission_state_ = next_state;
-      if (coordinator_mission_state_ == "STOPPED") {
+      if (
+        coordinator_mission_state_ == "STOPPED" ||
+        coordinator_mission_state_ == "SAFETY_STOPPED" ||
+        coordinator_mission_state_ == "PERCEPTION_FAILED" ||
+        coordinator_mission_state_ == "MOTION_FAILED" ||
+        coordinator_mission_state_ == "ERROR")
+      {
         safety_mode_ = SafetyControlMode::Stopped;
       } else if (coordinator_mission_state_ == "HOMING") {
         safety_mode_ = SafetyControlMode::Homing;
       } else if (
         coordinator_mission_state_ == "SCANNING" ||
         coordinator_mission_state_ == "READY_TO_MOVE" ||
-        coordinator_mission_state_ == "MOVING")
+        coordinator_mission_state_ == "MOVING" ||
+        coordinator_mission_state_ == "RECOVERING")
       {
         safety_mode_ = SafetyControlMode::Active;
       } else {
@@ -1565,6 +1583,29 @@ void MainWindow::setupSafetyControls()
       if (mission_state_changed) {
         appendDiagnosticsEvent(tr("Mission state changed to %1").arg(coordinator_mission_state_));
       }
+      updateSafetyControlsState();
+      refreshDiagnosticsPanel();
+    });
+  robot_state_sub_ = node_->create_subscription<std_msgs::msg::String>(
+    kRobotStateTopic,
+    10,
+    [this](const std_msgs::msg::String::SharedPtr msg) {
+      if (msg == nullptr || !scan_game_board_active_) {
+        return;
+      }
+
+      const QString robot_state = QString::fromStdString(msg->data).trimmed().toUpper();
+      if (robot_state != "IDLE") {
+        return;
+      }
+
+      const bool return_to_stopped = scan_game_board_return_stopped_;
+      scan_game_board_active_ = false;
+      scan_game_board_return_stopped_ = false;
+      publishMissionState("IDLE");
+      coordinator_mission_state_ = return_to_stopped ? "STOPPED" : "IDLE";
+      safety_mode_ = return_to_stopped ? SafetyControlMode::Stopped : SafetyControlMode::Idle;
+      appendDiagnosticsEvent(tr("Scan game board complete"));
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });
@@ -1595,6 +1636,8 @@ void MainWindow::setupSafetyControls()
         kHumanDetectedTopic);
       publishMissionState("IDLE");
       publishMissionCommand("STOP");
+      scan_game_board_active_ = false;
+      scan_game_board_return_stopped_ = false;
       coordinator_mission_state_ = "STOPPED";
       safety_mode_ = SafetyControlMode::Stopped;
       appendDiagnosticsEvent(tr("Safety stop triggered by human detection"));
@@ -1603,21 +1646,23 @@ void MainWindow::setupSafetyControls()
     });
 
   connect(ui_->pushButton, &QPushButton::clicked, this, [this]() {
-    if (safety_mode_ != SafetyControlMode::Idle) {
+    if (safety_mode_ != SafetyControlMode::Idle && safety_mode_ != SafetyControlMode::Stopped) {
       return;
     }
 
     if (human_detected_) {
-      RCLCPP_WARN(node_->get_logger(), "START blocked because a human is currently detected.");
+      RCLCPP_WARN(node_->get_logger(), "START/RESUME blocked because a human is currently detected.");
       updateSafetyControlsState();
       return;
     }
 
+    const bool resume_requested = safety_mode_ == SafetyControlMode::Stopped;
     publishMissionState("SCANNING");
-    publishMissionCommand("START");
+    publishMissionCommand(resume_requested ? "RESUME" : "START");
     coordinator_mission_state_ = "SCANNING";
     safety_mode_ = SafetyControlMode::Active;
-    appendDiagnosticsEvent(tr("Operator command: START"));
+    appendDiagnosticsEvent(
+      resume_requested ? tr("Operator command: RESUME") : tr("Operator command: START"));
     updateSafetyControlsState();
     refreshDiagnosticsPanel();
   });
@@ -1629,6 +1674,8 @@ void MainWindow::setupSafetyControls()
 
     publishMissionState("IDLE");
     publishMissionCommand("STOP");
+    scan_game_board_active_ = false;
+    scan_game_board_return_stopped_ = false;
     coordinator_mission_state_ = "STOPPED";
     safety_mode_ = SafetyControlMode::Stopped;
     appendDiagnosticsEvent(tr("Operator command: STOP"));
@@ -1637,21 +1684,23 @@ void MainWindow::setupSafetyControls()
   });
 
   connect(ui_->pushButton_2, &QPushButton::clicked, this, [this]() {
-    if (safety_mode_ != SafetyControlMode::Stopped) {
+    if (safety_mode_ != SafetyControlMode::Idle && safety_mode_ != SafetyControlMode::Stopped) {
       return;
     }
 
     if (human_detected_) {
-      RCLCPP_WARN(node_->get_logger(), "RESUME blocked because a human is currently detected.");
+      RCLCPP_WARN(node_->get_logger(), "Scan game board blocked because a human is currently detected.");
       updateSafetyControlsState();
       return;
     }
 
+    scan_game_board_return_stopped_ = safety_mode_ == SafetyControlMode::Stopped;
+    scan_game_board_active_ = true;
     publishMissionState("SCANNING");
-    publishMissionCommand("RESUME");
+    publishScanAndSweep();
     coordinator_mission_state_ = "SCANNING";
     safety_mode_ = SafetyControlMode::Active;
-    appendDiagnosticsEvent(tr("Operator command: RESUME"));
+    appendDiagnosticsEvent(tr("Operator command: SCAN GAME BOARD"));
     updateSafetyControlsState();
     refreshDiagnosticsPanel();
   });
@@ -1682,15 +1731,22 @@ void MainWindow::setupSafetyControls()
 
 void MainWindow::updateSafetyControlsState()
 {
-  const bool can_start = !human_detected_ && safety_mode_ == SafetyControlMode::Idle;
+  const bool can_start_or_resume =
+    !human_detected_ &&
+    (safety_mode_ == SafetyControlMode::Idle || safety_mode_ == SafetyControlMode::Stopped);
   const bool can_stop =
     safety_mode_ == SafetyControlMode::Active || safety_mode_ == SafetyControlMode::Homing;
-  const bool can_resume = !human_detected_ && safety_mode_ == SafetyControlMode::Stopped;
+  const bool can_scan_game_board =
+    !human_detected_ &&
+    (safety_mode_ == SafetyControlMode::Idle || safety_mode_ == SafetyControlMode::Stopped);
   const bool can_home = !human_detected_ && safety_mode_ == SafetyControlMode::Stopped;
 
-  ui_->pushButton->setEnabled(can_start);
+  ui_->pushButton->setText(
+    safety_mode_ == SafetyControlMode::Stopped ? tr("RESUME") : tr("START"));
+  ui_->pushButton->setEnabled(can_start_or_resume);
   ui_->pushButton_4->setEnabled(can_stop);
-  ui_->pushButton_2->setEnabled(can_resume);
+  ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
+  ui_->pushButton_2->setEnabled(can_scan_game_board);
   ui_->pushButton_3->setEnabled(can_home);
 
   if (human_detected_) {
@@ -1703,13 +1759,25 @@ void MainWindow::updateSafetyControlsState()
       updateSafetyBanner("SAFETY CONTROLS | IDLE", "#f2cc60");
       return;
     case SafetyControlMode::Stopped:
-      updateSafetyBanner("SAFETY CONTROLS | STOPPED", "#f85149");
+      if (coordinator_mission_state_ == "SAFETY_STOPPED") {
+        updateSafetyBanner("SAFETY CONTROLS | SAFETY STOPPED", "#f85149");
+      } else if (coordinator_mission_state_ == "PERCEPTION_FAILED") {
+        updateSafetyBanner("SAFETY CONTROLS | PERCEPTION FAILED", "#f85149");
+      } else if (coordinator_mission_state_ == "MOTION_FAILED") {
+        updateSafetyBanner("SAFETY CONTROLS | MOTION FAILED", "#f85149");
+      } else if (coordinator_mission_state_ == "ERROR") {
+        updateSafetyBanner("SAFETY CONTROLS | ERROR", "#f85149");
+      } else {
+        updateSafetyBanner("SAFETY CONTROLS | STOPPED", "#f85149");
+      }
       return;
     case SafetyControlMode::Homing:
       updateSafetyBanner("SAFETY CONTROLS | RETURN HOME", "#f2cc60");
       return;
     case SafetyControlMode::Active:
-      if (coordinator_mission_state_ == "MOVING" || coordinator_mission_state_ == "READY_TO_MOVE") {
+      if (coordinator_mission_state_ == "RECOVERING") {
+        updateSafetyBanner("SAFETY CONTROLS | RECOVERING", "#f2cc60");
+      } else if (coordinator_mission_state_ == "MOVING" || coordinator_mission_state_ == "READY_TO_MOVE") {
         updateSafetyBanner("SAFETY CONTROLS | ACTIVE", "#56d364");
       } else {
         updateSafetyBanner("SAFETY CONTROLS | SCANNING", "#56d364");
@@ -1756,6 +1824,14 @@ void MainWindow::publishMissionCommand(const std::string & command)
   msg.data = command;
   mission_cmd_pub_->publish(msg);
   RCLCPP_INFO(node_->get_logger(), "Published %s='%s'.", kMissionCommandTopic, command.c_str());
+}
+
+void MainWindow::publishScanAndSweep()
+{
+  std_msgs::msg::Bool msg;
+  msg.data = true;
+  scan_and_sweep_pub_->publish(msg);
+  RCLCPP_INFO(node_->get_logger(), "Published %s=true.", kScanAndSweepTopic);
 }
 
 void MainWindow::publishGamificationFeedback(const QString & feedback)
@@ -1914,11 +1990,11 @@ void MainWindow::setupHelpDialog()
        "  • Record: Start voice input for letter guesses\n"
        "  • Confirm: Accept the recognized letter\n"
        "  • Retry: Try voice input again\n\n"
-       "SAFETY CONTROLS\n"
-       "  • START: Begin mission (only when IDLE)\n"
-       "  • STOP: Halt all motion immediately\n"
-       "  • RESUME: Continue from pause point\n"
-       "  • HOME: Return robot to home position\n\n"
+	       "SAFETY CONTROLS\n"
+	       "  • START / RESUME: Begin mission or continue from pause point\n"
+	       "  • SCAN GAME BOARD: Trigger robot scan sweep and perception scan\n"
+	       "  • STOP: Halt all motion immediately\n"
+	       "  • HOME: Return robot to home position\n\n"
        "DIAGNOSTICS\n"
        "Access from the drawer to view:\n"
        "  • Current mission progress\n"

@@ -30,6 +30,10 @@ private:
     READY_TO_MOVE,
     MOVING,
     STOPPED,
+    SAFETY_STOPPED,
+    PERCEPTION_FAILED,
+    MOTION_FAILED,
+    RECOVERING,
     HOMING,
     ERROR
   };
@@ -58,6 +62,8 @@ private:
 
   void tickTree();
   NodeStatus tickSafetyGuard();
+  NodeStatus tickFailureDetectionBranch();
+  NodeStatus tickRecoveryBranch();
   NodeStatus tickCommandBranch();
   NodeStatus tickMotionBranch();
   NodeStatus tickScanBranch();
@@ -79,6 +85,8 @@ private:
   int countDetections(const std::string & json_payload) const;
   bool hasEnoughDetections() const;
   bool shouldAutoDispatch() const;
+  double stateElapsedSeconds() const;
+  double motionElapsedSeconds() const;
   std::string toString(MissionState state) const;
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_cmd_sub_;
@@ -104,13 +112,18 @@ private:
   std::string latest_detections_json_{R"({"blocks":[]})"};
   std::string pending_command_;
   int latest_detection_count_{0};
+  int scan_retry_count_{0};
   bool human_detected_{false};
   bool motion_goal_sent_{false};
   bool motion_complete_received_{false};
   bool awaiting_motion_completion_{false};
+  bool safety_stop_published_{false};
+  bool motion_timeout_stop_published_{false};
   GoalRequest pending_goal_request_{GoalRequest::NONE};
   GoalRequest last_dispatched_goal_request_{GoalRequest::NONE};
   GoalRequest last_completed_goal_request_{GoalRequest::NONE};
   std::string last_transition_reason_{"Awaiting operator start command"};
   rclcpp::Time last_detection_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time state_entered_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time motion_dispatched_time_{0, 0, RCL_ROS_TIME};
 };

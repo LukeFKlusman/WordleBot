@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QSizePolicy>
 #include <QVBoxLayout>
+#include <mutex>
 
 #include <exception>
 
@@ -20,6 +21,7 @@
 
 namespace
 {
+std::mutex g_rviz_initialization_mutex;
 constexpr const char * kRobotModelClassId = "rviz_default_plugins/RobotModel";
 constexpr const char * kMoveCameraToolClassId = "rviz_default_plugins/MoveCamera";
 constexpr const char * kOrbitViewClassId = "rviz_default_plugins/Orbit";
@@ -111,7 +113,8 @@ void RvizMoveItView::showEvent(QShowEvent * event)
   }
 
   rviz_initialized_ = true;
-  QTimer::singleShot(500, this, [this]() {
+  QTimer::singleShot(1500, this, [this]() {
+    std::lock_guard<std::mutex> lock(g_rviz_initialization_mutex);
     initializeRvizPanel();
     createDisplaysIfReady();
   });

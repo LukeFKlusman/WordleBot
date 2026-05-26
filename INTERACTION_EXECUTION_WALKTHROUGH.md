@@ -77,13 +77,25 @@ The mission coordinator has a tree-like decision structure with these branches:
 
 **SafetyGuard Branch:**
 - Monitors `/perception/human_detected`
-- If human detected: publish `/wordle_bot/stop_mission` and transition to STOPPED
-- If human leaves: publish `/wordle_bot/resume_mission` and transition back
+- If human detected: publish `/wordle_bot/stop_mission` and transition to SAFETY_STOPPED
+- If human leaves: transition to STOPPED and wait for RESUME or HOME
+
+**FailureDetection Branch:**
+- Detects perception timeout while SCANNING
+- Retries scanning up to `max_scan_retries`
+- Detects motion timeout while MOVING or HOMING
+- Publishes `/wordle_bot/stop_mission` and transitions to MOTION_FAILED
+
+**RecoveryBranch:**
+- Moves SAFETY_STOPPED to STOPPED once the workspace is clear
+- Restarts scanning after perception timeout while retries remain
+- Leaves exhausted failures visible for operator RESUME or HOME
 
 **CommandBranch:**
-- Monitors `/wordle_bot/mission_cmd` for operator commands: START, STOP, HOME
+- Monitors `/wordle_bot/mission_cmd` for operator commands: START, STOP, RESUME, HOME, ABORT
 - Normalizes commands to uppercase
 - Handles user input transitions
+- START begins scanning only; robot motion starts after a goal has been queued
 
 **ScanBranch:**
 - Triggers when state is SCANNING
@@ -92,10 +104,9 @@ The mission coordinator has a tree-like decision structure with these branches:
 - Counts detected letters; transitions to READY_TO_MOVE when enough detections
 
 **MotionBranch:**
-- Triggers when state is READY_TO_MOVE or MOVING
-- Monitors `/gamification/mission_state` (JSON: word + pick poses)
-- Converts mission_state to `PoseArray` and publishes to `/wordle_bot/set_mission`
-- Publishes `/wordle_bot/start_mission` = true
+- Dispatches configured task/home poses when auto dispatch is enabled
+- Publishes a `PoseArray` to `/wordle_bot/set_mission`
+- Publishes `/wordle_bot/start_mission` only after a goal has been queued
 - Waits for `/wordle_bot/motion_complete` before transitioning to IDLE
 
 #### Key Methods
@@ -103,10 +114,12 @@ The mission coordinator has a tree-like decision structure with these branches:
 | Method | Purpose |
 |--------|---------|
 | `tickTree()` | Called every 500ms; executes the full behavior tree |
-| `tickSafetyGuard()` | Checks human detection, handles emergency stop/resume |
+| `tickSafetyGuard()` | Checks human detection and publishes emergency stop |
+| `tickFailureDetectionBranch()` | Detects perception and motion timeouts |
+| `tickRecoveryBranch()` | Retries scan recovery and unlocks safety recovery |
 | `tickCommandBranch()` | Processes operator commands |
 | `tickScanBranch()` | Triggers perception scans, counts detections |
-| `tickMotionBranch()` | Converts gamification output to motion commands |
+| `tickMotionBranch()` | Dispatches queued motion and handles completion |
 | `handleMissionCommand()` | ROS2 callback for `/wordle_bot/mission_cmd` |
 | `handleHumanDetected()` | ROS2 callback for `/perception/human_detected` |
 | `handlePerceptionStatus()` | Tracks scan progress |
@@ -423,9 +436,9 @@ Rather than using a formal BT library, the coordinator implements tree logic man
 - Tree executes in sequence every 500ms via timer callback
 
 ### 2. **State Machine with Clear Transitions**
-- Explicit state enum (IDLE, SCANNING, READY_TO_MOVE, MOVING, etc.)
+- Explicit state enum (IDLE, SCANNING, READY_TO_MOVE, MOVING, SAFETY_STOPPED, PERCEPTION_FAILED, MOTION_FAILED, RECOVERING, HOMING, etc.)
 - `transitionTo()` method logs reason and publishes updates
-- Safety guards prevent invalid transitions
+- Safety guards and timeout branches prevent invalid transitions
 
 ### 3. **Message-Based Coordination**
 - No direct function calls between subsystems

@@ -49,6 +49,9 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
 {
   this->declare_parameter<bool>("auto_dispatch_motion", false);
   this->declare_parameter<int>("minimum_detected_blocks", 1);
+  this->declare_parameter<int>("max_scan_retries", 1);
+  this->declare_parameter<double>("perception_timeout_s", 10.0);
+  this->declare_parameter<double>("motion_timeout_s", 20.0);
   this->declare_parameter<std::string>("goal_frame_id", "ur_base_link");
   this->declare_parameter<std::string>("home_frame_id", "ur_base_link");
 
@@ -93,6 +96,10 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
   motion_complete_sub_ = this->create_subscription<std_msgs::msg::Bool>(
     kMotionCompleteTopic, 10,
     std::bind(&MissionCoordinator::handleMotionComplete, this, std::placeholders::_1));
+
+  state_entered_time_ = this->now();
+  last_detection_time_ = state_entered_time_;
+  motion_dispatched_time_ = state_entered_time_;
 
   heartbeat_timer_ = this->create_wall_timer(
     std::chrono::milliseconds(500),
@@ -166,6 +173,7 @@ void MissionCoordinator::handlePerceptionDetections(const std_msgs::msg::String:
     return;
   }
 
+  scan_retry_count_ = 0;
   transitionTo(MissionState::READY_TO_MOVE, "Perception returned enough detections");
 
   if (shouldAutoDispatch()) {
@@ -195,6 +203,14 @@ void MissionCoordinator::tickTree()
     return;
   }
 
+  if (tickFailureDetectionBranch() != NodeStatus::FAILURE) {
+    return;
+  }
+
+  if (tickRecoveryBranch() != NodeStatus::FAILURE) {
+    return;
+  }
+
   if (tickCommandBranch() != NodeStatus::FAILURE) {
     return;
   }
@@ -214,9 +230,92 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickSafetyGuard()
 
   pending_command_.clear();
   awaiting_motion_completion_ = false;
+  motion_goal_sent_ = false;
   pending_goal_request_ = GoalRequest::NONE;
-  transitionTo(MissionState::STOPPED, "Human detected by perception");
+  if (!safety_stop_published_) {
+    publishMissionSignal(stop_mission_pub_, kStopMissionTopic);
+    safety_stop_published_ = true;
+  }
+  transitionTo(MissionState::SAFETY_STOPPED, "Human detected by perception");
   return NodeStatus::RUNNING;
+}
+
+MissionCoordinator::NodeStatus MissionCoordinator::tickFailureDetectionBranch()
+{
+  if (state_ == MissionState::SCANNING) {
+    const double perception_timeout_s = this->get_parameter("perception_timeout_s").as_double();
+    if (perception_timeout_s > 0.0 && !hasEnoughDetections() &&
+      stateElapsedSeconds() >= perception_timeout_s)
+    {
+      pending_goal_request_ = GoalRequest::NONE;
+      motion_goal_sent_ = false;
+      awaiting_motion_completion_ = false;
+
+      const int max_scan_retries = this->get_parameter("max_scan_retries").as_int();
+      if (scan_retry_count_ < max_scan_retries) {
+        transitionTo(MissionState::RECOVERING, "Perception timed out; retrying scan");
+      } else {
+        transitionTo(MissionState::PERCEPTION_FAILED, "Perception timed out after scan retries");
+      }
+      return NodeStatus::RUNNING;
+    }
+  }
+
+  const bool motion_state =
+    state_ == MissionState::MOVING || state_ == MissionState::HOMING;
+  if (motion_state && awaiting_motion_completion_) {
+    const double motion_timeout_s = this->get_parameter("motion_timeout_s").as_double();
+    if (motion_timeout_s > 0.0 && motionElapsedSeconds() >= motion_timeout_s) {
+      if (!motion_timeout_stop_published_) {
+        publishMissionSignal(stop_mission_pub_, kStopMissionTopic);
+        motion_timeout_stop_published_ = true;
+      }
+
+      awaiting_motion_completion_ = false;
+      motion_goal_sent_ = false;
+      pending_goal_request_ = GoalRequest::NONE;
+      last_dispatched_goal_request_ = GoalRequest::NONE;
+      transitionTo(MissionState::MOTION_FAILED, "Motion completion timed out; robot stop requested");
+      return NodeStatus::RUNNING;
+    }
+  }
+
+  return NodeStatus::FAILURE;
+}
+
+MissionCoordinator::NodeStatus MissionCoordinator::tickRecoveryBranch()
+{
+  if (state_ == MissionState::SAFETY_STOPPED) {
+    if (human_detected_) {
+      return NodeStatus::RUNNING;
+    }
+
+    safety_stop_published_ = false;
+    transitionTo(MissionState::STOPPED, "Workspace clear; choose RESUME or HOME");
+    return NodeStatus::SUCCESS;
+  }
+
+  if (state_ == MissionState::RECOVERING) {
+    const int max_scan_retries = this->get_parameter("max_scan_retries").as_int();
+    if (scan_retry_count_ < max_scan_retries) {
+      ++scan_retry_count_;
+      latest_detection_count_ = 0;
+      latest_detections_json_ = R"({"blocks":[]})";
+      pending_goal_request_ = GoalRequest::NONE;
+      motion_goal_sent_ = false;
+      awaiting_motion_completion_ = false;
+      transitionTo(
+        MissionState::SCANNING,
+        "Recovery retry " + std::to_string(scan_retry_count_) + " of " +
+        std::to_string(max_scan_retries) + ": restarting scan");
+      return NodeStatus::SUCCESS;
+    }
+
+    transitionTo(MissionState::PERCEPTION_FAILED, "Perception recovery attempts exhausted");
+    return NodeStatus::SUCCESS;
+  }
+
+  return NodeStatus::FAILURE;
 }
 
 MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
@@ -235,7 +334,9 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
     last_completed_goal_request_ = GoalRequest::NONE;
-    publishMissionSignal(start_mission_pub_, kStartMissionTopic);
+    scan_retry_count_ = 0;
+    safety_stop_published_ = false;
+    motion_timeout_stop_published_ = false;
     transitionTo(MissionState::SCANNING, "Operator requested START");
     return NodeStatus::SUCCESS;
   }
@@ -243,6 +344,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   if (command == "STOP") {
     publishMissionSignal(stop_mission_pub_, kStopMissionTopic);
     awaiting_motion_completion_ = false;
+    motion_goal_sent_ = false;
     pending_goal_request_ = GoalRequest::NONE;
     last_dispatched_goal_request_ = GoalRequest::NONE;
     transitionTo(MissionState::STOPPED, "Operator requested STOP");
@@ -250,10 +352,13 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   }
 
   if (command == "RESUME") {
-    publishMissionSignal(resume_mission_pub_, kResumeMissionTopic);
     motion_complete_received_ = false;
     awaiting_motion_completion_ = false;
+    motion_goal_sent_ = false;
     last_completed_goal_request_ = GoalRequest::NONE;
+    safety_stop_published_ = false;
+    motion_timeout_stop_published_ = false;
+    scan_retry_count_ = 0;
     if (hasEnoughDetections()) {
       pending_goal_request_ = GoalRequest::TASK_GOAL;
       transitionTo(MissionState::READY_TO_MOVE, "Operator resumed with detections already available");
@@ -267,6 +372,8 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
 
   if (command == "HOME") {
     awaiting_motion_completion_ = false;
+    motion_goal_sent_ = false;
+    motion_timeout_stop_published_ = false;
     pending_goal_request_ = GoalRequest::HOME_GOAL;
     last_completed_goal_request_ = GoalRequest::NONE;
     dispatchConfiguredGoal(true);
@@ -274,11 +381,17 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickCommandBranch()
   }
 
   if (command == "ABORT") {
-    publishMissionSignal(abort_mission_pub_, kAbortMissionTopic);
+    publishMissionSignal(stop_mission_pub_, kStopMissionTopic);
     awaiting_motion_completion_ = false;
+    motion_goal_sent_ = false;
+    motion_timeout_stop_published_ = false;
     pending_goal_request_ = GoalRequest::HOME_GOAL;
     last_completed_goal_request_ = GoalRequest::NONE;
-    dispatchConfiguredGoal(true);
+    if (!human_detected_) {
+      dispatchConfiguredGoal(true);
+    } else {
+      transitionTo(MissionState::SAFETY_STOPPED, "Abort requested while safety stop is active");
+    }
     return NodeStatus::SUCCESS;
   }
 
@@ -299,8 +412,10 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickMotionBranch()
     awaiting_motion_completion_ = false;
     motion_goal_sent_ = false;
     pending_goal_request_ = GoalRequest::NONE;
+    motion_timeout_stop_published_ = false;
     last_completed_goal_request_ = last_dispatched_goal_request_;
     last_dispatched_goal_request_ = GoalRequest::NONE;
+    scan_retry_count_ = 0;
     transitionTo(MissionState::IDLE, "Motion execution completed");
     return NodeStatus::SUCCESS;
   }
@@ -329,6 +444,7 @@ MissionCoordinator::NodeStatus MissionCoordinator::tickScanBranch()
   }
 
   pending_goal_request_ = GoalRequest::TASK_GOAL;
+  scan_retry_count_ = 0;
   transitionTo(MissionState::READY_TO_MOVE, "Perception returned enough detections");
   return NodeStatus::SUCCESS;
 }
@@ -365,6 +481,7 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
     toString(new_state).c_str(),
     reason.c_str());
   state_ = new_state;
+  state_entered_time_ = this->now();
   publishPerceptionStateForMission(state_);
   publishMissionState();
   publishMissionProgress();
@@ -376,11 +493,15 @@ void MissionCoordinator::publishPerceptionStateForMission(MissionState state)
     case MissionState::SCANNING:
     case MissionState::READY_TO_MOVE:
     case MissionState::MOVING:
+    case MissionState::RECOVERING:
     case MissionState::HOMING:
       publishPerceptionState("SCANNING");
       return;
     case MissionState::IDLE:
     case MissionState::STOPPED:
+    case MissionState::SAFETY_STOPPED:
+    case MissionState::PERCEPTION_FAILED:
+    case MissionState::MOTION_FAILED:
     case MissionState::ERROR:
       publishPerceptionState("IDLE");
       return;
@@ -409,45 +530,93 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
   const std::string detections_detail =
     "Detected " + std::to_string(latest_detection_count_) + " block(s); minimum needed is " +
     std::to_string(minimum_detected_blocks) + ".";
+  const bool stopped_like =
+    state_ == MissionState::STOPPED ||
+    state_ == MissionState::SAFETY_STOPPED ||
+    state_ == MissionState::PERCEPTION_FAILED ||
+    state_ == MissionState::MOTION_FAILED ||
+    state_ == MissionState::ERROR;
+  const bool active_scan =
+    state_ == MissionState::SCANNING ||
+    state_ == MissionState::READY_TO_MOVE ||
+    state_ == MissionState::MOVING ||
+    state_ == MissionState::HOMING ||
+    state_ == MissionState::RECOVERING;
+  const bool failure_state =
+    state_ == MissionState::PERCEPTION_FAILED ||
+    state_ == MissionState::MOTION_FAILED ||
+    state_ == MissionState::ERROR;
 
   std::vector<MissionStepView> steps;
+
+  std::string operator_detail;
+  if (state_ == MissionState::SAFETY_STOPPED) {
+    operator_detail = human_detected_ ?
+      "Mission paused by safety. Clear the workspace before recovery is allowed." :
+      "Workspace is clear. Choose RESUME to retry or HOME to recover.";
+  } else if (state_ == MissionState::PERCEPTION_FAILED) {
+    operator_detail = "Perception failed after retry attempts. Choose RESUME to scan again or HOME.";
+  } else if (state_ == MissionState::MOTION_FAILED) {
+    operator_detail = "Motion timed out. Robot stop was requested; choose HOME or RESUME when safe.";
+  } else if (state_ == MissionState::STOPPED) {
+    operator_detail = "Mission paused. Choose RESUME to continue or HOME to return to the safe pose.";
+  } else if (state_ == MissionState::IDLE) {
+    operator_detail = "Ready for START to begin a new scan cycle.";
+  } else {
+    operator_detail = "Operator command accepted. Mission is now running.";
+  }
+
   steps.push_back({
     "operator",
     "Await operator command",
-    state_ == MissionState::STOPPED ?
-      (human_detected_ ?
-        "Mission paused by safety. Clear the workspace, then choose RESUME or HOME." :
-        "Mission paused. Choose RESUME to continue or HOME to return to the safe pose.") :
-      (state_ == MissionState::IDLE ?
-        "Ready for START to begin a new scan cycle." :
-        "Operator command accepted. Mission is now running."),
-    (state_ == MissionState::IDLE || state_ == MissionState::STOPPED) ? "active" : "done"});
+    operator_detail,
+    (state_ == MissionState::IDLE || stopped_like) ? "active" : "done"});
 
   steps.push_back({
     "safety",
     "Monitor safety envelope",
     human_detected_ ?
       "Human detected. Robot motion is halted until the workspace is clear." :
+      (state_ == MissionState::SAFETY_STOPPED ?
+        "Workspace is clear after safety stop. Recovery controls are enabled." :
       (awaiting_motion_completion_ ?
         "Safety monitoring remains active while the robot is moving." :
-        "Human monitoring is active and the workspace is currently clear."),
-    human_detected_ ? "blocked" : "active"});
+        "Human monitoring is active and the workspace is currently clear.")),
+    (human_detected_ || state_ == MissionState::SAFETY_STOPPED) ? "blocked" : "active"});
+
+  steps.push_back({
+    "recovery",
+    "Detect and recover from failures",
+    state_ == MissionState::RECOVERING ?
+      "Recovery is active. The coordinator is retrying the failed condition." :
+      (state_ == MissionState::PERCEPTION_FAILED ?
+        "Perception timeout detected. Automatic scan retries are exhausted." :
+      (state_ == MissionState::MOTION_FAILED ?
+        "Motion timeout detected. Stop was requested and recovery now requires HOME or RESUME." :
+      (state_ == MissionState::SAFETY_STOPPED ?
+        "Safety stop detected. Recovery is blocked until the workspace is clear." :
+        "No failure recovery is currently active."))),
+    state_ == MissionState::RECOVERING ? "active" :
+      (failure_state || state_ == MissionState::SAFETY_STOPPED ? "blocked" : "pending")});
 
   steps.push_back({
     "scan",
     "Scan puzzle and detect blocks",
     state_ == MissionState::SCANNING ?
       (detections_detail + " Waiting for enough detections to continue.") :
+      (state_ == MissionState::RECOVERING ?
+        "Scan recovery is restarting perception after a timeout." :
       (state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ||
       state_ == MissionState::HOMING ?
         (detections_detail + " Continuous scanning remains active while the robot executes.") :
-        (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
+      (state_ == MissionState::PERCEPTION_FAILED ?
+        "Scan failed because enough detections were not received before timeout." :
+      (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
           "Previous task motion finished successfully. Perception is now idle until the next command." :
-          "Perception is idle until the operator starts or resumes the mission.")),
-    (state_ == MissionState::SCANNING || state_ == MissionState::READY_TO_MOVE ||
-    state_ == MissionState::MOVING || state_ == MissionState::HOMING) ? "active" :
+          "Perception is idle until the operator starts or resumes the mission.")))),
+    active_scan ? "active" :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ? "done" :
-      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+      (stopped_like ? "blocked" : "pending"))});
 
   steps.push_back({
     "prepare",
@@ -458,31 +627,37 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
         "Motion plan has been dispatched to the controller." :
         (state_ == MissionState::HOMING ?
           "Task motion is bypassed while the robot returns home." :
-          "No motion plan is currently queued.")),
+        (state_ == MissionState::MOTION_FAILED ?
+          "Motion preparation is blocked until the failure is recovered." :
+          "No motion plan is currently queued."))),
     state_ == MissionState::READY_TO_MOVE ? "active" :
       (state_ == MissionState::MOVING ? "done" :
-      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+      (stopped_like ? "blocked" : "pending"))});
 
   steps.push_back({
     "execute",
     "Execute robot motion",
     state_ == MissionState::MOVING ?
       "Robot motion is in progress. Continue safety checks until motion_complete is received." :
+      (state_ == MissionState::MOTION_FAILED ?
+        "Motion completion timed out. The coordinator requested a robot stop." :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
         "The last task motion completed successfully and control returned to IDLE." :
-        "Waiting for a task motion to begin."),
+        "Waiting for a task motion to begin.")),
     state_ == MissionState::MOVING ? "active" :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ? "done" :
-      (state_ == MissionState::STOPPED ? "blocked" : "pending"))});
+      (stopped_like ? "blocked" : "pending"))});
 
   steps.push_back({
     "home",
     "Return to safe home pose",
     state_ == MissionState::HOMING ?
       "Home motion is running. Perception continues scanning until the robot reaches home." :
+      (state_ == MissionState::MOTION_FAILED || state_ == MissionState::PERCEPTION_FAILED ?
+        "HOME is available as the operator recovery action when the workspace is clear." :
       (last_completed_goal_request_ == GoalRequest::HOME_GOAL ?
         "Home motion completed. The system is back in IDLE and ready for the next command." :
-        "Robot moves to a safe home pose upon full task completion or explicit HOME request."),
+        "Robot moves to a safe home pose upon full task completion or explicit HOME request.")),
     state_ == MissionState::HOMING ? "active" :
       (last_completed_goal_request_ == GoalRequest::HOME_GOAL ? "done" :
       (state_ == MissionState::STOPPED ? "pending" : "pending"))});
@@ -564,6 +739,8 @@ void MissionCoordinator::dispatchConfiguredGoal(bool home_goal)
   motion_goal_sent_ = true;
   awaiting_motion_completion_ = true;
   pending_goal_request_ = GoalRequest::NONE;
+  motion_dispatched_time_ = this->now();
+  motion_timeout_stop_published_ = false;
   last_dispatched_goal_request_ = home_goal ? GoalRequest::HOME_GOAL : GoalRequest::TASK_GOAL;
   transitionTo(home_goal ? MissionState::HOMING : MissionState::MOVING,
     home_goal ? "Published configured home mission" : "Published configured motion mission");
@@ -623,6 +800,22 @@ bool MissionCoordinator::shouldAutoDispatch() const
   return this->get_parameter("auto_dispatch_motion").as_bool() && !motion_goal_sent_;
 }
 
+double MissionCoordinator::stateElapsedSeconds() const
+{
+  if (state_entered_time_.nanoseconds() == 0) {
+    return 0.0;
+  }
+  return (this->now() - state_entered_time_).seconds();
+}
+
+double MissionCoordinator::motionElapsedSeconds() const
+{
+  if (motion_dispatched_time_.nanoseconds() == 0) {
+    return 0.0;
+  }
+  return (this->now() - motion_dispatched_time_).seconds();
+}
+
 std::string MissionCoordinator::toString(MissionState state) const
 {
   switch (state) {
@@ -636,6 +829,14 @@ std::string MissionCoordinator::toString(MissionState state) const
       return "MOVING";
     case MissionState::STOPPED:
       return "STOPPED";
+    case MissionState::SAFETY_STOPPED:
+      return "SAFETY_STOPPED";
+    case MissionState::PERCEPTION_FAILED:
+      return "PERCEPTION_FAILED";
+    case MissionState::MOTION_FAILED:
+      return "MOTION_FAILED";
+    case MissionState::RECOVERING:
+      return "RECOVERING";
     case MissionState::HOMING:
       return "HOMING";
     case MissionState::ERROR:

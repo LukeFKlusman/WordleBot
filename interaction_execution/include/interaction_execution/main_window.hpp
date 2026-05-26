@@ -109,6 +109,7 @@ private:
   void updateVoiceControlsState();
   void publishMissionState(const std::string & state);
   void publishMissionCommand(const std::string & command);
+  void publishScanAndSweep();
   void publishGamificationFeedback(const QString & feedback);
   void publishGamificationMode(const QString & mode);
   void publishGamificationSecretWord(const QString & word);
@@ -124,7 +125,7 @@ private:
 
   std::unique_ptr<Ui::MainWindow> ui_;
   rclcpp::Node::SharedPtr node_;
-  std::shared_ptr<rviz_common::ros_integration::RosNodeAbstraction> rviz_node_;
+  static std::mutex rviz_initialization_mutex_;
   CameraView * camera_view_{nullptr};
   RvizSimView * rviz_view_{nullptr};
   RvizMoveItView * rviz_moveit_view_{nullptr};
@@ -181,6 +182,8 @@ private:
   bool voice_helper_available_{false};
   bool voice_result_pending_{false};
   bool human_detected_{false};
+  bool scan_game_board_active_{false};
+  bool scan_game_board_return_stopped_{false};
   int voice_retry_rejections_{0};
   WordleGameMode current_wordle_mode_{WordleGameMode::Unset};
   QString pending_voice_guess_;
@@ -190,6 +193,7 @@ private:
   QProcess * voice_helper_process_{nullptr};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_feedback_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_secret_word_pub_;
@@ -199,6 +203,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_status_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_detections_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_state_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_progress_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_guess_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_diagnostics_sub_;

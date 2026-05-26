@@ -472,7 +472,7 @@ QPushButton#pushButton_3:pressed {
            <item row="1" column="0">
             <widget class="QPushButton" name="pushButton_2">
              <property name="text">
-              <string>RESUME</string>
+              <string>SCAN GAME BOARD</string>
              </property>
             </widget>
            </item>
