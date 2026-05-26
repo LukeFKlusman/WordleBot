@@ -197,6 +197,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_cmd_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stop_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr abort_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_feedback_pub_;
