@@ -744,6 +744,7 @@ void MissionCoordinator::publishMissionSignal(
     0,
     static_cast<int>(this->get_parameter("mission_signal_publish_period_ms").as_int())));
 
+
   std_msgs::msg::Bool signal;
   signal.data = true;
 
