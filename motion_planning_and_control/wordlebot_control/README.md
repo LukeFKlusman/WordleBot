@@ -336,7 +336,7 @@ ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'ALON
 ```bash
 ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
   "{letters: [
-    {letter: 'T', object_id: 'T_object_1',
+    {letter: 'D', object_id: 'D_object_1',
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: -0.30, y: 0.15, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
@@ -352,7 +352,7 @@ ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState 
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: -0.30, y: 0.375, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
-    {letter: 'S', object_id: 'S_object_1',
+    {letter: 'C', object_id: 'C_object_1',
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: 0.30, y: 0.150, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}

@@ -65,7 +65,6 @@ private:
   rclcpp::Subscription<wordlebot_control::msg::PickPlaceTask>::SharedPtr     letter_object_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                       clear_letter_objects_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                       clear_board_objects_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr                     word_request_sub_;
 
   // ---------------------------------------------------------------------------
   // Arm utility subscriptions
@@ -126,7 +125,6 @@ private:
   void collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg);
   void letterObjectCallback(const wordlebot_control::msg::PickPlaceTask::SharedPtr msg);
   void clearLetterObjectsCallback(const std_msgs::msg::Bool::SharedPtr msg);
-  void wordRequestCallback(const std_msgs::msg::String::SharedPtr msg);
 
   // ---------------------------------------------------------------------------
   // Arm Utility Callbacks

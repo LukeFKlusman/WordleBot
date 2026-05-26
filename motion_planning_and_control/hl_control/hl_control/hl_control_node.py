@@ -62,6 +62,7 @@ class HLControlNode(Node, RLTaskOptimiser):
 
         self._pending_word: str | None = None
         self._board_letters: list[dict] | None = None
+        self._scene_object_ids: set[str] = set()
 
         latched_qos = QoSProfile(depth=1,
                                   durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -178,6 +179,21 @@ class HLControlNode(Node, RLTaskOptimiser):
         )
 
     def _add_letters_to_scene(self, letters: list[dict]) -> None:
+        current_ids = {item['object_id'] for item in letters}
+        stale_ids = self._scene_object_ids - current_ids
+        for object_id in sorted(stale_ids):
+            co = CollisionObject()
+            co.id = object_id
+            co.header.frame_id = 'world'
+            co.header.stamp = self.get_clock().now().to_msg()
+            co.operation = CollisionObject.REMOVE
+            self._collision_pub.publish(co)
+
+        if stale_ids:
+            self.get_logger().info(
+                f'Removed {len(stale_ids)} stale collision object(s): '
+                f'{", ".join(sorted(stale_ids))}.')
+
         for item in letters:
             co = CollisionObject()
             co.id = item['object_id']
@@ -202,6 +218,7 @@ class HLControlNode(Node, RLTaskOptimiser):
 
             self._collision_pub.publish(co)
 
+        self._scene_object_ids = current_ids
         self.get_logger().info(
             f'Published {len(letters)} collision object(s) to MoveIt scene.')
 
