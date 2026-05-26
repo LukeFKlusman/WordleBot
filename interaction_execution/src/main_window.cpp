@@ -62,6 +62,7 @@ constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
 constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
 constexpr const char * kResumeMissionTopic = "/wordle_bot/resume_mission";
 constexpr const char * kScanAndSweepTopic = "/wordle_bot/scan_and_sweep";
+constexpr const char * kAbortMissionTopic = "/wordle_bot/abort_mission";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 constexpr const char * kPerceptionStatusTopic = "/perception/status";
 constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
@@ -1494,6 +1495,7 @@ void MainWindow::setupSafetyControls()
   start_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kStartMissionTopic, 10);
   resume_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kResumeMissionTopic, 10);
   scan_and_sweep_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kScanAndSweepTopic, 10);
+  abort_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kAbortMissionTopic, 10);
   ui_->pushButton->setText(tr("START"));
   ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
   perception_state_sub_ = node_->create_subscription<std_msgs::msg::String>(
@@ -1680,6 +1682,14 @@ void MainWindow::setupSafetyControls()
   });
 
   connect(ui_->pushButton_4, &QPushButton::clicked, this, [this]() {
+    // Context-specific button: STOP when Active/Homing, ABORT when Stopped
+    if (current_robot_state_ == "STOPPED" && safety_mode_ == SafetyControlMode::Stopped) {
+      publishMissionSignal(abort_mission_pub_, kAbortMissionTopic);
+      appendDiagnosticsEvent(tr("Operator command: ABORT"));
+      RCLCPP_INFO(node_->get_logger(), "Abort mission signal sent.");
+      return;
+    }
+
     if (safety_mode_ != SafetyControlMode::Active && safety_mode_ != SafetyControlMode::Homing) {
       return;
     }
@@ -1745,6 +1755,8 @@ void MainWindow::updateSafetyControlsState()
     (safety_mode_ == SafetyControlMode::Idle || safety_mode_ == SafetyControlMode::Stopped);
   const bool can_stop =
     safety_mode_ == SafetyControlMode::Active || safety_mode_ == SafetyControlMode::Homing;
+  const bool can_abort =
+    !human_detected_ && safety_mode_ == SafetyControlMode::Stopped && current_robot_state_ == "STOPPED";
   const bool can_scan_game_board =
     !human_detected_ &&
     (safety_mode_ == SafetyControlMode::Idle || safety_mode_ == SafetyControlMode::Stopped);
@@ -1754,7 +1766,8 @@ void MainWindow::updateSafetyControlsState()
 
   ui_->pushButton->setText(show_resume ? tr("RESUME") : tr("START"));
   ui_->pushButton->setEnabled(can_start_or_resume);
-  ui_->pushButton_4->setEnabled(can_stop);
+  ui_->pushButton_4->setText((can_abort) ? tr("ABORT") : tr("STOP"));
+  ui_->pushButton_4->setEnabled(can_stop || can_abort);
   ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
   ui_->pushButton_2->setEnabled(can_scan_game_board);
   ui_->pushButton_3->setEnabled(can_home);

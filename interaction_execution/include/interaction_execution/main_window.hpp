@@ -198,6 +198,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr abort_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_feedback_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_mode_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_secret_word_pub_;

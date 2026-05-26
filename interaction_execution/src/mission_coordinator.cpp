@@ -612,7 +612,7 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
       (state_ == MissionState::PERCEPTION_FAILED ?
         "Scan failed because enough detections were not received before timeout." :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
-          "Previous task motion finished successfully. Perception is now idle until the next command." :
+          "Previous task motion finished successsfully. Perception is now idle until the next command." :
           "Perception is idle until SCAN GAME BOARD is pressed.")))),
     scan_step_active ? "active" :
       (scan_step_done ? "done" :
