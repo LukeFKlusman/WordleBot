@@ -300,6 +300,18 @@ double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & 
   return node->get_parameter(name).as_double();
 }
 
+std::map<std::string, double> getWorkingJoints(const rclcpp::Node::SharedPtr & node)
+{
+  return {
+    {"shoulder_pan_joint",  node->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+    {"shoulder_lift_joint", node->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+    {"elbow_joint",         node->get_parameter("working_joints.elbow_joint").as_double()},
+    {"wrist_1_joint",       node->get_parameter("working_joints.wrist_1_joint").as_double()},
+    {"wrist_2_joint",       node->get_parameter("working_joints.wrist_2_joint").as_double()},
+    {"wrist_3_joint",       node->get_parameter("working_joints.wrist_3_joint").as_double()},
+  };
+}
+
 bool normalizePoseOrientation(
   geometry_msgs::msg::Pose & pose,
   const std::string & label,
@@ -459,6 +471,160 @@ double WordleBotController::computeTransitScaling(double d) const
   return vel_profiles_.precise_vel + t * (vel_profiles_.transit_vel - vel_profiles_.precise_vel);
 }
 
+bool WordleBotController::refreshPlanningScene(const std::string & context)
+{
+  if (!psm_) {
+    RCLCPP_ERROR(LOGGER, "%s: PlanningSceneMonitor is not initialized.", context.c_str());
+    return false;
+  }
+
+  const bool ok = psm_->requestPlanningSceneState("/get_planning_scene");
+  if (!ok) {
+    RCLCPP_WARN(LOGGER,
+      "%s: requestPlanningSceneState('/get_planning_scene') failed; using latest monitored scene.",
+      context.c_str());
+  }
+  return ok;
+}
+
+bool WordleBotController::waitForWorldObjectState(
+  const std::string & object_id,
+  bool should_exist,
+  const std::string & context,
+  double timeout_seconds)
+{
+  if (object_id.empty()) {
+    return true;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(std::max(0.0, timeout_seconds));
+  do {
+    refreshPlanningScene(context);
+    {
+      planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+      const bool exists = lps->getWorld()->hasObject(object_id);
+      if (exists == should_exist) {
+        RCLCPP_INFO(LOGGER, "%s: world object '%s' is %s.",
+          context.c_str(), object_id.c_str(), exists ? "present" : "absent");
+        return true;
+      }
+    }
+    rclcpp::sleep_for(std::chrono::milliseconds(50));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  refreshPlanningScene(context);
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  const bool exists = lps->getWorld()->hasObject(object_id);
+  RCLCPP_ERROR(LOGGER, "%s: timed out waiting for world object '%s' to be %s; it is %s.",
+    context.c_str(), object_id.c_str(), should_exist ? "present" : "absent",
+    exists ? "present" : "absent");
+  return false;
+}
+
+bool WordleBotController::waitForAttachedObjectState(
+  const std::string & object_id,
+  bool should_exist,
+  const std::string & expected_link,
+  const std::string & context,
+  double timeout_seconds)
+{
+  if (object_id.empty()) {
+    return true;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(std::max(0.0, timeout_seconds));
+  do {
+    refreshPlanningScene(context);
+    {
+      planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+      const auto * attached = lps->getCurrentState().getAttachedBody(object_id);
+      const bool exists = attached != nullptr;
+      const bool link_ok = expected_link.empty() || (exists && attached->getAttachedLinkName() == expected_link);
+      if (exists == should_exist && (!should_exist || link_ok)) {
+        RCLCPP_INFO(LOGGER, "%s: attached object '%s' is %s%s%s.",
+          context.c_str(), object_id.c_str(), exists ? "present" : "absent",
+          exists ? " on " : "", exists ? attached->getAttachedLinkName().c_str() : "");
+        return true;
+      }
+    }
+    rclcpp::sleep_for(std::chrono::milliseconds(50));
+  } while (std::chrono::steady_clock::now() < deadline);
+
+  refreshPlanningScene(context);
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  const auto * attached = lps->getCurrentState().getAttachedBody(object_id);
+  RCLCPP_ERROR(LOGGER,
+    "%s: timed out waiting for attached object '%s' to be %s%s%s; current state is %s%s%s.",
+    context.c_str(), object_id.c_str(), should_exist ? "present" : "absent",
+    expected_link.empty() ? "" : " on ", expected_link.c_str(),
+    attached ? "present" : "absent",
+    attached ? " on " : "", attached ? attached->getAttachedLinkName().c_str() : "");
+  return false;
+}
+
+void WordleBotController::logAttachedObjects(const std::string & context)
+{
+  refreshPlanningScene(context);
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+  std::vector<const moveit::core::AttachedBody *> attached_bodies;
+  lps->getCurrentState().getAttachedBodies(attached_bodies);
+  if (attached_bodies.empty()) {
+    RCLCPP_INFO(LOGGER, "%s: no attached collision objects in planning scene.", context.c_str());
+    return;
+  }
+
+  RCLCPP_INFO(LOGGER, "%s: %zu attached collision object(s):",
+    context.c_str(), attached_bodies.size());
+  for (const auto * body : attached_bodies) {
+    if (body == nullptr) {
+      continue;
+    }
+    RCLCPP_INFO(LOGGER, "  %s attached to %s (%zu touch link(s))",
+      body->getName().c_str(), body->getAttachedLinkName().c_str(),
+      body->getTouchLinks().size());
+  }
+}
+
+bool WordleBotController::validateStateCollisionFree(
+  const moveit::core::RobotState & state,
+  const std::string & context,
+  const moveit::core::JointModelGroup * jmg)
+{
+  (void)jmg;
+  refreshPlanningScene(context);
+  planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+
+  collision_detection::CollisionRequest req;
+  req.contacts = true;
+  req.max_contacts = 20;
+  req.max_contacts_per_pair = 5;
+  collision_detection::CollisionResult res;
+
+  moveit::core::RobotState check_state(state);
+  check_state.update();
+  lps->checkCollision(req, res, check_state);
+  if (!res.collision) {
+    RCLCPP_INFO(LOGGER, "%s: collision preflight passed.", context.c_str());
+    return true;
+  }
+
+  RCLCPP_ERROR(LOGGER, "%s: collision preflight failed with %zu contact pair(s).",
+    context.c_str(), res.contacts.size());
+  int logged = 0;
+  for (const auto & contact_pair : res.contacts) {
+    for (const auto & contact : contact_pair.second) {
+      RCLCPP_ERROR(LOGGER, "  contact: %s <-> %s depth=%.5f",
+        contact.body_name_1.c_str(), contact.body_name_2.c_str(), contact.depth);
+      if (++logged >= 20) {
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Collision Scene Management
 // Builds and tears down the static environment (floor, sensor guard) and
@@ -520,6 +686,7 @@ void WordleBotController::setupCollisionScene()
   floor.operation = moveit_msgs::msg::CollisionObject::ADD;
 
   planning_scene_.applyCollisionObject(floor);
+  waitForWorldObjectState("floor", true, "setupCollisionScene floor");
 
   moveit_msgs::msg::CollisionObject gameboard;
   gameboard.header.frame_id = move_group_.getPlanningFrame();
@@ -540,6 +707,7 @@ void WordleBotController::setupCollisionScene()
   gameboard.operation = moveit_msgs::msg::CollisionObject::ADD;
 
   planning_scene_.applyCollisionObject(gameboard);
+  waitForWorldObjectState("gameboard", true, "setupCollisionScene gameboard");
 
   // Allow contact between gameboard and robot base links (not treated as collisions)
   moveit_msgs::msg::PlanningScene ps_diff;
@@ -553,6 +721,7 @@ void WordleBotController::setupCollisionScene()
     acm.getMessage(ps_diff.allowed_collision_matrix);
   }
   planning_scene_.applyPlanningScene(ps_diff);
+  refreshPlanningScene("setupCollisionScene ACM");
 
   attachSensorCollisionObject();
   RCLCPP_INFO(LOGGER, "Collision scene set up: floor, gameboard added, sensor guard attached.");
@@ -563,6 +732,9 @@ void WordleBotController::clearCollisionScene()
 {
   detachSensorCollisionObject();
   planning_scene_.removeCollisionObjects({"box1", "floor", "gameboard"});
+  waitForWorldObjectState("box1", false, "clearCollisionScene box1");
+  waitForWorldObjectState("floor", false, "clearCollisionScene floor");
+  waitForWorldObjectState("gameboard", false, "clearCollisionScene gameboard");
   RCLCPP_INFO(LOGGER, "Collision scene cleared.");
 }
 
@@ -570,7 +742,11 @@ void WordleBotController::clearCollisionScene()
 void WordleBotController::addCollisionObject(const moveit_msgs::msg::CollisionObject & obj)
 {
   planning_scene_.applyCollisionObject(obj);
-  rclcpp::sleep_for(std::chrono::milliseconds(300));
+  if (obj.operation == moveit_msgs::msg::CollisionObject::REMOVE) {
+    waitForWorldObjectState(obj.id, false, "addCollisionObject remove");
+  } else {
+    waitForWorldObjectState(obj.id, true, "addCollisionObject apply");
+  }
   RCLCPP_INFO(LOGGER, "addCollisionObject: applied object '%s' (operation=%d).",
     obj.id.c_str(), static_cast<int>(obj.operation));
 }
@@ -583,6 +759,9 @@ void WordleBotController::clearLetterObjects(const std::vector<std::string> & id
     return;
   }
   planning_scene_.removeCollisionObjects(ids);
+  for (const auto & id : ids) {
+    waitForWorldObjectState(id, false, "clearLetterObjects");
+  }
   RCLCPP_INFO(LOGGER, "clearLetterObjects: removed %zu letter object(s).", ids.size());
 }
 
@@ -613,9 +792,7 @@ void WordleBotController::attachSensorCollisionObject()
   attached_object.touch_links = gripperTouchLinks();
 
   planning_scene_.applyAttachedCollisionObject(attached_object);
-
-  // Give the move_group server time to propagate the scene update before planning begins.
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
+  waitForAttachedObjectState("sensor_guard", true, "tool0", "attachSensorCollisionObject");
 
   RCLCPP_INFO(LOGGER, "Sensor guard attached to tool0");
 }
@@ -628,6 +805,7 @@ void WordleBotController::detachSensorCollisionObject()
   detach.object.id = "sensor_guard";
   detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
   planning_scene_.applyAttachedCollisionObject(detach);
+  waitForAttachedObjectState("sensor_guard", false, "", "detachSensorCollisionObject");
   RCLCPP_INFO(LOGGER, "Sensor guard collision cylinder detached from tool0.");
 }
 
@@ -1583,8 +1761,8 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
   // The target object itself would otherwise block the final exact approach.
   if (!run_phase("remove target object before approach", [this, &entry]() {
         planning_scene_.removeCollisionObjects({entry.object_id});
-        rclcpp::sleep_for(std::chrono::milliseconds(300));
-        return true;
+        return waitForWorldObjectState(
+          entry.object_id, false, "executePickAndPlaceMoveGroup remove target");
       })) {
     return false;
   }
@@ -1625,8 +1803,10 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
         attached.touch_links = gripperTouchLinks();
 
         planning_scene_.applyAttachedCollisionObject(attached);
-        rclcpp::sleep_for(std::chrono::milliseconds(300));
-        return true;
+        const bool ok = waitForAttachedObjectState(
+          entry.object_id, true, "gripper_tcp", "executePickAndPlaceMoveGroup attach object");
+        logAttachedObjects("executePickAndPlaceMoveGroup after attach");
+        return ok;
       })) {
     return false;
   }
@@ -1663,7 +1843,10 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
         detach.object.id = entry.object_id;
         detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
         planning_scene_.applyAttachedCollisionObject(detach);
-        rclcpp::sleep_for(std::chrono::milliseconds(200));
+        if (!waitForAttachedObjectState(
+            entry.object_id, false, "", "executePickAndPlaceMoveGroup detach object")) {
+          return false;
+        }
 
         auto placed_object = entry.collision_object;
         placed_object.header.frame_id =
@@ -1676,8 +1859,8 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
           placed_object.primitive_poses.front() = final_place_pose;
         }
         planning_scene_.applyCollisionObject(placed_object);
-        rclcpp::sleep_for(std::chrono::milliseconds(300));
-        return true;
+        return waitForWorldObjectState(
+          entry.object_id, true, "executePickAndPlaceMoveGroup place object");
       })) {
     return false;
   }
@@ -1765,9 +1948,9 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
   }
 
   if (include_return_home) {
-    auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+    auto home = std::make_unique<mtc::stages::MoveTo>("return to working joints", interpolation_planner);
     home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-    home->setGoal("home");
+    home->setGoal(getWorkingJoints(node_));
     task->add(std::move(home));
   }
 
@@ -1844,9 +2027,9 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
 // ---------------------------------------------------------------------------
 // computeBestIK         — IK with warm-start seeding, 2π normalisation,
 //                         wrist_3 clamping, no shoulder rejection
-// generateCandidatePlans — call move_group_.plan() N times, collect successes
+// generateCandidatePlans — call move_group_.plan() until success or timeout
 // selectBestPlan        — pick lowest-cost plan by computeTotalJointDisplacement
-// moveToGoal            — orchestrator: IK → set target → plan × 5 → best → execute
+// moveToGoal            — orchestrator: IK → collision preflight → plan → best → execute
 // ---------------------------------------------------------------------------
 
 std::vector<double> WordleBotController::computeBestIK(
@@ -1891,6 +2074,7 @@ std::vector<double> WordleBotController::computeBestIK(
     int solver_failures = 0;
     int collision_callback_rejections = 0;
     int collision_rejected_attempts = 0;
+    int collision_contact_logs = 0;
     int wrist3_filter_rejections = 0;
     int wrist1_filter_rejections = 0;
     int accepted_candidates = 0;
@@ -1929,8 +2113,16 @@ std::vector<double> WordleBotController::computeBestIK(
   {
     state->setJointGroupPositions(group, ik_solution);
     state->update();
-    const bool colliding = lps->isStateColliding(*state, group->getName());
-    if (colliding) {
+
+    collision_detection::CollisionRequest req;
+    req.contacts = true;
+    req.max_contacts = 8;
+    req.max_contacts_per_pair = 4;
+    req.group_name = group->getName();
+    collision_detection::CollisionResult res;
+    lps->checkCollision(req, res, *state);
+
+    if (res.collision) {
       ++ik_diag.collision_callback_rejections;
       std::vector<double> rejected_values;
       state->copyJointGroupPositions(group, rejected_values);
@@ -1938,8 +2130,29 @@ std::vector<double> WordleBotController::computeBestIK(
         get_joint_value(rejected_values, "wrist_1_joint"),
         get_joint_value(rejected_values, "wrist_2_joint"),
         get_joint_value(rejected_values, "wrist_3_joint"));
+
+      if (ik_diag.collision_contact_logs < 5) {
+        ++ik_diag.collision_contact_logs;
+        RCLCPP_WARN(LOGGER,
+          "computeBestIK: collision contacts for rejected IK attempt %d "
+          "(log %d/5, %zu contact pair(s)):",
+          active_ik_attempt, ik_diag.collision_contact_logs, res.contacts.size());
+        int logged_contacts = 0;
+        for (const auto & contact_pair : res.contacts) {
+          for (const auto & contact : contact_pair.second) {
+            RCLCPP_WARN(LOGGER, "  %s <-> %s depth=%.5f",
+              contact.body_name_1.c_str(), contact.body_name_2.c_str(), contact.depth);
+            if (++logged_contacts >= 8) {
+              break;
+            }
+          }
+          if (logged_contacts >= 8) {
+            break;
+          }
+        }
+      }
     }
-    return !colliding;
+    return !res.collision;
   };
 
   // One IK attempt: seed → solve → normalise → validate → cost. Uses return
@@ -2054,11 +2267,11 @@ std::vector<double> WordleBotController::computeBestIK(
       "computeBestIK diagnostics: no accepted candidate after %d attempt(s). "
       "solver_failures=%d, solver_successes=%d, accepted=%d, "
       "collision_callback_rejections=%d, collision_rejected_attempts=%d, "
-      "wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
+      "collision_contact_logs=%d, wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
       ik_diag.total_attempts, ik_diag.solver_failures, ik_successes,
       ik_diag.accepted_candidates, ik_diag.collision_callback_rejections,
-      ik_diag.collision_rejected_attempts, ik_diag.wrist3_filter_rejections,
-      ik_diag.wrist1_filter_rejections);
+      ik_diag.collision_rejected_attempts, ik_diag.collision_contact_logs,
+      ik_diag.wrist3_filter_rejections, ik_diag.wrist1_filter_rejections);
     RCLCPP_INFO(LOGGER,
       "computeBestIK: IK FAILED for target pose (x=%.3f y=%.3f z=%.3f qx=%.3f qy=%.3f qz=%.3f qw=%.3f).",
       target_pose.position.x, target_pose.position.y, target_pose.position.z,
@@ -2085,25 +2298,54 @@ std::vector<double> WordleBotController::computeBestIK(
 }
 
 std::vector<moveit::planning_interface::MoveGroupInterface::Plan>
-WordleBotController::generateCandidatePlans(int num_attempts)
+WordleBotController::generateCandidatePlans(double timeout_seconds, int min_successes)
 {
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
-  plans.reserve(static_cast<std::size_t>(std::max(num_attempts, 0)));
+  plans.reserve(static_cast<std::size_t>(std::max(min_successes, 1)));
 
-  RCLCPP_INFO(LOGGER, "generateCandidatePlans: generating %d plan attempts.", num_attempts);
+  const double bounded_timeout = std::max(0.1, timeout_seconds);
+  const int bounded_min_successes = std::max(1, min_successes);
+  const auto start_time = std::chrono::steady_clock::now();
+  const auto deadline = start_time + std::chrono::duration<double>(bounded_timeout);
+
+  RCLCPP_INFO(LOGGER,
+    "generateCandidatePlans: planning until %d success(es) or %.2f s timeout.",
+    bounded_min_successes, bounded_timeout);
+
+  int attempts = 0;
   int successes = 0;
-  for (int attempt = 0; attempt < num_attempts; ++attempt) {
+  int last_error_code = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+  while (successes < bounded_min_successes && std::chrono::steady_clock::now() < deadline) {
+    if (stop_requested_.load()) {
+      RCLCPP_INFO(LOGGER, "generateCandidatePlans: stop requested — ending planning loop.");
+      break;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const double remaining =
+      std::chrono::duration<double>(deadline - now).count();
+    move_group_.setPlanningTime(std::max(0.1, remaining));
+
     moveit::planning_interface::MoveGroupInterface::Plan plan;
+    ++attempts;
     const auto result = move_group_.plan(plan);
     if (static_cast<bool>(result)) {
       ++successes;
       plans.push_back(plan);
     } else {
-      RCLCPP_WARN(LOGGER, "generateCandidatePlans: attempt %d failed (error code %d).",
-        attempt, result.val);
+      last_error_code = result.val;
+      RCLCPP_WARN(LOGGER,
+        "generateCandidatePlans: attempt %d failed after %.2f s elapsed (error code %d).",
+        attempts, std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(),
+        result.val);
     }
   }
-  RCLCPP_INFO(LOGGER, "generateCandidatePlans: %d/%d plans succeeded.", successes, num_attempts);
+
+  const double elapsed =
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+  RCLCPP_INFO(LOGGER,
+    "generateCandidatePlans: %d/%d attempt(s) succeeded in %.2f s (last_error=%d).",
+    successes, attempts, elapsed, last_error_code);
   return plans;
 }
 
@@ -2156,22 +2398,35 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
 
   const std::string arm_group = "ur_onrobot_manipulator";
   const auto * jmg = move_group_.getRobotModel()->getJointModelGroup(arm_group);
+  if (jmg == nullptr) {
+    RCLCPP_ERROR(LOGGER, "moveToGoal: joint model group '%s' not found.", arm_group.c_str());
+    return false;
+  }
+
+  refreshPlanningScene("moveToGoal start scene");
+  {
+    planning_scene_monitor::LockedPlanningSceneRO lps(psm_);
+    auto scene_state = std::make_shared<moveit::core::RobotState>(lps->getCurrentState());
+    std::vector<double> live_q;
+    current_state->copyJointGroupPositions(jmg, live_q);
+    scene_state->setJointGroupPositions(jmg, live_q);
+    scene_state->update();
+    current_state = scene_state;
+  }
 
   // Log current joint state for diagnostics.
-  if (jmg) {
-    std::vector<double> q_start;
-    current_state->copyJointGroupPositions(jmg, q_start);
-    const auto & jnames = jmg->getVariableNames();
-    RCLCPP_INFO(LOGGER, "moveToGoal: current joint state (%zu joints):", q_start.size());
-    for (std::size_t i = 0; i < q_start.size() && i < jnames.size(); ++i) {
-      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
-        jnames[i].c_str(), q_start[i], q_start[i] * 180.0 / M_PI);
-    }
+  std::vector<double> q_start;
+  current_state->copyJointGroupPositions(jmg, q_start);
+  const auto & jnames = jmg->getVariableNames();
+  RCLCPP_INFO(LOGGER, "moveToGoal: current joint state (%zu joints):", q_start.size());
+  for (std::size_t i = 0; i < q_start.size() && i < jnames.size(); ++i) {
+    RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+      jnames[i].c_str(), q_start[i], q_start[i] * 180.0 / M_PI);
   }
 
   std::vector<double> best_q = computeBestIK(current_state, goal_pose);
 
-  if (best_q.empty() && jmg) {
+  if (best_q.empty()) {
     // All IK attempts failed. Negate wrist_3_joint and move there, then retry.
     RCLCPP_WARN(LOGGER, "moveToGoal: IK failed — attempting wrist_3 flip recovery.");
 
@@ -2211,13 +2466,26 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
   }
 
   // Log target joint values for diagnostics.
-  if (jmg) {
-    const auto & jnames = jmg->getVariableNames();
-    RCLCPP_INFO(LOGGER, "moveToGoal: target joint values (%zu joints):", best_q.size());
-    for (std::size_t i = 0; i < best_q.size() && i < jnames.size(); ++i) {
-      RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
-        jnames[i].c_str(), best_q[i], best_q[i] * 180.0 / M_PI);
-    }
+  RCLCPP_INFO(LOGGER, "moveToGoal: target joint values (%zu joints):", best_q.size());
+  for (std::size_t i = 0; i < best_q.size() && i < jnames.size(); ++i) {
+    RCLCPP_INFO(LOGGER, "  %s = %.4f rad (%.1f deg)",
+      jnames[i].c_str(), best_q[i], best_q[i] * 180.0 / M_PI);
+  }
+
+  if (!waitForAttachedObjectState("sensor_guard", true, "tool0", "moveToGoal sensor guard", 0.5)) {
+    return false;
+  }
+  logAttachedObjects("moveToGoal planning scene before plan");
+
+  if (!validateStateCollisionFree(*current_state, "moveToGoal start state", jmg)) {
+    return false;
+  }
+
+  moveit::core::RobotState goal_state(*current_state);
+  goal_state.setJointGroupPositions(jmg, best_q);
+  goal_state.update();
+  if (!validateStateCollisionFree(goal_state, "moveToGoal goal state", jmg)) {
+    return false;
   }
 
   // Seed the planner from the same state snapshot used for IK to avoid a race
@@ -2225,9 +2493,14 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
   move_group_.setStartState(*current_state);
   move_group_.setJointValueTarget(best_q);
 
-  const auto plans = generateCandidatePlans(5);
+  const double planning_timeout =
+    getDoubleParam(node_, "pick_place.mgi_planning_timeout", 10.0);
+  const int min_successes =
+    std::max(1, getIntParam(node_, "pick_place.mgi_planning_min_successes", 1));
+  const auto plans = generateCandidatePlans(planning_timeout, min_successes);
   if (plans.empty()) {
-    RCLCPP_ERROR(LOGGER, "moveToGoal: all 5 planning attempts failed.");
+    RCLCPP_ERROR(LOGGER, "moveToGoal: no planning attempts succeeded within %.2f s.",
+      std::max(0.1, planning_timeout));
     return false;
   }
 
@@ -2593,7 +2866,7 @@ bool WordleBotController::runScanAndSweep(
 // Simple one-shot MTC tasks for moving the arm to known named states.
 // These are available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
-// returnToHome            — move the arm to the SRDF "home" named state
+// returnToHome            — move the arm to the configured working joints
 // openGripperFull         — move the gripper to the SRDF "open" named state (full travel)
 // closeGripperFull        — move the gripper to the SRDF "closed" named state (full travel)
 // openGripperOperational  — command operational open width via /onrobot/finger_width_controller/commands
@@ -2602,43 +2875,29 @@ bool WordleBotController::runScanAndSweep(
 
 bool WordleBotController::returnToHome()
 {
-  RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
+  RCLCPP_INFO(LOGGER,
+    "returnToHome: moving to working_joints from wordle_bot_controller.yaml.");
 
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
-  interpolation_planner->setMaxVelocityScalingFactor(vel_profiles_.transit_vel);
-  interpolation_planner->setMaxAccelerationScalingFactor(vel_profiles_.transit_acc);
+  const auto joints = getWorkingJoints(node_);
 
-  mtc::Task task;
-  task.stages()->setName("return home");
-  task.loadRobotModel(node_);
-  task.setProperty("group", std::string("ur_onrobot_manipulator"));
+  {
+    const double s = computeTransitScaling(queryCurrentStateMinDistance());
+    move_group_.setMaxVelocityScalingFactor(s);
+    move_group_.setMaxAccelerationScalingFactor(s);
+    RCLCPP_DEBUG(LOGGER, "returnToHome: transit velocity scaling = %.2f.", s);
+  }
 
-  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+  move_group_.setStartStateToCurrentState();
+  move_group_.setJointValueTarget(joints);
 
-  auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-  stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-  stage->setGoal("home");
-  task.add(std::move(stage));
-
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "returnToHome: task init failed: " << e);
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToHome: planning to working_joints failed.");
     return false;
   }
 
-  const int mtc_solution_target_count =
-    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
-  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
-    return false;
-  }
-
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  auto result = executeAlignedTaskSolution(task, *task.solutions().front(), "returnToHome");
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+  auto result = move_group_.execute(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
     return false;
   }
@@ -2960,7 +3219,7 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
     detach.object.id = held_object_id;
     detach.object.operation = moveit_msgs::msg::CollisionObject::REMOVE;
     planning_scene_.applyAttachedCollisionObject(detach);
-    rclcpp::sleep_for(std::chrono::milliseconds(200));
+    waitForAttachedObjectState(held_object_id, false, "", "recoverObject detach held object");
     RCLCPP_INFO(LOGGER, "recoverObject: detached '%s' from gripper_tcp at safe position.",
       held_object_id.c_str());
   }

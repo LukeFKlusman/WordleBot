@@ -54,6 +54,45 @@ double yawFromPose(const geometry_msgs::msg::Pose & pose)
   tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
   return yaw;
 }
+
+bool nearlyEqual(double lhs, double rhs, double tolerance)
+{
+  return std::abs(lhs - rhs) <= tolerance;
+}
+
+bool isLegacyReturnHomePose(const geometry_msgs::msg::Pose & pose)
+{
+  constexpr double kPositionTolerance = 1e-4;
+  constexpr double kOrientationTolerance = 1e-3;
+
+  const bool position_matches =
+    nearlyEqual(pose.position.x, 0.300, kPositionTolerance) &&
+    nearlyEqual(pose.position.y, 0.000, kPositionTolerance) &&
+    nearlyEqual(pose.position.z, 0.300, kPositionTolerance);
+
+  if (!position_matches) {
+    return false;
+  }
+
+  const double q_norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+  if (q_norm < 1e-9) {
+    return false;
+  }
+
+  const double qx = pose.orientation.x / q_norm;
+  const double qy = pose.orientation.y / q_norm;
+  const double qz = pose.orientation.z / q_norm;
+  const double qw = pose.orientation.w / q_norm;
+
+  return nearlyEqual(std::abs(qx), 1.0, kOrientationTolerance) &&
+         nearlyEqual(qy, 0.0, kOrientationTolerance) &&
+         nearlyEqual(qz, 0.0, kOrientationTolerance) &&
+         nearlyEqual(qw, 0.0, kOrientationTolerance);
+}
 }  // namespace
 
 WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
@@ -231,6 +270,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<double>("pick_place.retreat_max_distance", 0.15);
   if (!node_->has_parameter("pick_place.grasp_z_offset"))
     node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
+  if (!node_->has_parameter("pick_place.mgi_planning_timeout"))
+    node_->declare_parameter<double>("pick_place.mgi_planning_timeout", 10.0);
+  if (!node_->has_parameter("pick_place.mgi_planning_min_successes"))
+    node_->declare_parameter<int>("pick_place.mgi_planning_min_successes", 1);
   if (!node_->has_parameter("pick_place.mgi_place_open_recovery_yaw_delta"))
     node_->declare_parameter<double>("pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 
@@ -933,7 +976,17 @@ void WordleBotControlNode::missionLoop()
           RCLCPP_INFO(LOGGER, "Goal mission (MGI): executing goal %zu of %zu.",
             i + 1, current_mission.size());
 
-          if (!controller_->moveToGoal(current_mission[i]) || stop_requested_.load()) {
+          bool goal_ok = false;
+          if (isLegacyReturnHomePose(current_mission[i])) {
+            RCLCPP_INFO(LOGGER,
+              "Goal mission (MGI): goal %zu matches legacy return-home pose; moving to working_joints.",
+              i + 1);
+            goal_ok = controller_->returnToHome();
+          } else {
+            goal_ok = controller_->moveToGoal(current_mission[i]);
+          }
+
+          if (!goal_ok || stop_requested_.load()) {
             RCLCPP_ERROR(LOGGER, "Goal mission (MGI): FAILED at goal %zu.", i + 1);
             goal_resume_from = i;
             all_ok = false;

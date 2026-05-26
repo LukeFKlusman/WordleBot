@@ -739,11 +739,11 @@ void MissionCoordinator::publishMissionSignal(
 
   const int publish_count = static_cast<int>(std::max<int64_t>(
     1,
-
-    this->get_parameter("mission_signal_publish_count").as_int()));
+    static_cast<int>(this->get_parameter("mission_signal_publish_count").as_int())));
   const int publish_period_ms = static_cast<int>(std::max<int64_t>(
     0,
-    this->get_parameter("mission_signal_publish_period_ms").as_int()));
+    static_cast<int>(this->get_parameter("mission_signal_publish_period_ms").as_int())));
+
 
   std_msgs::msg::Bool signal;
   signal.data = true;

@@ -27,6 +27,25 @@ colcon build --packages-select wordlebot_control
 source install/setup.bash
 ```
 
+### One-command bringup
+
+This starts the robot driver first, waits for it to initialise, starts MoveIt,
+then optionally starts the WordleBot RViz configuration.
+
+```bash
+# Fake hardware with RViz
+ros2 launch wordlebot_control wordlebot_bringup.launch.py
+
+# Real hardware with RViz
+ros2 launch wordlebot_control wordlebot_bringup.launch.py use_fake_hardware:=false robot_ip:=192.168.0.194
+
+# Real hardware without RViz
+ros2 launch wordlebot_control wordlebot_bringup.launch.py use_fake_hardware:=false robot_ip:=192.168.0.194 launch_rviz:=false
+```
+
+The separate launch commands below still work if you want to run each part in
+its own terminal.
+
 ### Terminal 2. Launch Robot driver
 
 ```bash
@@ -68,6 +87,12 @@ Only ran after the previous terminals are running
 
 ```bash
 ros2 launch wordlebot_control wordle_bot_mtc.launch.py
+```
+
+To start both the WordleBot control node and the high-level Wordle control node:
+
+```bash
+ros2 launch wordlebot_control wordlecontrolfullstack.launch.py
 ```
 
 ### Other Terminal.
@@ -308,11 +333,39 @@ ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRAN
 ```bash
 ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
   "{letters: [
-    {letter: 'L', object_id: 'L_object_1',
+    {letter: 'S', object_id: 'S_object_1',
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: -0.30, y: 0.15, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
+    {letter: 'R', object_id: 'R_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.30, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
+    {letter: 'A', object_id: 'A_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.075, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.389, w: 0.921}}}},
     {letter: 'T', object_id: 'T_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
+    {letter: 'E', object_id: 'E_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: 0.30, y: 0.150, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}
+  ]}"
+
+ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'ALONE'}"
+```                                                                                            
+
+```bash
+ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState \
+  "{letters: [
+    {letter: 'D', object_id: 'D_object_1',
+     pose: {header: {frame_id: 'world'},
+            pose: {position: {x: -0.30, y: 0.15, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
+    {letter: 'E', object_id: 'E_object_1',
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: 0.30, y: 0.30, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
@@ -324,11 +377,20 @@ ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState 
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: -0.30, y: 0.375, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
-    {letter: 'E', object_id: 'E_object_1',
+    {letter: 'C', object_id: 'C_object_1',
      pose: {header: {frame_id: 'world'},
             pose: {position: {x: 0.30, y: 0.150, z: 0.040},
                    orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}
   ]}"
+```   
+# Full Stack Wordle Bot Execution 
 
-ros2 topic pub --once /hl_control/word_request std_msgs/msg/String "{data: 'CRANE'}"
+```bash
+ros2 launch wordlebot_control wordlebot_bringup.launch.py
+
+ros2 launch interaction_execution gui.launch.py
+
+ros2 launch wordlebot_control wordlecontrolfullstack.launch.py
+
+python3 ~/git/RS2/gamification/gamification_node.py 
 ```
