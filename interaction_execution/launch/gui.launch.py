@@ -23,7 +23,6 @@ def generate_launch_description():
     launch_perception = LaunchConfiguration("launch_perception")
     launch_gamification = LaunchConfiguration("launch_gamification")
     launch_voice_control = LaunchConfiguration("launch_voice_control")
-    launch_robot_description = LaunchConfiguration("launch_robot_description")
 
     wordle_bot_share = find_package_share("wordlebot_control")
     moveit_config_share = find_package_share("ur_moveit_config")
@@ -65,11 +64,6 @@ def generate_launch_description():
             "launch_voice_control",
             default_value="false",
             description="Launch the voice_control CLI script. Disabled by default because it is interactive.",
-        ),
-        DeclareLaunchArgument(
-            "launch_robot_description",
-            default_value="false",
-            description="Launch robot_state_publisher with UR robot description (for MoveIt view visualization without full MoveIt).",
         ),
         SetEnvironmentVariable(name="QT_QPA_PLATFORM", value="xcb"),
         Node(
@@ -124,14 +118,5 @@ def generate_launch_description():
                 ),
             )
         )
-
-    interaction_execution_share = Path(get_package_share_directory("interaction_execution"))
-    robot_description_launch = interaction_execution_share / "launch" / "load_ur_description.launch.py"
-    launch_actions.append(
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(robot_description_launch)),
-            condition=IfCondition(launch_robot_description),
-        )
-    )
 
     return LaunchDescription(launch_actions)

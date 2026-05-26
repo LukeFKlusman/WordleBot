@@ -1,0 +1,222 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background-color: #0d1218;
+  font-family: "Ubuntu", "Segoe UI", sans-serif;
+}
+
+#container {
+  display: flex;
+  background-color: #0d1218;
+  height: 100%;
+  width: 100%;
+  align-items: center;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
+#game {
+  width: 100%;
+  max-width: 500px;
+  height: 100%;
+  max-height: 760px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 12px 14px 8px;
+  box-sizing: border-box;
+}
+
+header {
+  border-bottom: 1px solid rgba(139, 148, 158, 0.18);
+  padding-bottom: 0.75rem;
+}
+
+.title {
+  color: #f0f6fc;
+  font-size: clamp(1.9rem, 4.8vw, 2.6rem);
+  letter-spacing: 0.08em;
+  font-weight: 800;
+  margin: 0.1rem 0 0.45rem;
+  text-align: center;
+}
+
+#mode-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 0.55rem;
+}
+
+#mode-buttons {
+  display: inline-grid;
+  grid-template-columns: repeat(2, 1fr);
+  border: 1px solid rgba(139, 148, 158, 0.26);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mode-button,
+#secret-submit,
+#reset-game-button {
+  border: 0;
+  min-height: 30px;
+  padding: 0 10px;
+  background-color: #161f29;
+  color: #c9d1d9;
+  font-size: 0.72rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.mode-button + .mode-button {
+  border-left: 1px solid rgba(139, 148, 158, 0.22);
+}
+
+.mode-button.active,
+#secret-submit {
+  background-color: #1f6feb;
+  color: #ffffff;
+}
+
+#secret-form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+#secret-form.hidden {
+  display: none;
+}
+
+#secret-input {
+  width: 78px;
+  min-height: 30px;
+  border: 1px solid rgba(139, 148, 158, 0.26);
+  border-radius: 8px;
+  background-color: #0b0f14;
+  color: #f0f6fc;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+#secret-submit {
+  border-radius: 8px;
+}
+
+#reset-game-button {
+  border: 1px solid rgba(240, 246, 252, 0.14);
+  border-radius: 8px;
+  background-color: #21262d;
+  color: #c9d1d9;
+}
+
+.mode-button:disabled {
+  cursor: default;
+  opacity: 0.74;
+}
+
+#status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  align-items: center;
+}
+
+#status-badge {
+  border: 1px solid rgba(121, 192, 255, 0.35);
+  border-radius: 999px;
+  padding: 0.18rem 0.7rem;
+  color: #79c0ff;
+  background-color: #111820;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+#status-text {
+  color: #f0f6fc;
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+#hint-text {
+  max-width: 320px;
+  color: #8b949e;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-align: center;
+}
+
+#board-container {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  flex-grow: 1;
+  overflow: hidden;
+  padding-top: 4px;
+  padding-bottom: 0;
+}
+
+#board {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  grid-gap: 8px;
+  padding: 10px 8px 2px;
+  box-sizing: border-box;
+}
+
+.square {
+  border: 2px solid rgba(139, 148, 158, 0.28);
+  width: clamp(46px, 8.6vw, 58px);
+  height: clamp(46px, 8.6vw, 58px);
+  font-size: clamp(1.8rem, 4.9vw, 2.45rem);
+  border-radius: 8px;
+  font-weight: 800;
+  color: #f0f6fc;
+  text-transform: uppercase;
+
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: #111820;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(240, 246, 252, 0.04);
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.square:hover {
+  transform: translateY(-1px);
+}
+
+.state-unset {
+  background-color: #111820;
+  border-color: rgba(139, 148, 158, 0.28);
+}
+
+.state-incorrect {
+  background-color: #30363d;
+  border-color: #484f58;
+}
+
+.state-bad-position {
+  background-color: #b08800;
+  border-color: #d29922;
+  color: #ffffff;
+}
+
+.state-good {
+  background-color: #238636;
+  border-color: #2ea043;
+  color: #ffffff;
+}

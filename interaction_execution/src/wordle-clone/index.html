@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wordle Operator Console</title>
+
+    <script src="js/main.js"></script>
+
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <div id="container">
+      <div id="game">
+        <header>
+          <h1 class="title">WORDLE</h1>
+          <div id="mode-panel">
+            <div id="mode-buttons" role="group" aria-label="Game mode">
+              <button id="mode-a-button" class="mode-button" type="button">Mode A</button>
+              <button id="mode-b-button" class="mode-button" type="button">Mode B</button>
+            </div>
+            <form id="secret-form" autocomplete="off">
+              <input
+                id="secret-input"
+                maxlength="5"
+                pattern="[A-Za-z]{5}"
+                placeholder="Secret"
+                type="text"
+              />
+              <button id="secret-submit" type="submit">Set</button>
+            </form>
+            <button id="reset-game-button" type="button">Reset</button>
+          </div>
+          <div id="status-panel">
+            <span id="status-badge">WAITING</span>
+            <p id="status-text">Attempt 1</p>
+          </div>
+        </header>
+
+        <div id="board-container">
+          <div id="board"></div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
