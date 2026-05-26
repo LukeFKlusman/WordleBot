@@ -34,356 +34,6 @@ namespace
 {
 constexpr const char * kWrist3JointName = "wrist_3_joint";
 constexpr double kTwoPi = 2.0 * M_PI;
-
-double yawFromPose(const geometry_msgs::msg::Pose & pose);
-
-std::vector<std::string> gripperTouchLinks()
-{
-  return {
-    "wrist_3_link", "flange", "tool0", "ft_frame",
-    "onrobot_base_link",
-    "cable_connector_0", "cable_connector_1",
-    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
-    "finger_width_mock_link",
-    "left_inner_knuckle", "right_inner_knuckle",
-    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
-    "gripper_tcp"
-  };
-}
-
-geometry_msgs::msg::Pose offsetWorldZ(geometry_msgs::msg::Pose pose, double dz)
-{
-  pose.position.z += dz;
-  return pose;
-}
-
-struct SolutionMotionScore {
-  double joint_motion{0.0};
-  double wrist_spin{0.0};
-  double place_yaw_error{0.0};
-  double place_yaw_penalty{0.0};
-  double total{0.0};
-  bool rejected{false};
-  bool has_place_yaw{false};
-  std::size_t trajectory_count{0};
-};
-
-std::optional<std::size_t> findJointIndex(
-  const std::vector<std::string> & joint_names,
-  const std::string & joint_name)
-{
-  const auto it = std::find(joint_names.begin(), joint_names.end(), joint_name);
-  if (it == joint_names.end()) {
-    return std::nullopt;
-  }
-  return static_cast<std::size_t>(std::distance(joint_names.begin(), it));
-}
-
-double shortestRevoluteDelta(double from, double to)
-{
-  double delta = to - from;
-  while (delta > M_PI) {
-    delta -= kTwoPi;
-  }
-  while (delta < -M_PI) {
-    delta += kTwoPi;
-  }
-  return delta;
-}
-
-double yawPenalty(
-  double actual_yaw,
-  double desired_yaw,
-  double tolerance,
-  double weight,
-  double & yaw_error)
-{
-  yaw_error = std::abs(shortestRevoluteDelta(desired_yaw, actual_yaw));
-  const double excess = std::max(0.0, yaw_error - std::max(0.0, tolerance));
-  return std::max(0.0, weight) * excess * excess;
-}
-
-bool isPlaceYawSolution(const mtc::SolutionBase & solution)
-{
-  const auto * creator = solution.creator();
-  if (creator == nullptr) {
-    return false;
-  }
-
-  const std::string & name = creator->name();
-  return name == "generate place pose" ||
-         name == "place pose IK";
-}
-
-std::optional<double> targetYawFromInterfaceState(const mtc::InterfaceState * state)
-{
-  if (state == nullptr || !state->properties().hasProperty("target_pose")) {
-    return std::nullopt;
-  }
-
-  try {
-    const auto & target_pose =
-      state->properties().get<geometry_msgs::msg::PoseStamped>("target_pose");
-    return yawFromPose(target_pose.pose);
-  } catch (const std::exception &) {
-    return std::nullopt;
-  }
-}
-
-std::optional<double> placeYawFromSolution(const mtc::SolutionBase & solution)
-{
-  if (isPlaceYawSolution(solution)) {
-    if (auto yaw = targetYawFromInterfaceState(solution.end())) {
-      return yaw;
-    }
-    if (auto yaw = targetYawFromInterfaceState(solution.start())) {
-      return yaw;
-    }
-  }
-
-  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
-    for (const auto * child : sequence->solutions()) {
-      if (child != nullptr) {
-        if (auto yaw = placeYawFromSolution(*child)) {
-          return yaw;
-        }
-      }
-    }
-    return std::nullopt;
-  }
-
-  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
-    if (wrapped->wrapped() != nullptr) {
-      return placeYawFromSolution(*wrapped->wrapped());
-    }
-  }
-
-  return std::nullopt;
-}
-
-void accumulateTrajectoryMotionScore(
-  const robot_trajectory::RobotTrajectory & trajectory,
-  const moveit::core::JointModelGroup * jmg,
-  SolutionMotionScore & score)
-{
-  if (jmg == nullptr || trajectory.getWayPointCount() < 2) {
-    return;
-  }
-
-  ++score.trajectory_count;
-  const auto & joint_names = jmg->getVariableNames();
-  const auto wrist2_index = findJointIndex(joint_names, "wrist_2_joint");
-  const auto wrist3_index = findJointIndex(joint_names, "wrist_3_joint");
-
-  std::vector<double> prev;
-  std::vector<double> curr;
-  for (std::size_t i = 1; i < trajectory.getWayPointCount(); ++i) {
-    trajectory.getWayPoint(i - 1).copyJointGroupPositions(jmg, prev);
-    trajectory.getWayPoint(i).copyJointGroupPositions(jmg, curr);
-    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
-      const double delta = std::abs(shortestRevoluteDelta(prev[j], curr[j]));
-      score.joint_motion += delta;
-      if ((wrist2_index && j == *wrist2_index) || (wrist3_index && j == *wrist3_index)) {
-        score.wrist_spin += delta;
-      }
-    }
-  }
-}
-
-void accumulateSolutionMotionScore(
-  const mtc::SolutionBase & solution,
-  const moveit::core::JointModelGroup * jmg,
-  SolutionMotionScore & score)
-{
-  if (const auto * sub = dynamic_cast<const mtc::SubTrajectory *>(&solution)) {
-    if (sub->trajectory()) {
-      accumulateTrajectoryMotionScore(*sub->trajectory(), jmg, score);
-    }
-    return;
-  }
-
-  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
-    for (const auto * child : sequence->solutions()) {
-      if (child != nullptr) {
-        accumulateSolutionMotionScore(*child, jmg, score);
-      }
-    }
-    return;
-  }
-
-  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
-    if (wrapped->wrapped() != nullptr) {
-      accumulateSolutionMotionScore(*wrapped->wrapped(), jmg, score);
-    }
-  }
-}
-
-SolutionMotionScore scoreTaskSolution(
-  const mtc::SolutionBase & solution,
-  const moveit::core::JointModelGroup * jmg,
-  double wrist_spin_weight,
-  double wrist_spin_reject_threshold,
-  double desired_place_yaw,
-  double place_yaw_tolerance,
-  double place_yaw_penalty_weight)
-{
-  SolutionMotionScore score;
-  accumulateSolutionMotionScore(solution, jmg, score);
-  if (const auto place_yaw = placeYawFromSolution(solution)) {
-    score.has_place_yaw = true;
-    score.place_yaw_penalty = yawPenalty(
-      *place_yaw, desired_place_yaw, place_yaw_tolerance,
-      place_yaw_penalty_weight, score.place_yaw_error);
-  }
-  score.total =
-    score.joint_motion +
-    wrist_spin_weight * score.wrist_spin +
-    score.place_yaw_penalty +
-    1e-3 * solution.cost();
-  score.rejected =
-    wrist_spin_reject_threshold > 0.0 && score.wrist_spin > wrist_spin_reject_threshold;
-  return score;
-}
-
-bool alignWrist3JointTrajectoryToReference(
-  trajectory_msgs::msg::JointTrajectory & joint_trajectory,
-  double & reference_wrist3,
-  const std::string & context)
-{
-  const auto wrist3_index = findJointIndex(joint_trajectory.joint_names, kWrist3JointName);
-  if (!wrist3_index) {
-    return false;
-  }
-
-  auto first_point = std::find_if(
-    joint_trajectory.points.begin(), joint_trajectory.points.end(),
-    [wrist3_index](const auto & point) {
-      return point.positions.size() > *wrist3_index;
-    });
-  if (first_point == joint_trajectory.points.end()) {
-    return false;
-  }
-
-  const double first_wrist3 = first_point->positions[*wrist3_index];
-  const double reference_before = reference_wrist3;
-  const double offset =
-    WordleBotController::computeContinuousJointRevolutionOffset(reference_wrist3, first_wrist3);
-
-  for (auto & point : joint_trajectory.points) {
-    if (point.positions.size() > *wrist3_index) {
-      point.positions[*wrist3_index] += offset;
-      reference_wrist3 = point.positions[*wrist3_index];
-    }
-  }
-
-  if (std::abs(offset) >= 1e-9) {
-    RCLCPP_DEBUG(LOGGER,
-      "%s: aligned wrist_3 trajectory by %.6f rad (%+.0f rev): reference=%.6f, first_raw=%.6f, first_aligned=%.6f.",
-      context.c_str(), offset, offset / kTwoPi, reference_before, first_wrist3, first_wrist3 + offset);
-  }
-  return true;
-}
-
-int getIntParam(const rclcpp::Node::SharedPtr & node, const std::string & name, int default_value)
-{
-  if (!node->has_parameter(name)) {
-    node->declare_parameter<int>(name, default_value);
-  }
-  return static_cast<int>(node->get_parameter(name).as_int());
-}
-
-double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & name, double default_value)
-{
-  if (!node->has_parameter(name)) {
-    node->declare_parameter<double>(name, default_value);
-  }
-  return node->get_parameter(name).as_double();
-}
-
-std::map<std::string, double> getWorkingJoints(const rclcpp::Node::SharedPtr & node)
-{
-  return {
-    {"shoulder_pan_joint",  node->get_parameter("working_joints.shoulder_pan_joint").as_double()},
-    {"shoulder_lift_joint", node->get_parameter("working_joints.shoulder_lift_joint").as_double()},
-    {"elbow_joint",         node->get_parameter("working_joints.elbow_joint").as_double()},
-    {"wrist_1_joint",       node->get_parameter("working_joints.wrist_1_joint").as_double()},
-    {"wrist_2_joint",       node->get_parameter("working_joints.wrist_2_joint").as_double()},
-    {"wrist_3_joint",       node->get_parameter("working_joints.wrist_3_joint").as_double()},
-  };
-}
-
-bool normalizePoseOrientation(
-  geometry_msgs::msg::Pose & pose,
-  const std::string & label,
-  bool identity_if_invalid = true)
-{
-  const double norm = std::sqrt(
-    pose.orientation.x * pose.orientation.x +
-    pose.orientation.y * pose.orientation.y +
-    pose.orientation.z * pose.orientation.z +
-    pose.orientation.w * pose.orientation.w);
-
-  if (norm < 1e-9) {
-    if (identity_if_invalid) {
-      pose.orientation.x = 0.0;
-      pose.orientation.y = 0.0;
-      pose.orientation.z = 0.0;
-      pose.orientation.w = 1.0;
-      RCLCPP_WARN(LOGGER,
-        "%s orientation quaternion was invalid/near-zero; using identity orientation.",
-        label.c_str());
-    }
-    return false;
-  }
-
-  pose.orientation.x /= norm;
-  pose.orientation.y /= norm;
-  pose.orientation.z /= norm;
-  pose.orientation.w /= norm;
-  return true;
-}
-
-double yawFromPose(const geometry_msgs::msg::Pose & pose)
-{
-  tf2::Quaternion q(
-    pose.orientation.x,
-    pose.orientation.y,
-    pose.orientation.z,
-    pose.orientation.w);
-  q.normalize();
-  double roll = 0.0;
-  double pitch = 0.0;
-  double yaw = 0.0;
-  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-  return yaw;
-}
-
-geometry_msgs::msg::Pose rotatePoseYaw(
-  geometry_msgs::msg::Pose pose,
-  double yaw_delta)
-{
-  tf2::Quaternion q(
-    pose.orientation.x,
-    pose.orientation.y,
-    pose.orientation.z,
-    pose.orientation.w);
-  q.normalize();
-
-  double roll = 0.0;
-  double pitch = 0.0;
-  double yaw = 0.0;
-  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-
-  tf2::Quaternion rotated;
-  rotated.setRPY(roll, pitch, yaw + yaw_delta);
-  rotated.normalize();
-  pose.orientation.x = rotated.x();
-  pose.orientation.y = rotated.y();
-  pose.orientation.z = rotated.z();
-  pose.orientation.w = rotated.w();
-  return pose;
-}
-
 }  // namespace
 
 WordleBotController::WordleBotController(rclcpp::Node::SharedPtr node)
@@ -423,9 +73,15 @@ WordleBotController::~WordleBotController()
 {
 }
 
-// ---------------------------------------------------------------------------
-// Velocity Scaling
-// ---------------------------------------------------------------------------
+// =========================================================================
+// MOTION HELPERS
+// -------------------------------------------------------------------------
+// Shared velocity-scaling helpers used by MTC, MoveGroupInterface, and Cartesian motion.
+// _-------------------------------------------------------------------------
+// loadVelocityScalingProfiles - Loads velocity and acceleration scaling profiles from ROS parameters.
+// queryCurrentStateMinDistance - Computes current clearance from the monitored planning scene.
+// computeTransitScaling - Converts scene clearance into a transit velocity scaling value.
+// ==========================================================================
 
 void WordleBotController::loadVelocityScalingProfiles()
 {
@@ -625,21 +281,23 @@ bool WordleBotController::validateStateCollisionFree(
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// Collision Scene Management
-// Builds and tears down the static environment (floor, sensor guard) and
-// manages dynamic collision objects added at runtime.
-// ---------------------------------------------------------------------------
-// setupCollisionScene       — add the floor plane and attach the sensor guard
-//                             cylinder to the end effector
-// clearCollisionScene       — remove all static objects and detach the sensor guard
-// addCollisionObject        — apply an ADD / REMOVE / MOVE collision object
-//                             to the live planning scene
-// clearLetterObjects        — remove a list of letter objects by ID from the scene
-// attachSensorCollisionObject — attach a protective cylinder to tool0 so the
-//                               planner treats the sensor as part of the robot
-// detachSensorCollisionObject — detach the sensor guard cylinder from tool0
-// ---------------------------------------------------------------------------
+// ==========================================================================
+// COLLISION AND PLANNING SCENE FUNCTIONS
+// ------------------------------------------------------------------
+// Builds and synchronises the planning scene, collision objects, attached objects, and collision checks.
+// ------------------------------------------------------------------
+// refreshPlanningScene - Requests the latest planning scene from move_group.
+// waitForWorldObjectState - Waits for a world object to appear or disappear.
+// waitForAttachedObjectState - Waits for an attached object to appear, disappear, or attach to a link.
+// logAttachedObjects - Logs attached collision objects for diagnostics.
+// validateStateCollisionFree - Checks a robot state for collisions and logs contacts.
+// setupCollisionScene - Adds the floor and gameboard, then attaches the sensor guard.
+// clearCollisionScene - Removes static collision objects and detaches the sensor guard.
+// addCollisionObject - Applies an ADD, REMOVE, or MOVE collision object.
+// clearLetterObjects - Removes letter collision objects by ID.
+// attachSensorCollisionObject - Attaches the sensor guard cylinder to tool0.
+// detachSensorCollisionObject - Detaches the sensor guard cylinder from tool0.
+// ==========================================================================
 
 void WordleBotController::setupCollisionScene()
 {
@@ -809,21 +467,17 @@ void WordleBotController::detachSensorCollisionObject()
   RCLCPP_INFO(LOGGER, "Sensor guard collision cylinder detached from tool0.");
 }
 
-// ---------------------------------------------------------------------------
-// Pick and Place
-// Build, plan, and execute MTC pick-and-place tasks. The primary workflow is
-// the two-phase plan-then-execute path (createTask → planPickAndPlace →
-// executePlannedTask). doPickAndPlace is a single-call convenience wrapper
-// that plans and executes in one shot.
-// ---------------------------------------------------------------------------
-// createTask          — build an MTC task with all pick-and-place stages;
-//                       accepts an optional chained start scene for batching
-// planPickAndPlace    — plan one pick-and-place task without executing it;
-//                       returns a PlannedPickPlace with the terminal scene for
-//                       chaining to the next task
-// executePlannedTask  — execute a previously planned pick-and-place task
-// doPickAndPlace      — convenience wrapper: plan and execute in one call
-// ---------------------------------------------------------------------------
+// =========
+// PICK AND PLACE
+// __________
+// Builds, plans, and executes letter pick-and-place motions using MTC and MoveGroupInterface.
+// __________
+// createTask - Builds the full MTC pick-and-place task.
+// planPickAndPlace - Plans one MTC pick-and-place task without executing it.
+// executePlannedTask - Executes a previously planned MTC pick-and-place task.
+// doPickAndPlace - Plans and executes one MTC pick-and-place task in a single call.
+// executePickAndPlaceMoveGroup - Executes pick-and-place with sequential MoveGroupInterface phases.
+// =========
 
 mtc::Task WordleBotController::createTask(const geometry_msgs::msg::Pose & object_pose,
                                           const geometry_msgs::msg::Pose & place_pose,
@@ -1888,16 +1542,15 @@ bool WordleBotController::executePickAndPlaceMoveGroup(
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Goal Navigation
-// Plan and execute free-space goal-pose moves using the OMPL sampling planner.
-// Supports scene chaining so multiple goals can be planned sequentially before
-// any motion begins.
-// ---------------------------------------------------------------------------
-// planMoveToGoal         — plan a move to an absolute goal pose; accepts an
-//                          optional chained start scene for multi-goal missions
-// executePlannedMoveToGoal — execute a previously planned move-to-goal task
-// ---------------------------------------------------------------------------
+// =========
+// MOVE TO GOAL
+// __________
+// Plans and executes free-space end-effector goal-pose moves using MTC or MoveGroupInterface.
+// __________
+// planMoveToGoal - Plans one MTC move-to-goal task with optional scene chaining.
+// executePlannedMoveToGoal - Executes a previously planned MTC move-to-goal task.
+// moveToGoal - Solves IK, plans, selects, aligns, and executes one MoveGroupInterface goal.
+// =========
 
 WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
   const geometry_msgs::msg::Pose & goal_pose,
@@ -2020,17 +1673,16 @@ bool WordleBotController::executePlannedMoveToGoal(PlannedMoveToGoal & planned)
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// MoveGroupInterface Goal Navigation (USE_MTC_FOR_GOALS == false)
-// Sequential plan-then-execute per goal. Three private helpers feed into the
-// public moveToGoal entry point.
-// ---------------------------------------------------------------------------
-// computeBestIK         — IK with warm-start seeding, 2π normalisation,
-//                         wrist_3 clamping, no shoulder rejection
-// generateCandidatePlans — call move_group_.plan() until success or timeout
-// selectBestPlan        — pick lowest-cost plan by computeTotalJointDisplacement
-// moveToGoal            — orchestrator: IK → collision preflight → plan → best → execute
-// ---------------------------------------------------------------------------
+// =========
+// MOTION HELPERS
+// __________
+// Private IK and MoveGroupInterface planning helpers used by move-to-goal and Cartesian fallback motion.
+// __________
+// computeBestIK - Finds a collision-aware IK solution using warm starts and random retries.
+// generateCandidatePlans - Collects MoveGroupInterface candidate plans until success count or timeout.
+// selectBestPlan - Selects the candidate with the lowest total joint displacement.
+// moveToGoal - Executes the full IK, preflight, planning, selection, alignment, and execution path.
+// =========
 
 std::vector<double> WordleBotController::computeBestIK(
   const moveit::core::RobotStatePtr & current_state,
@@ -2531,20 +2183,16 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Scan and Sweep
-// Four-pose camera scan sequence.
-// MGI path (USE_MTC_FOR_SCAN_SWEEP == false):
-//   Pose 0 via moveToGoal; poses 1-3 via computeCartesianPath with moveToGoal
-//   fallback; then returnToHome.
-// MTC path (USE_MTC_FOR_SCAN_SWEEP == true):
-//   Pose 1 via free-space OMPL (Connect + ComputeIK); poses 2-4 via straight-
-//   line Cartesian sweeps (MoveRelative).
-// ---------------------------------------------------------------------------
-// moveCartesianToWaypoint — single Cartesian segment with moveToGoal fallback
-// createScanAndSweepTask  — build the unified MTC task
-// runScanAndSweep         — execute the full four-pose scan sequence
-// ---------------------------------------------------------------------------
+// =========
+// SCAN AND SWEEP
+// __________
+// Runs the camera scan sequence using MoveGroupInterface Cartesian sweeps or the optional MTC path.
+// __________
+// moveCartesianToWaypoint - Executes one scan-profile Cartesian segment with moveToGoal fallback.
+// moveCartesianToWaypointWithScaling - Executes one Cartesian segment with explicit scaling and fallback.
+// createScanAndSweepTask - Builds the unified MTC scan-and-sweep task.
+// runScanAndSweep - Executes the full six-pose scan-and-sweep sequence.
+// =========
 
 bool WordleBotController::moveCartesianToWaypoint(
   const geometry_msgs::msg::Pose & target_pose)
@@ -2861,17 +2509,22 @@ bool WordleBotController::runScanAndSweep(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Standalone Arm Motions
-// Simple one-shot MTC tasks for moving the arm to known named states.
-// These are available while no mission is running (IDLE state).
-// ---------------------------------------------------------------------------
-// returnToHome            — move the arm to the configured working joints
-// openGripperFull         — move the gripper to the SRDF "open" named state (full travel)
-// closeGripperFull        — move the gripper to the SRDF "closed" named state (full travel)
-// openGripperOperational  — command operational open width via /onrobot/finger_width_controller/commands
-// closeGripperOperational — command operational closed width via /onrobot/finger_width_controller/commands
-// ---------------------------------------------------------------------------
+// =========
+// OTHER MOTION
+// __________
+// Provides standalone arm, gripper, recovery, and stop-control motions outside a mission sequence.
+// __________
+// returnToHome - Moves the arm to configured working joints.
+// returnToWorkingPose - Moves the arm to the configured working pose.
+// openGripperFull - Opens the gripper to the SRDF full-open named state.
+// closeGripperFull - Closes the gripper to the SRDF closed named state.
+// openGripperOperational - Opens the gripper to the configured operational width.
+// closeGripperOperational - Closes the gripper to the configured operational width.
+// isGripperClosed - Estimates whether the current gripper state is closer to closed than open.
+// recoverObject - Moves to a safe recovery pose, releases a held object, and returns to working pose.
+// stop - Cancels active motion and sets the stop flag.
+// clearStopFlag - Clears the stop flag before new motion.
+// =========
 
 bool WordleBotController::returnToHome()
 {
@@ -3247,16 +2900,6 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Motion Control
-// Interrupt and reset helpers for the stop/resume lifecycle.
-// ---------------------------------------------------------------------------
-// stop          — cancel the in-progress trajectory and set the stop flag;
-//                 any blocking execute() call will return a non-SUCCESS code
-// clearStopFlag — clear the stop flag before issuing a new motion so the
-//                 motion is not immediately rejected
-// ---------------------------------------------------------------------------
-
 void WordleBotController::stop()
 {
   stop_requested_.store(true);
@@ -3269,17 +2912,18 @@ void WordleBotController::clearStopFlag()
   stop_requested_.store(false);
 }
 
-// ---------------------------------------------------------------------------
-// Helper Functions
-// Stateless utility functions used across planning and scene management.
-// ---------------------------------------------------------------------------
-// buildPose                    — construct a geometry_msgs::Pose from XYZ
-//                                position and RPY orientation
-// computeTotalJointDisplacement — compute Σ|Δq| across all joints and
-//                                 trajectory steps (L1 joint-space path length)
-// buildPathConstraints         — return the MoveIt path constraints used by
-//                                MTC planning stages
-// ---------------------------------------------------------------------------
+// =========
+// MOTION HELPERS
+// __________
+// Shared trajectory alignment, execution, pose construction, path-cost, and constraint helpers.
+// __________
+// alignWrist3TrajectoryToCurrentState - Aligns a RobotTrajectory to the live wrist_3 revolution.
+// executeAlignedTaskSolution - Executes an MTC task solution after wrist_3 alignment.
+// buildPose - Builds full quaternion pose [(xyz),(xyzw)] from XYZ and RPY.
+// computeTotalJointDisplacement - Computes total absolute joint motion in a MoveGroupInterface plan.
+// buildPathConstraints - Builds orientation path constraints for transit moves.
+// buildJointLimitConstraints - Builds wrist joint constraints for planning.
+// =========
 
 bool WordleBotController::alignWrist3TrajectoryToCurrentState(
   moveit_msgs::msg::RobotTrajectory & trajectory,
@@ -3522,4 +3166,377 @@ moveit_msgs::msg::Constraints WordleBotController::buildJointLimitConstraints()
     c.joint_constraints.push_back(jc);
   }
   return c;
+}
+
+// =========
+// MATH AND OTHER FUNCTION HELPERS
+// __________
+// Small stateless utilities for parameters, poses, yaw, task-solution scoring,
+// and wrist trajectory handling.
+// __________
+// gripperTouchLinks - Lists links allowed to touch attached gripper objects.
+// offsetWorldZ - Offsets a pose along world Z.
+// findJointIndex - Finds a joint name index in a joint-name vector.
+// shortestRevoluteDelta - Computes shortest signed revolute-joint delta.
+// yawPenalty - Scores yaw error outside tolerance.
+// isPlaceYawSolution - Identifies MTC place-yaw solution stages.
+// targetYawFromInterfaceState - Extracts target yaw from an MTC interface state.
+// placeYawFromSolution - Recursively finds place yaw in an MTC solution.
+// accumulateTrajectoryMotionScore - Adds joint-motion cost from one robot trajectory.
+// accumulateSolutionMotionScore - Recursively adds joint-motion cost from an MTC solution.
+// scoreTaskSolution - Scores a complete MTC solution for selection.
+// alignWrist3JointTrajectoryToReference - Aligns one joint trajectory to a wrist_3 reference.
+// getIntParam - Declares and reads an integer parameter.
+// getDoubleParam - Declares and reads a double parameter.
+// getWorkingJoints - Reads configured working joint targets.
+// normalizePoseOrientation - Normalizes a pose quaternion.
+// yawFromPose - Computes yaw from a pose quaternion.
+// rotatePoseYaw - Returns a pose rotated by a yaw delta.
+// =========
+
+std::vector<std::string> WordleBotController::gripperTouchLinks()
+{
+  return {
+    "wrist_3_link", "flange", "tool0", "ft_frame",
+    "onrobot_base_link",
+    "cable_connector_0", "cable_connector_1",
+    "left_outer_knuckle", "left_inner_finger", "left_finger_tip",
+    "finger_width_mock_link",
+    "left_inner_knuckle", "right_inner_knuckle",
+    "right_outer_knuckle", "right_inner_finger", "right_finger_tip",
+    "gripper_tcp"
+  };
+}
+
+geometry_msgs::msg::Pose WordleBotController::offsetWorldZ(
+  geometry_msgs::msg::Pose pose,
+  double dz)
+{
+  pose.position.z += dz;
+  return pose;
+}
+
+std::optional<std::size_t> WordleBotController::findJointIndex(
+  const std::vector<std::string> & joint_names,
+  const std::string & joint_name)
+{
+  const auto it = std::find(joint_names.begin(), joint_names.end(), joint_name);
+  if (it == joint_names.end()) {
+    return std::nullopt;
+  }
+  return static_cast<std::size_t>(std::distance(joint_names.begin(), it));
+}
+
+double WordleBotController::shortestRevoluteDelta(double from, double to)
+{
+  double delta = to - from;
+  while (delta > M_PI) {
+    delta -= kTwoPi;
+  }
+  while (delta < -M_PI) {
+    delta += kTwoPi;
+  }
+  return delta;
+}
+
+double WordleBotController::yawPenalty(
+  double actual_yaw,
+  double desired_yaw,
+  double tolerance,
+  double weight,
+  double & yaw_error)
+{
+  yaw_error = std::abs(shortestRevoluteDelta(desired_yaw, actual_yaw));
+  const double excess = std::max(0.0, yaw_error - std::max(0.0, tolerance));
+  return std::max(0.0, weight) * excess * excess;
+}
+
+bool WordleBotController::isPlaceYawSolution(const mtc::SolutionBase & solution)
+{
+  const auto * creator = solution.creator();
+  if (creator == nullptr) {
+    return false;
+  }
+
+  const std::string & name = creator->name();
+  return name == "generate place pose" ||
+         name == "place pose IK";
+}
+
+std::optional<double> WordleBotController::targetYawFromInterfaceState(
+  const mtc::InterfaceState * state)
+{
+  if (state == nullptr || !state->properties().hasProperty("target_pose")) {
+    return std::nullopt;
+  }
+
+  try {
+    const auto & target_pose =
+      state->properties().get<geometry_msgs::msg::PoseStamped>("target_pose");
+    return yawFromPose(target_pose.pose);
+  } catch (const std::exception &) {
+    return std::nullopt;
+  }
+}
+
+std::optional<double> WordleBotController::placeYawFromSolution(
+  const mtc::SolutionBase & solution)
+{
+  if (isPlaceYawSolution(solution)) {
+    if (auto yaw = targetYawFromInterfaceState(solution.end())) {
+      return yaw;
+    }
+    if (auto yaw = targetYawFromInterfaceState(solution.start())) {
+      return yaw;
+    }
+  }
+
+  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
+    for (const auto * child : sequence->solutions()) {
+      if (child != nullptr) {
+        if (auto yaw = placeYawFromSolution(*child)) {
+          return yaw;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
+    if (wrapped->wrapped() != nullptr) {
+      return placeYawFromSolution(*wrapped->wrapped());
+    }
+  }
+
+  return std::nullopt;
+}
+
+void WordleBotController::accumulateTrajectoryMotionScore(
+  const robot_trajectory::RobotTrajectory & trajectory,
+  const moveit::core::JointModelGroup * jmg,
+  SolutionMotionScore & score)
+{
+  if (jmg == nullptr || trajectory.getWayPointCount() < 2) {
+    return;
+  }
+
+  ++score.trajectory_count;
+  const auto & joint_names = jmg->getVariableNames();
+  const auto wrist2_index = findJointIndex(joint_names, "wrist_2_joint");
+  const auto wrist3_index = findJointIndex(joint_names, "wrist_3_joint");
+
+  std::vector<double> prev;
+  std::vector<double> curr;
+  for (std::size_t i = 1; i < trajectory.getWayPointCount(); ++i) {
+    trajectory.getWayPoint(i - 1).copyJointGroupPositions(jmg, prev);
+    trajectory.getWayPoint(i).copyJointGroupPositions(jmg, curr);
+    for (std::size_t j = 0; j < prev.size() && j < curr.size(); ++j) {
+      const double delta = std::abs(shortestRevoluteDelta(prev[j], curr[j]));
+      score.joint_motion += delta;
+      if ((wrist2_index && j == *wrist2_index) || (wrist3_index && j == *wrist3_index)) {
+        score.wrist_spin += delta;
+      }
+    }
+  }
+}
+
+void WordleBotController::accumulateSolutionMotionScore(
+  const mtc::SolutionBase & solution,
+  const moveit::core::JointModelGroup * jmg,
+  SolutionMotionScore & score)
+{
+  if (const auto * sub = dynamic_cast<const mtc::SubTrajectory *>(&solution)) {
+    if (sub->trajectory()) {
+      accumulateTrajectoryMotionScore(*sub->trajectory(), jmg, score);
+    }
+    return;
+  }
+
+  if (const auto * sequence = dynamic_cast<const mtc::SolutionSequence *>(&solution)) {
+    for (const auto * child : sequence->solutions()) {
+      if (child != nullptr) {
+        accumulateSolutionMotionScore(*child, jmg, score);
+      }
+    }
+    return;
+  }
+
+  if (const auto * wrapped = dynamic_cast<const mtc::WrappedSolution *>(&solution)) {
+    if (wrapped->wrapped() != nullptr) {
+      accumulateSolutionMotionScore(*wrapped->wrapped(), jmg, score);
+    }
+  }
+}
+
+WordleBotController::SolutionMotionScore WordleBotController::scoreTaskSolution(
+  const mtc::SolutionBase & solution,
+  const moveit::core::JointModelGroup * jmg,
+  double wrist_spin_weight,
+  double wrist_spin_reject_threshold,
+  double desired_place_yaw,
+  double place_yaw_tolerance,
+  double place_yaw_penalty_weight)
+{
+  SolutionMotionScore score;
+  accumulateSolutionMotionScore(solution, jmg, score);
+  if (const auto place_yaw = placeYawFromSolution(solution)) {
+    score.has_place_yaw = true;
+    score.place_yaw_penalty = yawPenalty(
+      *place_yaw, desired_place_yaw, place_yaw_tolerance,
+      place_yaw_penalty_weight, score.place_yaw_error);
+  }
+  score.total =
+    score.joint_motion +
+    wrist_spin_weight * score.wrist_spin +
+    score.place_yaw_penalty +
+    1e-3 * solution.cost();
+  score.rejected =
+    wrist_spin_reject_threshold > 0.0 && score.wrist_spin > wrist_spin_reject_threshold;
+  return score;
+}
+
+bool WordleBotController::alignWrist3JointTrajectoryToReference(
+  trajectory_msgs::msg::JointTrajectory & joint_trajectory,
+  double & reference_wrist3,
+  const std::string & context)
+{
+  const auto wrist3_index = findJointIndex(joint_trajectory.joint_names, kWrist3JointName);
+  if (!wrist3_index) {
+    return false;
+  }
+
+  auto first_point = std::find_if(
+    joint_trajectory.points.begin(), joint_trajectory.points.end(),
+    [wrist3_index](const auto & point) {
+      return point.positions.size() > *wrist3_index;
+    });
+  if (first_point == joint_trajectory.points.end()) {
+    return false;
+  }
+
+  const double first_wrist3 = first_point->positions[*wrist3_index];
+  const double reference_before = reference_wrist3;
+  const double offset =
+    WordleBotController::computeContinuousJointRevolutionOffset(reference_wrist3, first_wrist3);
+
+  for (auto & point : joint_trajectory.points) {
+    if (point.positions.size() > *wrist3_index) {
+      point.positions[*wrist3_index] += offset;
+      reference_wrist3 = point.positions[*wrist3_index];
+    }
+  }
+
+  if (std::abs(offset) >= 1e-9) {
+    RCLCPP_DEBUG(LOGGER,
+      "%s: aligned wrist_3 trajectory by %.6f rad (%+.0f rev): reference=%.6f, first_raw=%.6f, first_aligned=%.6f.",
+      context.c_str(), offset, offset / kTwoPi, reference_before, first_wrist3, first_wrist3 + offset);
+  }
+  return true;
+}
+
+int WordleBotController::getIntParam(
+  const rclcpp::Node::SharedPtr & node,
+  const std::string & name,
+  int default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<int>(name, default_value);
+  }
+  return static_cast<int>(node->get_parameter(name).as_int());
+}
+
+double WordleBotController::getDoubleParam(
+  const rclcpp::Node::SharedPtr & node,
+  const std::string & name,
+  double default_value)
+{
+  if (!node->has_parameter(name)) {
+    node->declare_parameter<double>(name, default_value);
+  }
+  return node->get_parameter(name).as_double();
+}
+
+std::map<std::string, double> WordleBotController::getWorkingJoints(
+  const rclcpp::Node::SharedPtr & node)
+{
+  return {
+    {"shoulder_pan_joint",  node->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+    {"shoulder_lift_joint", node->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+    {"elbow_joint",         node->get_parameter("working_joints.elbow_joint").as_double()},
+    {"wrist_1_joint",       node->get_parameter("working_joints.wrist_1_joint").as_double()},
+    {"wrist_2_joint",       node->get_parameter("working_joints.wrist_2_joint").as_double()},
+    {"wrist_3_joint",       node->get_parameter("working_joints.wrist_3_joint").as_double()},
+  };
+}
+
+bool WordleBotController::normalizePoseOrientation(
+  geometry_msgs::msg::Pose & pose,
+  const std::string & label,
+  bool identity_if_invalid)
+{
+  const double norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+
+  if (norm < 1e-9) {
+    if (identity_if_invalid) {
+      pose.orientation.x = 0.0;
+      pose.orientation.y = 0.0;
+      pose.orientation.z = 0.0;
+      pose.orientation.w = 1.0;
+      RCLCPP_WARN(LOGGER,
+        "%s orientation quaternion was invalid/near-zero; using identity orientation.",
+        label.c_str());
+    }
+    return false;
+  }
+
+  pose.orientation.x /= norm;
+  pose.orientation.y /= norm;
+  pose.orientation.z /= norm;
+  pose.orientation.w /= norm;
+  return true;
+}
+
+double WordleBotController::yawFromPose(const geometry_msgs::msg::Pose & pose)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return yaw;
+}
+
+geometry_msgs::msg::Pose WordleBotController::rotatePoseYaw(
+  geometry_msgs::msg::Pose pose,
+  double yaw_delta)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+
+  tf2::Quaternion rotated;
+  rotated.setRPY(roll, pitch, yaw + yaw_delta);
+  rotated.normalize();
+  pose.orientation.x = rotated.x();
+  pose.orientation.y = rotated.y();
+  pose.orientation.z = rotated.z();
+  pose.orientation.w = rotated.w();
+  return pose;
 }
