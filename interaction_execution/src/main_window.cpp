@@ -57,6 +57,7 @@ namespace
 constexpr const char * kPerceptionStateTopic = "/mission/state";
 constexpr const char * kCoordinatorMissionStateTopic = "/wordle_bot/mission_state";
 constexpr const char * kRobotStateTopic = "/wordle_bot/robot_state";
+constexpr const char * kMotionCompleteTopic = "/wordle_bot/motion_complete";
 constexpr const char * kMissionProgressTopic = "/wordle_bot/mission_progress";
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
 constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
@@ -157,7 +158,6 @@ MainWindow::MainWindow(rclcpp::Node::SharedPtr node, QWidget * parent)
   loadWordleDictionary();
   setupDrawer();
   setupContentStack();
-  setupDiagnosticsWindow();
   setupGamificationBridge();
   setupVoiceControls();
   setupVoiceHelper();
@@ -770,6 +770,10 @@ void MainWindow::setupVisualDesign()
 
 void MainWindow::setupDiagnosticsWindow()
 {
+  if (diagnostics_mission_value_label_ != nullptr) {
+    return;
+  }
+
   // Use pageDiagnostics instead of creating a separate window
   ui_->pageDiagnostics->setStyleSheet(
     "QWidget {"
@@ -1555,33 +1559,7 @@ void MainWindow::setupSafetyControls()
         return;
       }
 
-      const QString next_state = QString::fromStdString(msg->data).trimmed().toUpper();
-      const bool mission_state_changed = next_state != coordinator_mission_state_;
-      coordinator_mission_state_ = next_state;
-      if (
-        coordinator_mission_state_ == "STOPPED" ||
-        coordinator_mission_state_ == "SAFETY_STOPPED" ||
-        coordinator_mission_state_ == "PERCEPTION_FAILED" ||
-        coordinator_mission_state_ == "MOTION_FAILED" ||
-        coordinator_mission_state_ == "ERROR")
-      {
-        safety_mode_ = SafetyControlMode::Stopped;
-      } else if (coordinator_mission_state_ == "HOMING") {
-        safety_mode_ = SafetyControlMode::Homing;
-      } else if (
-        coordinator_mission_state_ == "SCANNING" ||
-        coordinator_mission_state_ == "READY_TO_MOVE" ||
-        coordinator_mission_state_ == "MOVING" ||
-        coordinator_mission_state_ == "RECOVERING")
-      {
-        safety_mode_ = SafetyControlMode::Active;
-      } else {
-        safety_mode_ = SafetyControlMode::Idle;
-      }
-
-      if (mission_state_changed) {
-        appendDiagnosticsEvent(tr("Mission state changed to %1").arg(coordinator_mission_state_));
-      }
+      applyCoordinatorMissionState(QString::fromStdString(msg->data), true);
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });
@@ -1606,20 +1584,26 @@ void MainWindow::setupSafetyControls()
       if (robot_state == "IDLE" && scan_game_board_active_) {
         scan_game_board_active_ = false;
         publishMissionState("IDLE");
+        applyCoordinatorMissionState("IDLE", true);
         appendDiagnosticsEvent(tr("Scan game board complete"));
       }
 
-      if (robot_state == "IDLE") {
-        coordinator_mission_state_ = "IDLE";
-        safety_mode_ = SafetyControlMode::Idle;
-      } else if (robot_state == "STOPPED") {
-        coordinator_mission_state_ = "STOPPED";
-        safety_mode_ = SafetyControlMode::Stopped;
-      } else if (robot_state == "RUNNING") {
-        safety_mode_ = SafetyControlMode::Active;
+      appendDiagnosticsEvent(tr("Robot state changed to %1").arg(current_robot_state_));
+      updateSafetyControlsState();
+      refreshDiagnosticsPanel();
+    });
+  motion_complete_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
+    kMotionCompleteTopic,
+    10,
+    [this](const std_msgs::msg::Bool::SharedPtr msg) {
+      if (msg == nullptr || !msg->data) {
+        return;
       }
 
-      appendDiagnosticsEvent(tr("Robot state changed to %1").arg(current_robot_state_));
+      scan_game_board_active_ = false;
+      current_robot_state_ = "IDLE";
+      applyCoordinatorMissionState("IDLE", true);
+      appendDiagnosticsEvent(tr("Motion complete"));
       updateSafetyControlsState();
       refreshDiagnosticsPanel();
     });
@@ -1672,11 +1656,12 @@ void MainWindow::setupSafetyControls()
     const bool resume_requested =
       current_robot_state_ == "RUNNING" || current_robot_state_ == "STOPPED";
     publishMissionCommand(resume_requested ? "RESUME" : "START");
-    publishMissionSignal(
-      resume_requested ? resume_mission_pub_ : start_mission_pub_,
-      resume_requested ? kResumeMissionTopic : kStartMissionTopic);
-    coordinator_mission_state_ = "SCANNING";
-    safety_mode_ = SafetyControlMode::Active;
+    if (resume_requested) {
+      publishMissionSignal(resume_mission_pub_, kResumeMissionTopic);
+      applyCoordinatorMissionState("MOVING", false);
+    } else {
+      applyCoordinatorMissionState("SCANNING", false);
+    }
     appendDiagnosticsEvent(
       resume_requested ? tr("Operator command: RESUME") : tr("Operator command: START"));
     updateSafetyControlsState();
@@ -1803,10 +1788,22 @@ void MainWindow::updateSafetyControlsState()
     case SafetyControlMode::Active:
       if (coordinator_mission_state_ == "RECOVERING") {
         updateSafetyBanner("SAFETY CONTROLS | RECOVERING", "#f2cc60");
-      } else if (coordinator_mission_state_ == "MOVING" || coordinator_mission_state_ == "READY_TO_MOVE") {
+      } else if (current_robot_state_ == "RUNNING") {
+        const bool perception_scanning =
+          current_perception_status_.trimmed().toUpper() == QStringLiteral("SCANNING");
+        updateSafetyBanner(
+          perception_scanning ?
+            "SAFETY CONTROLS | SCANNING" :
+            "SAFETY CONTROLS | ROBOT RUNNING",
+          "#56d364");
+      } else if (coordinator_mission_state_ == "MOVING") {
         updateSafetyBanner("SAFETY CONTROLS | ACTIVE", "#56d364");
-      } else {
+      } else if (coordinator_mission_state_ == "READY_TO_MOVE") {
+        updateSafetyBanner("SAFETY CONTROLS | READY", "#56d364");
+      } else if (coordinator_mission_state_ == "SCANNING") {
         updateSafetyBanner("SAFETY CONTROLS | SCANNING", "#56d364");
+      } else {
+        updateSafetyBanner("SAFETY CONTROLS | ACTIVE", "#56d364");
       }
       return;
   }
@@ -1814,7 +1811,7 @@ void MainWindow::updateSafetyControlsState()
 
 void MainWindow::reserveSidebarWidth()
 {
-  const QString widest_safety_text = tr("SAFETY CONTROLS | RETURN HOME");
+  const QString widest_safety_text = tr("SAFETY CONTROLS | ROBOT RUNNING");
   const QString current_safety_text = ui_->safetyLabel->text();
 
   ui_->wordle->ensurePolished();
@@ -2064,6 +2061,11 @@ void MainWindow::renderMissionProgress(const QString & payload)
   diag_mission_title_->setText(object.value("title").toString(tr("Wordle Game Pick and Place")));
   diag_mission_summary_->setText(
     object.value("summary").toString(tr("Awaiting mission progress from coordinator.")));
+  const QString progress_state = object.value("state").toString().trimmed().toUpper();
+  if (!progress_state.isEmpty()) {
+    applyCoordinatorMissionState(progress_state, true);
+    updateSafetyControlsState();
+  }
   if (diagnostics_mission_json_view_ != nullptr) {
     diagnostics_mission_json_view_->setPlainText(
       QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Indented)));
@@ -2145,6 +2147,50 @@ void MainWindow::appendDiagnosticsEvent(const QString & message)
 
   if (diagnostics_event_log_ != nullptr) {
     diagnostics_event_log_->setPlainText(diagnostics_event_entries_.join('\n'));
+  }
+}
+
+MainWindow::SafetyControlMode MainWindow::safetyModeForCoordinatorState(const QString & state) const
+{
+  if (
+    state == "STOPPED" ||
+    state == "SAFETY_STOPPED" ||
+    state == "PERCEPTION_FAILED" ||
+    state == "MOTION_FAILED" ||
+    state == "ERROR")
+  {
+    return SafetyControlMode::Stopped;
+  }
+
+  if (state == "HOMING") {
+    return SafetyControlMode::Homing;
+  }
+
+  if (
+    state == "SCANNING" ||
+    state == "READY_TO_MOVE" ||
+    state == "MOVING" ||
+    state == "RECOVERING")
+  {
+    return SafetyControlMode::Active;
+  }
+
+  return SafetyControlMode::Idle;
+}
+
+void MainWindow::applyCoordinatorMissionState(const QString & state, bool log_event)
+{
+  const QString next_state = state.trimmed().toUpper();
+  if (next_state.isEmpty()) {
+    return;
+  }
+
+  const bool mission_state_changed = next_state != coordinator_mission_state_;
+  coordinator_mission_state_ = next_state;
+  safety_mode_ = safetyModeForCoordinatorState(coordinator_mission_state_);
+
+  if (log_event && mission_state_changed) {
+    appendDiagnosticsEvent(tr("Mission state changed to %1").arg(coordinator_mission_state_));
   }
 }
 

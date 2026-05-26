@@ -92,6 +92,8 @@ private:
   void launchDiagnosticsWindow();
   void refreshDiagnosticsPanel();
   void renderMissionProgress(const QString & payload);
+  void applyCoordinatorMissionState(const QString & state, bool log_event);
+  SafetyControlMode safetyModeForCoordinatorState(const QString & state) const;
   void toggleDrawer();
   void switchToView(ActiveView view);
   void switchCameraMode(CameraMode mode);
@@ -210,6 +212,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr perception_detections_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_state_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motion_complete_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_progress_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_guess_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr gamification_diagnostics_sub_;

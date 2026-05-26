@@ -490,15 +490,17 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
 void MissionCoordinator::publishPerceptionStateForMission(MissionState state)
 {
   switch (state) {
-    case MissionState::IDLE:
     case MissionState::SCANNING:
+    case MissionState::RECOVERING:
+      publishPerceptionState("SCANNING");
+      return;
+    case MissionState::IDLE:
     case MissionState::READY_TO_MOVE:
     case MissionState::MOVING:
     case MissionState::STOPPED:
     case MissionState::SAFETY_STOPPED:
     case MissionState::PERCEPTION_FAILED:
     case MissionState::MOTION_FAILED:
-    case MissionState::RECOVERING:
     case MissionState::HOMING:
     case MissionState::ERROR:
       publishPerceptionState("IDLE");
