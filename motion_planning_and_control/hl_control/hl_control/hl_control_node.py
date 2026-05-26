@@ -94,8 +94,10 @@ class HLControlNode(Node, RLTaskOptimiser):
         if len(word) != 5 or not word.isalpha():
             self.get_logger().warn(f'Received invalid word "{msg.data}" — must be 5 letters.')
             return
-        self.get_logger().info(f'Word request received: {word}')
+        self.get_logger().info(
+            f'Word request received: {word} — clearing board state, waiting for fresh scan.')
         self._pending_word = word
+        self._board_letters = None
         self._try_solve()
 
     def _board_callback(self, msg: GameboardState) -> None:

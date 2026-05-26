@@ -131,6 +131,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     "/wordle_bot/clear_board_objects", 10,
     std::bind(&WordleBotControlNode::clearLetterObjectsCallback, this, std::placeholders::_1));
 
+  word_request_sub_ = node_->create_subscription<std_msgs::msg::String>(
+    "/hl_control/word_request", 10,
+    std::bind(&WordleBotControlNode::wordRequestCallback, this, std::placeholders::_1));
+
   open_gripper_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
     "/wordle_bot/open_gripper", 10,
     std::bind(&WordleBotControlNode::openGripperCallback, this, std::placeholders::_1));
@@ -514,6 +518,42 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
   RCLCPP_INFO(LOGGER,
     "clearLetterObjectsCallback: cleared %zu tracked board object(s) and reset queue.",
     ids_to_remove.size());
+}
+
+void WordleBotControlNode::wordRequestCallback(const std_msgs::msg::String::SharedPtr msg)
+{
+  const std::string word = msg->data;
+  std::vector<std::string> ids_to_remove;
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (mission_running_) {
+      RCLCPP_WARN(LOGGER,
+        "wordRequestCallback: received new word '%s' while mission is running; "
+        "leaving current planning scene unchanged.",
+        word.c_str());
+      return;
+    }
+
+    ids_to_remove = tracked_letter_ids_;
+    std::unordered_set<std::string> ids_seen(ids_to_remove.begin(), ids_to_remove.end());
+    for (const auto & [id, object] : tracked_scene_objects_) {
+      (void)object;
+      if (ids_seen.insert(id).second) {
+        ids_to_remove.push_back(id);
+      }
+    }
+
+    tracked_letter_ids_.clear();
+    tracked_scene_objects_.clear();
+    pick_place_queue_.clear();
+    letter_object_counter_ = 0;
+    mission_armed_ = false;
+  }
+
+  controller_->clearLetterObjects(ids_to_remove);
+  RCLCPP_INFO(LOGGER,
+    "wordRequestCallback: new word '%s' cleared %zu stale board object(s).",
+    word.c_str(), ids_to_remove.size());
 }
 
 // ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ wordle_bot_control_node:
       retreat_max_distance: 0.15
       grasp_z_offset: 0.01
       mgi_pre_pick_distance: 0.05
-      mgi_lift_distance: 0.01
+      mgi_lift_distance: 0.05
       mgi_pre_place_distance: 0.01
       mgi_retreat_distance: 0.05
       mgi_cartesian_min_fraction: 0.95

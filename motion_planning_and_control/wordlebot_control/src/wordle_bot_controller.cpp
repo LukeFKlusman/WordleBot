@@ -2062,6 +2062,7 @@ std::vector<double> WordleBotController::computeBestIK(
     int solver_failures = 0;
     int collision_callback_rejections = 0;
     int collision_rejected_attempts = 0;
+    int collision_contact_logs = 0;
     int wrist3_filter_rejections = 0;
     int wrist1_filter_rejections = 0;
     int accepted_candidates = 0;
@@ -2100,8 +2101,16 @@ std::vector<double> WordleBotController::computeBestIK(
   {
     state->setJointGroupPositions(group, ik_solution);
     state->update();
-    const bool colliding = lps->isStateColliding(*state, group->getName());
-    if (colliding) {
+
+    collision_detection::CollisionRequest req;
+    req.contacts = true;
+    req.max_contacts = 8;
+    req.max_contacts_per_pair = 4;
+    req.group_name = group->getName();
+    collision_detection::CollisionResult res;
+    lps->checkCollision(req, res, *state);
+
+    if (res.collision) {
       ++ik_diag.collision_callback_rejections;
       std::vector<double> rejected_values;
       state->copyJointGroupPositions(group, rejected_values);
@@ -2109,8 +2118,29 @@ std::vector<double> WordleBotController::computeBestIK(
         get_joint_value(rejected_values, "wrist_1_joint"),
         get_joint_value(rejected_values, "wrist_2_joint"),
         get_joint_value(rejected_values, "wrist_3_joint"));
+
+      if (ik_diag.collision_contact_logs < 5) {
+        ++ik_diag.collision_contact_logs;
+        RCLCPP_WARN(LOGGER,
+          "computeBestIK: collision contacts for rejected IK attempt %d "
+          "(log %d/5, %zu contact pair(s)):",
+          active_ik_attempt, ik_diag.collision_contact_logs, res.contacts.size());
+        int logged_contacts = 0;
+        for (const auto & contact_pair : res.contacts) {
+          for (const auto & contact : contact_pair.second) {
+            RCLCPP_WARN(LOGGER, "  %s <-> %s depth=%.5f",
+              contact.body_name_1.c_str(), contact.body_name_2.c_str(), contact.depth);
+            if (++logged_contacts >= 8) {
+              break;
+            }
+          }
+          if (logged_contacts >= 8) {
+            break;
+          }
+        }
+      }
     }
-    return !colliding;
+    return !res.collision;
   };
 
   // One IK attempt: seed → solve → normalise → validate → cost. Uses return
@@ -2225,11 +2255,11 @@ std::vector<double> WordleBotController::computeBestIK(
       "computeBestIK diagnostics: no accepted candidate after %d attempt(s). "
       "solver_failures=%d, solver_successes=%d, accepted=%d, "
       "collision_callback_rejections=%d, collision_rejected_attempts=%d, "
-      "wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
+      "collision_contact_logs=%d, wrist_3_filter_rejections=%d, wrist_1_filter_rejections=%d.",
       ik_diag.total_attempts, ik_diag.solver_failures, ik_successes,
       ik_diag.accepted_candidates, ik_diag.collision_callback_rejections,
-      ik_diag.collision_rejected_attempts, ik_diag.wrist3_filter_rejections,
-      ik_diag.wrist1_filter_rejections);
+      ik_diag.collision_rejected_attempts, ik_diag.collision_contact_logs,
+      ik_diag.wrist3_filter_rejections, ik_diag.wrist1_filter_rejections);
     RCLCPP_INFO(LOGGER,
       "computeBestIK: IK FAILED for target pose (x=%.3f y=%.3f z=%.3f qx=%.3f qy=%.3f qz=%.3f qw=%.3f).",
       target_pose.position.x, target_pose.position.y, target_pose.position.z,
