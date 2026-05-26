@@ -7,7 +7,9 @@
 #include "ui_rs2_concept.h"
 
 #include <algorithm>
+#include <chrono>
 #include <mutex>
+#include <thread>
 #include <QAbstractAnimation>
 #include <QFile>
 #include <QFileInfo>
@@ -74,6 +76,37 @@ constexpr const char * kGamificationModeTopic = "/gamification/mode";
 constexpr const char * kGamificationSecretWordTopic = "/gamification/secret_word";
 constexpr const char * kGamificationPlayerGuessTopic = "/gamification/player_guess";
 constexpr const char * kDiagnosticsTopic = "/diagnostics";
+constexpr double kControlTopicSubscriberWaitS = 1.0;
+constexpr int kControlSignalPublishCount = 5;
+constexpr int kControlSignalPublishPeriodMs = 100;
+
+template<typename PublisherT>
+void waitForMatchedSubscriber(
+  const PublisherT & publisher,
+  const rclcpp::Logger & logger,
+  const char * topic_name)
+{
+  if (publisher == nullptr) {
+    return;
+  }
+
+  const auto wait_deadline =
+    std::chrono::steady_clock::now() + std::chrono::duration<double>(kControlTopicSubscriberWaitS);
+  while (rclcpp::ok() &&
+    publisher->get_subscription_count() == 0 &&
+    std::chrono::steady_clock::now() < wait_deadline)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  if (publisher->get_subscription_count() == 0) {
+    RCLCPP_WARN(
+      logger,
+      "Publishing %s without a matched subscriber after waiting %.2fs.",
+      topic_name,
+      kControlTopicSubscriberWaitS);
+  }
+}
 
 QIcon makeRecordIcon()
 {
@@ -1835,6 +1868,8 @@ void MainWindow::reserveSidebarWidth()
 
 void MainWindow::publishMissionState(const std::string & state)
 {
+  waitForMatchedSubscriber(mission_state_pub_, node_->get_logger(), kPerceptionStateTopic);
+
   std_msgs::msg::String msg;
   msg.data = state;
   mission_state_pub_->publish(msg);
@@ -1843,6 +1878,8 @@ void MainWindow::publishMissionState(const std::string & state)
 
 void MainWindow::publishMissionCommand(const std::string & command)
 {
+  waitForMatchedSubscriber(mission_cmd_pub_, node_->get_logger(), kMissionCommandTopic);
+
   std_msgs::msg::String msg;
   msg.data = command;
   mission_cmd_pub_->publish(msg);
@@ -1857,18 +1894,27 @@ void MainWindow::publishMissionSignal(
     return;
   }
 
+  waitForMatchedSubscriber(publisher, node_->get_logger(), topic_name);
+
   std_msgs::msg::Bool msg;
   msg.data = true;
-  publisher->publish(msg);
-  RCLCPP_INFO(node_->get_logger(), "Published %s=true.", topic_name);
+  for (int index = 0; index < kControlSignalPublishCount; ++index) {
+    publisher->publish(msg);
+    if (index + 1 < kControlSignalPublishCount && kControlSignalPublishPeriodMs > 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(kControlSignalPublishPeriodMs));
+    }
+  }
+
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Published %s=true %d time(s).",
+    topic_name,
+    kControlSignalPublishCount);
 }
 
 void MainWindow::publishScanAndSweep()
 {
-  std_msgs::msg::Bool msg;
-  msg.data = true;
-  scan_and_sweep_pub_->publish(msg);
-  RCLCPP_INFO(node_->get_logger(), "Published %s=true.", kScanAndSweepTopic);
+  publishMissionSignal(scan_and_sweep_pub_, kScanAndSweepTopic);
 }
 
 void MainWindow::publishGamificationFeedback(const QString & feedback)

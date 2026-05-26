@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <sstream>
+#include <thread>
 
 namespace
 {
@@ -52,6 +53,9 @@ MissionCoordinator::MissionCoordinator(const rclcpp::NodeOptions & options)
   this->declare_parameter<int>("max_scan_retries", 1);
   this->declare_parameter<double>("perception_timeout_s", 0.0);
   this->declare_parameter<double>("motion_timeout_s", 20.0);
+  this->declare_parameter<int>("mission_signal_publish_count", 5);
+  this->declare_parameter<int>("mission_signal_publish_period_ms", 100);
+  this->declare_parameter<double>("mission_signal_wait_for_subscriber_s", 1.0);
   this->declare_parameter<std::string>("goal_frame_id", "ur_base_link");
   this->declare_parameter<std::string>("home_frame_id", "ur_base_link");
 
@@ -712,10 +716,49 @@ void MissionCoordinator::publishMissionSignal(
     return;
   }
 
+  const double wait_for_subscriber_s = std::max(
+    0.0,
+    this->get_parameter("mission_signal_wait_for_subscriber_s").as_double());
+  const auto wait_deadline =
+    std::chrono::steady_clock::now() + std::chrono::duration<double>(wait_for_subscriber_s);
+
+  while (rclcpp::ok() &&
+    publisher->get_subscription_count() == 0 &&
+    std::chrono::steady_clock::now() < wait_deadline)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  if (publisher->get_subscription_count() == 0) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Publishing %s without a matched subscriber after waiting %.2fs.",
+      topic_name,
+      wait_for_subscriber_s);
+  }
+
+  const int publish_count = std::max(
+    1,
+    this->get_parameter("mission_signal_publish_count").as_int());
+  const int publish_period_ms = std::max(
+    0,
+    this->get_parameter("mission_signal_publish_period_ms").as_int());
+
   std_msgs::msg::Bool signal;
   signal.data = true;
-  publisher->publish(signal);
-  RCLCPP_INFO(this->get_logger(), "Published mission signal on %s.", topic_name);
+
+  for (int index = 0; index < publish_count; ++index) {
+    publisher->publish(signal);
+    if (index + 1 < publish_count && publish_period_ms > 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(publish_period_ms));
+    }
+  }
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Published mission signal on %s %d time(s).",
+    topic_name,
+    publish_count);
 }
 
 void MissionCoordinator::dispatchConfiguredGoal(bool home_goal)
