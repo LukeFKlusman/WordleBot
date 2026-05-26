@@ -300,6 +300,18 @@ double getDoubleParam(const rclcpp::Node::SharedPtr & node, const std::string & 
   return node->get_parameter(name).as_double();
 }
 
+std::map<std::string, double> getWorkingJoints(const rclcpp::Node::SharedPtr & node)
+{
+  return {
+    {"shoulder_pan_joint",  node->get_parameter("working_joints.shoulder_pan_joint").as_double()},
+    {"shoulder_lift_joint", node->get_parameter("working_joints.shoulder_lift_joint").as_double()},
+    {"elbow_joint",         node->get_parameter("working_joints.elbow_joint").as_double()},
+    {"wrist_1_joint",       node->get_parameter("working_joints.wrist_1_joint").as_double()},
+    {"wrist_2_joint",       node->get_parameter("working_joints.wrist_2_joint").as_double()},
+    {"wrist_3_joint",       node->get_parameter("working_joints.wrist_3_joint").as_double()},
+  };
+}
+
 bool normalizePoseOrientation(
   geometry_msgs::msg::Pose & pose,
   const std::string & label,
@@ -1936,9 +1948,9 @@ WordleBotController::PlannedMoveToGoal WordleBotController::planMoveToGoal(
   }
 
   if (include_return_home) {
-    auto home = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
+    auto home = std::make_unique<mtc::stages::MoveTo>("return to working joints", interpolation_planner);
     home->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-    home->setGoal("home");
+    home->setGoal(getWorkingJoints(node_));
     task->add(std::move(home));
   }
 
@@ -2854,7 +2866,7 @@ bool WordleBotController::runScanAndSweep(
 // Simple one-shot MTC tasks for moving the arm to known named states.
 // These are available while no mission is running (IDLE state).
 // ---------------------------------------------------------------------------
-// returnToHome            — move the arm to the SRDF "home" named state
+// returnToHome            — move the arm to the configured working joints
 // openGripperFull         — move the gripper to the SRDF "open" named state (full travel)
 // closeGripperFull        — move the gripper to the SRDF "closed" named state (full travel)
 // openGripperOperational  — command operational open width via /onrobot/finger_width_controller/commands
@@ -2863,43 +2875,29 @@ bool WordleBotController::runScanAndSweep(
 
 bool WordleBotController::returnToHome()
 {
-  RCLCPP_INFO(LOGGER, "returnToHome: building MTC task.");
+  RCLCPP_INFO(LOGGER,
+    "returnToHome: moving to working_joints from wordle_bot_controller.yaml.");
 
-  auto interpolation_planner = std::make_shared<mtc::solvers::JointInterpolationPlanner>();
-  interpolation_planner->setMaxVelocityScalingFactor(vel_profiles_.transit_vel);
-  interpolation_planner->setMaxAccelerationScalingFactor(vel_profiles_.transit_acc);
+  const auto joints = getWorkingJoints(node_);
 
-  mtc::Task task;
-  task.stages()->setName("return home");
-  task.loadRobotModel(node_);
-  task.setProperty("group", std::string("ur_onrobot_manipulator"));
+  {
+    const double s = computeTransitScaling(queryCurrentStateMinDistance());
+    move_group_.setMaxVelocityScalingFactor(s);
+    move_group_.setMaxAccelerationScalingFactor(s);
+    RCLCPP_DEBUG(LOGGER, "returnToHome: transit velocity scaling = %.2f.", s);
+  }
 
-  task.add(std::make_unique<mtc::stages::CurrentState>("current state"));
+  move_group_.setStartStateToCurrentState();
+  move_group_.setJointValueTarget(joints);
 
-  auto stage = std::make_unique<mtc::stages::MoveTo>("return home", interpolation_planner);
-  stage->properties().configureInitFrom(mtc::Stage::PARENT, {"group"});
-  stage->setGoal("home");
-  task.add(std::move(stage));
-
-  try {
-    task.init();
-  } catch (const mtc::InitStageException & e) {
-    RCLCPP_ERROR_STREAM(LOGGER, "returnToHome: task init failed: " << e);
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  if (move_group_.plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+    RCLCPP_ERROR(LOGGER, "returnToHome: planning to working_joints failed.");
     return false;
   }
 
-  const int mtc_solution_target_count =
-    std::max(1, getIntParam(node_, "mtc_default_solution_target_count", 15));
-  if (!task.plan(mtc_solution_target_count) || task.solutions().empty()) {
-    RCLCPP_ERROR(LOGGER, "returnToHome: planning failed — no solutions found.");
-    return false;
-  }
-
-  task.introspection().publishSolution(*task.solutions().front());
-  rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-  auto result = executeAlignedTaskSolution(task, *task.solutions().front(), "returnToHome");
-  if (result.val != moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+  auto result = move_group_.execute(plan);
+  if (result != moveit::core::MoveItErrorCode::SUCCESS) {
     RCLCPP_ERROR(LOGGER, "returnToHome: execution failed (error code %d).", result.val);
     return false;
   }

@@ -166,7 +166,7 @@ public:
   // Standalone Arm Motions
   // ---------------------------------------------------------------------------
 
-  // Move the arm to the SRDF "home" named state using an MTC MoveTo stage.
+  // Move the arm to working_joints from config/wordle_bot_controller.yaml.
   bool returnToHome();
 
   // Move the arm to the working pose defined in config/wordle_bot_controller.yaml.
