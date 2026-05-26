@@ -132,9 +132,9 @@ CAMERA_FRAME = "camera_color_optical_frame"
 #
 # On the UR3e with OnRobot RG2, gripper_tcp z-axis points downward (toward the table).
 # Current mount: camera is 5 cm back (toward wrist) and 5 cm up from gripper_tcp.
-CAM_MOUNT_X =  0.00   # metres — left/right from gripper_tcp centreline
-CAM_MOUNT_Y =  0.05   # metres — upward from gripper_tcp (perpendicular to gripper z)
-CAM_MOUNT_Z = -0.05   # metres — back toward wrist along gripper_tcp z-axis
+CAM_MOUNT_X =  0.0325   # metres — left/right from gripper_tcp centreline
+CAM_MOUNT_Y =  0.060   # metres — upward from gripper_tcp (perpendicular to gripper z)
+CAM_MOUNT_Z = -0.095   # metres — back toward wrist along gripper_tcp z-axis
 
 # Rotation: RPY from gripper_tcp frame into camera_color_optical_frame.
 # RealSense optical convention: x=right, y=down, z=forward (into scene).
