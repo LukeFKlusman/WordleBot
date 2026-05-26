@@ -22,8 +22,8 @@ class QResizeEvent;
 class QScrollArea;
 class QVBoxLayout;
 class CameraView;
+class HlDigitalTwinView;
 class RvizSimView;
-class RvizMoveItView;
 class WordleView;
 
 namespace Ui
@@ -58,7 +58,7 @@ private:
   enum class ActiveView
   {
     SimView,
-    MoveItView,
+    TaskView,
     CameraView
   };
 
@@ -79,7 +79,6 @@ private:
   void setupDrawer();
   void setupContentStack();
   void setupCameraPage();
-  void setupMoveItPage();
   void setupVisualDesign();
   void setupDiagnosticsWindow();
   void setupVoiceControls();
@@ -127,8 +126,8 @@ private:
   rclcpp::Node::SharedPtr node_;
   static std::mutex rviz_initialization_mutex_;
   CameraView * camera_view_{nullptr};
+  HlDigitalTwinView * hl_digital_twin_view_{nullptr};
   RvizSimView * rviz_view_{nullptr};
-  RvizMoveItView * rviz_moveit_view_{nullptr};
   WordleView * wordle_view_{nullptr};
   QWidget * diagnostics_window_{nullptr};
 
@@ -136,7 +135,7 @@ private:
   QWidget * drawer_panel_{nullptr};
   bool drawer_expanded_{true};
   QPushButton * nav_sim_btn_{nullptr};
-  QPushButton * nav_moveit_btn_{nullptr};
+  QPushButton * nav_task_btn_{nullptr};
   QPushButton * nav_camera_btn_{nullptr};
   QPushButton * help_btn_{nullptr};
   QPushButton * diag_btn_{nullptr};

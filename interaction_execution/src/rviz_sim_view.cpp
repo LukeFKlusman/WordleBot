@@ -18,7 +18,6 @@ namespace
 std::mutex g_rviz_initialization_mutex;
 constexpr const char * kRobotDescriptionTopic = "/robot_description";
 constexpr const char * kRobotDescriptionRelayTopic = "/robot_description_relay";
-constexpr const char * kRobotDescriptionMoveItRelayTopic = "/robot_description_moveit_relay";
 constexpr const char * kRobotDescriptionParam = "robot_description";
 constexpr const char * kRobotStatePublisherNode = "/robot_state_publisher";
 constexpr const char * kRobotModelClassId = "rviz_default_plugins/RobotModel";
@@ -54,10 +53,6 @@ RvizSimView::RvizSimView(
 
   robot_desc_relay_pub_ = node_->create_publisher<std_msgs::msg::String>(
     kRobotDescriptionRelayTopic,
-    rclcpp::QoS(1).reliable().transient_local());
-
-  robot_desc_moveit_relay_pub_ = node_->create_publisher<std_msgs::msg::String>(
-    kRobotDescriptionMoveItRelayTopic,
     rclcpp::QoS(1).reliable().transient_local());
 
   robot_desc_sub_ = node_->create_subscription<std_msgs::msg::String>(
@@ -111,28 +106,6 @@ RvizSimView::~RvizSimView()
 
   if (executor_) {
     executor_->remove_node(node_);
-  }
-}
-
-void RvizSimView::setViewMode(ViewMode mode)
-{
-  if (view_mode_ == mode) {
-    return;
-  }
-
-  view_mode_ = mode;
-  displays_created_ = false;
-
-  if (manager_) {
-    manager_->removeAllDisplays();
-    robot_model_display_ = nullptr;
-  }
-
-  publishRelay();
-  createDisplaysIfReady();
-
-  if (manager_) {
-    manager_->queueRender();
   }
 }
 
@@ -271,7 +244,7 @@ void RvizSimView::createDisplays()
     }
   }
 
-  robot_model_display_ = manager_->createDisplay(kRobotModelClassId, currentRobotDisplayName(), true);
+  robot_model_display_ = manager_->createDisplay(kRobotModelClassId, "UR3e Robot", true);
   if (robot_model_display_ == nullptr) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to create RViz RobotModel display.");
     return;
@@ -327,9 +300,6 @@ void RvizSimView::publishRelay()
     robot_desc_relay_pub_->publish(*cached_robot_desc_);
   }
 
-  if (robot_desc_moveit_relay_pub_) {
-    robot_desc_moveit_relay_pub_->publish(*cached_robot_desc_);
-  }
 }
 
 void RvizSimView::ensureRobotDescriptionAvailable()
@@ -422,9 +392,9 @@ void RvizSimView::configureRobotModelDisplay(rviz_common::Display * display)
 
   if (auto * topic = findPropertyByName(display, "Description Topic")) {
     if (auto * value = findPropertyByName(topic, "Value")) {
-      value->setValue(currentRobotDescriptionRelayTopic());
+      value->setValue(kRobotDescriptionRelayTopic);
     } else {
-      topic->setValue(currentRobotDescriptionRelayTopic());
+      topic->setValue(kRobotDescriptionRelayTopic);
     }
 
     if (auto * durability = findPropertyByName(topic, "Durability Policy")) {
@@ -435,19 +405,4 @@ void RvizSimView::configureRobotModelDisplay(rviz_common::Display * display)
       reliability->setValue("Reliable");
     }
   }
-
-}
-
-const char * RvizSimView::currentRobotDescriptionRelayTopic() const
-{
-  return view_mode_ == ViewMode::MoveIt
-    ? kRobotDescriptionMoveItRelayTopic
-    : kRobotDescriptionRelayTopic;
-}
-
-const char * RvizSimView::currentRobotDisplayName() const
-{
-  return view_mode_ == ViewMode::MoveIt
-    ? "UR3e MoveIt Robot"
-    : "UR3e Robot";
 }

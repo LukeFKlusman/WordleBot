@@ -12,12 +12,14 @@
   <depend>ament_index_cpp</depend>
   <depend>cv_bridge</depend>
   <depend>geometry_msgs</depend>
+  <depend>hl_control</depend>
   <depend>rclcpp</depend>
   <depend>rviz_common</depend>
   <depend>rviz_rendering</depend>
   <depend>rviz_default_plugins</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>wordlebot_control</depend>
   <depend>opencv</depend>
   <depend>launch</depend>
   <depend>launch_ros</depend>

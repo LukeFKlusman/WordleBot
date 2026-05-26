@@ -490,18 +490,16 @@ void MissionCoordinator::transitionTo(MissionState new_state, const std::string 
 void MissionCoordinator::publishPerceptionStateForMission(MissionState state)
 {
   switch (state) {
+    case MissionState::IDLE:
     case MissionState::SCANNING:
     case MissionState::READY_TO_MOVE:
     case MissionState::MOVING:
-    case MissionState::RECOVERING:
-    case MissionState::HOMING:
-      publishPerceptionState("SCANNING");
-      return;
-    case MissionState::IDLE:
     case MissionState::STOPPED:
     case MissionState::SAFETY_STOPPED:
     case MissionState::PERCEPTION_FAILED:
     case MissionState::MOTION_FAILED:
+    case MissionState::RECOVERING:
+    case MissionState::HOMING:
     case MissionState::ERROR:
       publishPerceptionState("IDLE");
       return;
@@ -536,12 +534,14 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
     state_ == MissionState::PERCEPTION_FAILED ||
     state_ == MissionState::MOTION_FAILED ||
     state_ == MissionState::ERROR;
-  const bool active_scan =
+  const bool scan_step_active =
     state_ == MissionState::SCANNING ||
+    state_ == MissionState::RECOVERING;
+  const bool scan_step_done =
     state_ == MissionState::READY_TO_MOVE ||
     state_ == MissionState::MOVING ||
     state_ == MissionState::HOMING ||
-    state_ == MissionState::RECOVERING;
+    last_completed_goal_request_ == GoalRequest::TASK_GOAL;
   const bool failure_state =
     state_ == MissionState::PERCEPTION_FAILED ||
     state_ == MissionState::MOTION_FAILED ||
@@ -561,7 +561,7 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
   } else if (state_ == MissionState::STOPPED) {
     operator_detail = "Mission paused. Choose RESUME to continue or HOME to return to the safe pose.";
   } else if (state_ == MissionState::IDLE) {
-    operator_detail = "Ready for START to begin a new scan cycle.";
+    operator_detail = "Ready. Use SCAN GAME BOARD to refresh perception, then START when detections are ready.";
   } else {
     operator_detail = "Operator command accepted. Mission is now running.";
   }
@@ -608,14 +608,14 @@ std::vector<MissionCoordinator::MissionStepView> MissionCoordinator::buildMissio
         "Scan recovery is restarting perception after a timeout." :
       (state_ == MissionState::READY_TO_MOVE || state_ == MissionState::MOVING ||
       state_ == MissionState::HOMING ?
-        (detections_detail + " Continuous scanning remains active while the robot executes.") :
+        (detections_detail + " Using the latest completed scan while perception remains idle.") :
       (state_ == MissionState::PERCEPTION_FAILED ?
         "Scan failed because enough detections were not received before timeout." :
       (last_completed_goal_request_ == GoalRequest::TASK_GOAL ?
           "Previous task motion finished successfully. Perception is now idle until the next command." :
-          "Perception is idle until the operator starts or resumes the mission.")))),
-    active_scan ? "active" :
-      (last_completed_goal_request_ == GoalRequest::TASK_GOAL ? "done" :
+          "Perception is idle until SCAN GAME BOARD is pressed.")))),
+    scan_step_active ? "active" :
+      (scan_step_done ? "done" :
       (stopped_like ? "blocked" : "pending"))});
 
   steps.push_back({

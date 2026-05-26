@@ -124,7 +124,7 @@
        </sizepolicy>
       </property>
       <widget class="QWidget" name="pageSimView"/>
-      <widget class="QWidget" name="pageMoveItView"/>
+      <widget class="QWidget" name="pageTaskView"/>
       <widget class="QWidget" name="pageCameraView"/>
       <widget class="QWidget" name="pageDiagnostics"/>
      </widget>

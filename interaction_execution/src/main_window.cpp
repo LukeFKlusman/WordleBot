@@ -1,8 +1,8 @@
 #include "interaction_execution/main_window.hpp"
 
 #include "interaction_execution/camera_view.hpp"
+#include "interaction_execution/hl_digital_twin_view.hpp"
 #include "interaction_execution/rviz_sim_view.hpp"
-#include "interaction_execution/rviz_moveit_view.hpp"
 #include "interaction_execution/wordle_view.hpp"
 #include "ui_rs2_concept.h"
 
@@ -302,14 +302,14 @@ void MainWindow::setupDrawer()
   };
 
   setup_nav_button(nav_sim_btn_, tr("Sim View"), "📺");
-  setup_nav_button(nav_moveit_btn_, tr("MoveIt View"), "🤖");
+  setup_nav_button(nav_task_btn_, tr("Task View"), "🤖");
   setup_nav_button(nav_camera_btn_, tr("Camera View"), "🎥");
 
   connect(nav_sim_btn_, &QPushButton::clicked, this, [this]() {
     switchToView(ActiveView::SimView);
   });
-  connect(nav_moveit_btn_, &QPushButton::clicked, this, [this]() {
-    switchToView(ActiveView::MoveItView);
+  connect(nav_task_btn_, &QPushButton::clicked, this, [this]() {
+    switchToView(ActiveView::TaskView);
   });
   connect(nav_camera_btn_, &QPushButton::clicked, this, [this]() {
     switchToView(ActiveView::CameraView);
@@ -386,8 +386,10 @@ void MainWindow::setupContentStack()
   rviz_view_ = new RvizSimView(node_, rviz_sim_node, ui_->pageSimView);
   sim_layout->addWidget(rviz_view_);
 
-  auto * moveit_layout = new QVBoxLayout(ui_->pageMoveItView);
-  moveit_layout->setContentsMargins(0, 0, 0, 0);
+  auto * task_layout = new QVBoxLayout(ui_->pageTaskView);
+  task_layout->setContentsMargins(0, 0, 0, 0);
+  hl_digital_twin_view_ = new HlDigitalTwinView(node_, ui_->pageTaskView);
+  task_layout->addWidget(hl_digital_twin_view_);
 
   // Camera View page
   setupCameraPage();
@@ -478,26 +480,15 @@ void MainWindow::setupCameraPage()
   });
 }
 
-void MainWindow::setupMoveItPage()
-{
-  // Placeholder - can be expanded later
-}
-
 void MainWindow::switchToView(ActiveView view)
 {
   active_view_ = view;
   switch (view) {
     case ActiveView::SimView:
-      if (rviz_view_) {
-        rviz_view_->setViewMode(RvizSimView::ViewMode::Sim);
-      }
       ui_->contentStack->setCurrentIndex(0);
       break;
-    case ActiveView::MoveItView:
-      if (rviz_view_) {
-        rviz_view_->setViewMode(RvizSimView::ViewMode::MoveIt);
-      }
-      ui_->contentStack->setCurrentIndex(0);
+    case ActiveView::TaskView:
+      ui_->contentStack->setCurrentIndex(1);
       break;
     case ActiveView::CameraView:
       ui_->contentStack->setCurrentIndex(2);
@@ -599,7 +590,7 @@ void MainWindow::updateDrawerActiveState()
   };
 
   set_button_active(nav_sim_btn_, active_view_ == ActiveView::SimView);
-  set_button_active(nav_moveit_btn_, active_view_ == ActiveView::MoveItView);
+  set_button_active(nav_task_btn_, active_view_ == ActiveView::TaskView);
   set_button_active(nav_camera_btn_, active_view_ == ActiveView::CameraView);
 }
 
@@ -611,7 +602,7 @@ void MainWindow::updateDrawerLabelsVisibility()
   }
 
   if (nav_sim_btn_) nav_sim_btn_->setVisible(drawer_expanded_);
-  if (nav_moveit_btn_) nav_moveit_btn_->setVisible(drawer_expanded_);
+  if (nav_task_btn_) nav_task_btn_->setVisible(drawer_expanded_);
   if (nav_camera_btn_) nav_camera_btn_->setVisible(drawer_expanded_);
   if (help_btn_) help_btn_->setVisible(drawer_expanded_);
   if (diag_btn_) diag_btn_->setVisible(drawer_expanded_);
@@ -1657,7 +1648,6 @@ void MainWindow::setupSafetyControls()
     }
 
     const bool resume_requested = safety_mode_ == SafetyControlMode::Stopped;
-    publishMissionState("SCANNING");
     publishMissionCommand(resume_requested ? "RESUME" : "START");
     coordinator_mission_state_ = "SCANNING";
     safety_mode_ = SafetyControlMode::Active;
@@ -1716,7 +1706,6 @@ void MainWindow::setupSafetyControls()
       return;
     }
 
-    publishMissionState("SCANNING");
     publishMissionCommand("HOME");
     coordinator_mission_state_ = "HOMING";
     safety_mode_ = SafetyControlMode::Homing;
@@ -1979,7 +1968,7 @@ void MainWindow::setupHelpDialog()
        "VIEW NAVIGATION\n"
        "Use the left drawer to switch between:\n"
        "  • Sim View: 3D robot simulation (RViz)\n"
-       "  • MoveIt View: Motion planning controls\n"
+       "  • Task View: HL Control task plan and pick/place digital twin\n"
        "  • Camera View: Live camera feed\n\n"
        "CAMERA MODE\n"
        "When viewing the camera:\n"
