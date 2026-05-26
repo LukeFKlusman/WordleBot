@@ -108,6 +108,9 @@ private:
   void updateVoiceControlsState();
   void publishMissionState(const std::string & state);
   void publishMissionCommand(const std::string & command);
+  void publishMissionSignal(
+    const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & publisher,
+    const char * topic_name);
   void publishScanAndSweep();
   void publishGamificationFeedback(const QString & feedback);
   void publishGamificationMode(const QString & mode);
@@ -192,6 +195,8 @@ private:
   QProcess * voice_helper_process_{nullptr};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_cmd_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr start_mission_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr resume_mission_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr scan_and_sweep_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_feedback_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr gamification_mode_pub_;

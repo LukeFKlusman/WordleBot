@@ -59,6 +59,8 @@ constexpr const char * kCoordinatorMissionStateTopic = "/wordle_bot/mission_stat
 constexpr const char * kRobotStateTopic = "/wordle_bot/robot_state";
 constexpr const char * kMissionProgressTopic = "/wordle_bot/mission_progress";
 constexpr const char * kMissionCommandTopic = "/wordle_bot/mission_cmd";
+constexpr const char * kStartMissionTopic = "/wordle_bot/start_mission";
+constexpr const char * kResumeMissionTopic = "/wordle_bot/resume_mission";
 constexpr const char * kScanAndSweepTopic = "/wordle_bot/scan_and_sweep";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 constexpr const char * kPerceptionStatusTopic = "/perception/status";
@@ -1489,6 +1491,8 @@ void MainWindow::setupSafetyControls()
 {
   mission_state_pub_ = node_->create_publisher<std_msgs::msg::String>(kPerceptionStateTopic, 10);
   mission_cmd_pub_ = node_->create_publisher<std_msgs::msg::String>(kMissionCommandTopic, 10);
+  start_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kStartMissionTopic, 10);
+  resume_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kResumeMissionTopic, 10);
   scan_and_sweep_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kScanAndSweepTopic, 10);
   ui_->pushButton->setText(tr("START"));
   ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
@@ -1649,6 +1653,9 @@ void MainWindow::setupSafetyControls()
 
     const bool resume_requested = safety_mode_ == SafetyControlMode::Stopped;
     publishMissionCommand(resume_requested ? "RESUME" : "START");
+    publishMissionSignal(
+      resume_requested ? resume_mission_pub_ : start_mission_pub_,
+      resume_requested ? kResumeMissionTopic : kStartMissionTopic);
     coordinator_mission_state_ = "SCANNING";
     safety_mode_ = SafetyControlMode::Active;
     appendDiagnosticsEvent(
@@ -1813,6 +1820,20 @@ void MainWindow::publishMissionCommand(const std::string & command)
   msg.data = command;
   mission_cmd_pub_->publish(msg);
   RCLCPP_INFO(node_->get_logger(), "Published %s='%s'.", kMissionCommandTopic, command.c_str());
+}
+
+void MainWindow::publishMissionSignal(
+  const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & publisher,
+  const char * topic_name)
+{
+  if (publisher == nullptr) {
+    return;
+  }
+
+  std_msgs::msg::Bool msg;
+  msg.data = true;
+  publisher->publish(msg);
+  RCLCPP_INFO(node_->get_logger(), "Published %s=true.", topic_name);
 }
 
 void MainWindow::publishScanAndSweep()
