@@ -321,9 +321,27 @@ private:
     const moveit::core::RobotStatePtr & current_state,
     const geometry_msgs::msg::Pose & target_pose);
 
-  // Call move_group_.plan() num_attempts times and return all successful plans.
+  // Call move_group_.plan() until enough plans succeed or timeout expires.
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan>
-  generateCandidatePlans(int num_attempts);
+  generateCandidatePlans(double timeout_seconds, int min_successes);
+
+  // Refresh and verify planning scene state after world/attached object changes.
+  bool refreshPlanningScene(const std::string & context);
+  bool waitForWorldObjectState(const std::string & object_id,
+                               bool should_exist,
+                               const std::string & context,
+                               double timeout_seconds = 1.0);
+  bool waitForAttachedObjectState(const std::string & object_id,
+                                  bool should_exist,
+                                  const std::string & expected_link,
+                                  const std::string & context,
+                                  double timeout_seconds = 1.0);
+  void logAttachedObjects(const std::string & context);
+
+  // Returns false when the state is in collision and logs contact diagnostics.
+  bool validateStateCollisionFree(const moveit::core::RobotState & state,
+                                  const std::string & context,
+                                  const moveit::core::JointModelGroup * jmg = nullptr);
 
   // Return the plan with the lowest computeTotalJointDisplacement cost.
   // Returns a default-constructed (empty) plan if plans is empty.
