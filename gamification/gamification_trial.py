@@ -4,39 +4,55 @@
 #
 #  TRIAL VERSION of the Subsystem 4 Gamification node.
 #
-#  Difference from gamification_node.py
-#  ─────────────────────────────────────
-#  In the original node, Mode A picks a guess from whatever letters
-#  perception is *currently* showing. That couples guessing to the
-#  detector and makes the robot's choice depend on which blocks
-#  happen to be in frame.
+#  Flow (Mode A):
+#  ──────────────
+#  1. Pick a 5-letter guess from the candidate list (independent of
+#     what perception is currently seeing).
+#  2. PRE-MOTION CONFIRMATION
+#       - Start a 30 second timer.
+#       - Watch /perception/detections. Any letter seen is added to
+#         FOUND and STAYS there for the rest of this phase — letters
+#         do not have to be visible simultaneously.
+#       - If FOUND covers every slot of the guess (with multiplicity)
+#         before the timer expires:
+#             publish "CONFIRMED" on /gamification/confirmation_status
+#             publish mission state + word request to SS2 (Connor)
+#       - If the timer expires first:
+#             publish "CONFIRMATION_FAILURE"
+#             halt the game until /gamification/reset
+#  3. SS2 runs motion planning. When it finishes, it publishes
+#     FINISHED on /motion_planning/status.
+#  4. POST-MOTION CONFIRMATION
+#       - Same 30 second sticky-FOUND logic against the same guess.
+#       - Success → publish "CONFIRMED" on the same status topic
+#         (this time tagged "post_motion"). Game proceeds to wait
+#         for G/B/I feedback from SS3.
+#       - Timeout → "CONFIRMATION_FAILURE", game halts.
 #
-#  This trial version inverts the flow:
+#  GUI toggle:
+#  ───────────
+#  SS3 publishes "true" or "false" on /gamification/confirmation_enabled.
+#  When false, both confirmation phases are skipped: as soon as a
+#  guess is picked, the mission state is dispatched. SS2's FINISHED
+#  signal is also ignored (we go straight to waiting for feedback).
+#  Default is enabled.
 #
-#    1. Mode A picks a 5-letter guess from the full candidate list
-#       *first*, without looking at the detection stream.
-#    2. It then watches /perception/detections and accumulates which
-#       letters of that guess it has seen so far (FOUND) vs which it
-#       is still waiting on (LOOKING_FOR). Multiplicity is respected:
-#       for APPLE the node needs TWO P blocks, not one.
-#    3. Once every required letter has been seen at least the right
-#       number of times, the node logs "WORD GUESS CONFIRMED" and
-#       only then publishes the mission state and HL word request.
+#  Sticky FOUND vs the old flow:
+#  ─────────────────────────────
+#  The previous version clamped found_counter to whatever letters
+#  were visible in the latest frame. That meant a letter that
+#  briefly entered frame and then left would not count. This version
+#  uses set-union semantics: once a letter is seen, it stays in
+#  FOUND for the duration of the confirmation phase. Resets between
+#  phases / between attempts.
 #
-#  This means the diagnostics stream is much richer mid-search — the
-#  SS3 GUI can show "Looking for: P, P, E" in real time while the
-#  user arranges blocks on the table.
+#  NEW TOPICS (not in the original node):
+#    /gamification/confirmation_status   String — "CONFIRMED" / "CONFIRMATION_FAILURE"
+#    /gamification/confirmation_enabled  String — "true" / "false"   [subscribed]
+#    /motion_planning/status             String — "FINISHED"          [subscribed]
 #
-#  TOPICS, SERVICES, QoS:
-#    Same as gamification_node.py. See that file's header for the
-#    full list. The new diagnostics payload adds three fields:
-#      - target_word        the guess we are currently hunting letters for
-#      - found_letters      list of letters confirmed so far (with repeats)
-#      - looking_for        list of letters still needed (with repeats)
-#
-#  HOW TO RUN:
-#    Same as gamification_node.py — drop-in replacement, just run
-#    this file instead of the original.
+#  Everything else (subscriptions, publishers, services, QoS) is
+#  identical to gamification_node.py — drop-in replacement.
 # ─────────────────────────────────────────────────────────────────
 
 import os
@@ -63,7 +79,13 @@ from wordle_logic import (
 )
 from constants import GOOD, BAD_POSITION, INCORRECT
 
-MAX_ATTEMPTS = 6
+MAX_ATTEMPTS         = 6
+CONFIRMATION_TIMEOUT = 30.0   # seconds — applies to both pre- and post-motion phases
+
+# Confirmation phase tags
+PHASE_IDLE        = 'idle'
+PHASE_PRE_MOTION  = 'pre_motion'
+PHASE_POST_MOTION = 'post_motion'
 
 
 class GamificationTrialNode(Node):
@@ -75,10 +97,10 @@ class GamificationTrialNode(Node):
         self.words = load_dictionary(dict_path)
         self.get_logger().info(f'Dictionary loaded: {len(self.words)} words')
 
-        # ── Game state ────────────────────────────────────────────
+        # ── Core game state ───────────────────────────────────────
         self.candidates          = self.words[:]
-        self.available_letters   = []       # all letters currently visible to perception
-        self.block_positions     = {}       # letter -> {x_m, y_m, z_m, theta_deg}
+        self.available_letters   = []
+        self.block_positions     = {}
         self.current_guess       = None
         self.selected_secret     = None
         self.attempt             = 1
@@ -89,36 +111,49 @@ class GamificationTrialNode(Node):
         self.last_error          = None
         self.last_scored_attempt = None
 
-        # ── Trial-specific state (Mode A letter hunt) ─────────────
-        # required_counter:  Counter of letters the current guess needs
-        # found_counter:     Counter of letters detected so far towards that guess
-        # guess_confirmed:   True once found_counter satisfies required_counter
-        # awaiting_guess:    True when we are between turns and need to pick a new word
-        self.required_counter = Counter()
-        self.found_counter    = Counter()
-        self.guess_confirmed  = False
-        self.awaiting_guess   = True
+        # ── Confirmation state ───────────────────────────────────
+        # pre_confirmation_enabled  : GUI button #1 — controls the pre-motion scan.
+        # post_confirmation_enabled : GUI button #2 — controls the post-motion scan.
+        #                             Independent: any combination is valid.
+        # confirmation_phase  : which phase we're in (idle / pre / post).
+        # required_counter    : letters the current guess needs (multiset).
+        # found_counter       : letters seen since this phase began. STICKY:
+        #                       once added, never removed within the phase.
+        # phase_timer         : 30s timeout, recreated each phase.
+        self.pre_confirmation_enabled  = True
+        self.post_confirmation_enabled = True
+        self.confirmation_phase        = PHASE_IDLE
+        self.required_counter          = Counter()
+        self.found_counter             = Counter()
+        self.phase_timer               = None
 
-        # ── Latched QoS for HL control ────────────────────────────
+        # ── QoS ──────────────────────────────────────────────────
         latched_qos = QoSProfile(
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
 
         # ── Subscribers ───────────────────────────────────────────
-        self.create_subscription(String, '/perception/detections',     self.detections_callback,    10)
-        self.create_subscription(String, '/mission/state',             self.mission_callback,        10)
-        self.create_subscription(String, '/gamification/feedback',     self.feedback_callback,       10)
-        self.create_subscription(String, '/gamification/mode',         self.mode_callback,           10)
-        self.create_subscription(String, '/gamification/secret_word',  self.secret_callback,         10)
-        self.create_subscription(String, 'hl_control/word_request', self.player_guess_callback,   10)
+        self.create_subscription(String, '/perception/detections',     self.detections_callback,        10)
+        self.create_subscription(String, '/mission/state',             self.mission_callback,            10)
+        self.create_subscription(String, '/gamification/feedback',     self.feedback_callback,           10)
+        self.create_subscription(String, '/gamification/mode',         self.mode_callback,               10)
+        self.create_subscription(String, '/gamification/secret_word',  self.secret_callback,             10)
+        self.create_subscription(String, '/gamification/player_guess', self.player_guess_callback,       10)
+        # New subscriptions for confirmation flow — two independent GUI buttons
+        self.create_subscription(String, '/gamification/pre_confirmation_enabled',
+                                 self.pre_confirmation_toggle_callback,  10)
+        self.create_subscription(String, '/gamification/post_confirmation_enabled',
+                                 self.post_confirmation_toggle_callback, 10)
+        self.create_subscription(String, '/motion_planning/status',
+                                 self.motion_status_callback,            10)
 
         # ── Publishers ────────────────────────────────────────────
-        self.pub_guess        = self.create_publisher(String, '/gamification/guess',         10)
-        self.pub_mission      = self.create_publisher(String, '/gamification/mission_state', 10)
-        self.pub_diagnostics  = self.create_publisher(String, '/diagnostics',                10)
-        self.pub_word_request = self.create_publisher(
-            String, '/hl_control/word_request', latched_qos)
+        self.pub_guess         = self.create_publisher(String, '/gamification/guess',               10)
+        self.pub_mission       = self.create_publisher(String, '/gamification/mission_state',       10)
+        self.pub_diagnostics   = self.create_publisher(String, '/diagnostics',                      10)
+        self.pub_confirmation  = self.create_publisher(String, '/gamification/confirmation_status', 10)
+        self.pub_word_request  = self.create_publisher(String, '/hl_control/word_request', latched_qos)
 
         # ── Services ─────────────────────────────────────────────
         self.create_service(Trigger, '/gamification/reset', self.reset_callback)
@@ -126,28 +161,21 @@ class GamificationTrialNode(Node):
 
         self.get_logger().info(
             '\nGamification TRIAL node ready.'
-            '\n  Flow: pick guess first → wait for all its letters on the table → confirm.'
-            '\n  Subscribing: /perception/detections  /mission/state  /gamification/feedback'
-            '\n               /gamification/mode  /gamification/secret_word  /gamification/player_guess'
-            '\n  Publishing:  /gamification/guess  /gamification/mission_state  /diagnostics'
-            '\n               /hl_control/word_request  (latched)'
+            '\n  Mode A flow: pick guess → pre-motion confirm (30s) → SS2 motion'
+            '\n               → post-motion confirm (30s) → wait for G/B/I feedback'
+            '\n  Pre-motion toggle  (GUI button 1): /gamification/pre_confirmation_enabled  (true/false)'
+            '\n  Post-motion toggle (GUI button 2): /gamification/post_confirmation_enabled (true/false)'
+            '\n  Motion done signal:                /motion_planning/status                  (FINISHED)'
+            '\n  Confirmation status:               /gamification/confirmation_status        (CONFIRMED / CONFIRMATION_FAILURE)'
         )
 
 
     # ─────────────────────────────────────────────────────────────
-    #  Subscriber Callbacks
+    #  Perception callback — drives the letter hunt
     # ─────────────────────────────────────────────────────────────
 
     def detections_callback(self, msg):
-        """
-        Always refreshes the visible-letter view from the latest frame.
-
-        In Mode A, if we have a current_guess we are hunting for, we
-        check whether the visible letters now cover every required
-        slot (with multiplicity). When they do, we confirm the guess
-        and dispatch the mission.
-        """
-        if self.game_mode != 'A' or not self.mode_locked or not self.game_active:
+        if self.game_mode not in ('A', 'B') or not self.mode_locked or not self.game_active:
             return
 
         try:
@@ -157,27 +185,14 @@ class GamificationTrialNode(Node):
             self.get_logger().error(f'Failed to parse detections JSON: {e}')
             return
 
-        # Refresh the live view of what perception sees right now.
-        # This happens whether or not we have a guess yet — useful for the GUI.
-        
+        # Always refresh the live view of visible letters + positions.
+        # Latest position wins for each letter (perception keys by letter).
         self.available_letters = []
         self.block_positions   = {}
         for block in blocks:
-            # Grab the raw letter field first
-            raw_letter = block.get('letter')
-            
-            # Direct fix: Only process if it's a valid string, otherwise skip
-            if raw_letter is None:
-                continue
-                
-            letter = raw_letter.upper()
+            letter = block.get('letter', '').upper()
             if letter and letter.isalpha():
                 self.available_letters.append(letter)
-        
-        
-            if letter and letter.isalpha():
-                self.available_letters.append(letter)
-                # Latest detection wins for positional data.
                 self.block_positions[letter] = {
                     'x_m'      : block.get('x_m'),
                     'y_m'      : block.get('y_m'),
@@ -185,16 +200,14 @@ class GamificationTrialNode(Node):
                     'theta_deg': block.get('theta_deg', 0),
                 }
 
-        # If we are between turns and need to pick a guess, do that now.
-        # We pick from the full candidate list — independent of what's visible.
-        if self.awaiting_guess:
-            self._pick_and_announce_guess()
-            return
-
-        # If we have a guess and it isn't confirmed yet, check letter coverage.
-        if self.current_guess and not self.guess_confirmed:
+        # Only progress the letter hunt while a confirmation phase is active.
+        if self.confirmation_phase in (PHASE_PRE_MOTION, PHASE_POST_MOTION):
             self._update_letter_hunt()
 
+
+    # ─────────────────────────────────────────────────────────────
+    #  Mission / mode / feedback callbacks
+    # ─────────────────────────────────────────────────────────────
 
     def mission_callback(self, msg):
         state = msg.data.upper().strip()
@@ -209,16 +222,8 @@ class GamificationTrialNode(Node):
             self.game_active = True
             self.last_error  = None
             if self.game_mode == 'A':
-                # Mode A starts by picking a guess immediately — independent of detections.
-                # If perception hasn't published yet, we still announce the target word;
-                # the letter hunt will progress as soon as the first frame arrives.
-                self.awaiting_guess = True
-                if self.selected_secret is None:
-                    self.get_logger().warn(
-                        '[Mission] Mode A started without a selected secret word; '
-                        'manual feedback is still accepted.')
                 self.get_logger().info('[Mission] Mode A game started.')
-                self._pick_and_announce_guess()
+                self._start_next_attempt()
             else:
                 self.selected_secret = choose_secret_word(self.words)
                 self.current_guess   = None
@@ -227,6 +232,8 @@ class GamificationTrialNode(Node):
 
         elif state in ('STOP', 'IDLE'):
             self.game_active = False
+            self._cancel_phase_timer()
+            self.confirmation_phase = PHASE_IDLE
             self.get_logger().info('[Mission] Game paused.')
             self._publish_diagnostics(status='PAUSED')
 
@@ -236,14 +243,9 @@ class GamificationTrialNode(Node):
 
 
     def feedback_callback(self, msg):
-        """
-        Receives G/B/I feedback from SS3 / voice after the robot has placed
-        the letters. Filters candidates and queues the next guess.
-        """
         if self.game_mode != 'A' or not self.mode_locked:
             self.get_logger().warn('Ignoring manual feedback because Mode A is not active.')
             return
-
         if not self.game_active or not self.current_guess:
             return
 
@@ -279,14 +281,8 @@ class GamificationTrialNode(Node):
             self._publish_diagnostics(status='ERROR')
             return
 
-        # Set up for the next attempt: clear the letter hunt, then pick a new word.
-        self.attempt        += 1
-        self.awaiting_guess  = True
-        self.guess_confirmed = False
-        self.found_counter   = Counter()
-        self.required_counter = Counter()
-        self.current_guess   = None
-        self._pick_and_announce_guess()
+        self.attempt += 1
+        self._start_next_attempt()
 
 
     def mode_callback(self, msg):
@@ -314,7 +310,6 @@ class GamificationTrialNode(Node):
         if self.game_mode == 'B':
             self._start_mode_b_game()
             return
-
         self._publish_diagnostics(status='SELECT_SECRET')
 
 
@@ -325,27 +320,32 @@ class GamificationTrialNode(Node):
             self.last_error = 'Secret word must be a valid five-letter dictionary word.'
             self._publish_diagnostics(status='INVALID_SECRET')
             return
-
         if self.game_mode != 'A' or not self.mode_locked:
             self.get_logger().warn('Ignoring selected secret because Mode A is not active.')
             return
 
         self.selected_secret = word
         self.game_active     = True
-        self.awaiting_guess  = True
         self.last_error      = None
         self.get_logger().info('Mode A secret word accepted.')
-        self._pick_and_announce_guess()
+        self._start_next_attempt()
 
 
     def player_guess_callback(self, msg):
         if self.game_mode != 'B' or not self.mode_locked:
             self.get_logger().warn('Ignoring player guess because Mode B is not active.')
             return
-
         if not self.game_active or not self.selected_secret:
             self.last_error = 'Mode B is not active.'
             self._publish_diagnostics(status='WAITING_FOR_START')
+            return
+
+        # Reject if we're already in the middle of dispatching the previous
+        # guess to SS2 — wait for that turn to finish before accepting a new one.
+        if self.confirmation_phase in (PHASE_PRE_MOTION, PHASE_POST_MOTION):
+            self.last_error = 'Previous guess is still being executed by the robot.'
+            self.get_logger().warn('Ignoring player guess — robot is mid-turn.')
+            self._publish_diagnostics(status='BUSY')
             return
 
         guess = ''.join(ch for ch in msg.data.lower().strip() if ch.isalpha())
@@ -355,14 +355,46 @@ class GamificationTrialNode(Node):
             self._publish_diagnostics(status='INVALID_GUESS')
             return
 
+        # Score now but DON'T act on the result yet — the robot still needs to
+        # place the blocks, and we want the post-motion confirmation to gate
+        # the SOLVED / GAME_OVER / NEXT_TURN transition. Scoring is cached on
+        # last_feedback so the GUI can show it once the row is placed.
         self.current_guess       = guess
         self.last_feedback       = score_guess_against_target(guess, self.selected_secret)
         self.last_scored_attempt = self.attempt
         self.last_error          = None
 
+        self.get_logger().info(
+            f'Mode B attempt {self.attempt}: player guess {guess.upper()}. '
+            f'Dispatching to SS2.')
+        self._publish_guess(guess)
+
+        # Mirror Mode A: pre-motion confirmation (or skip it) → mission → SS2.
+        if not self.pre_confirmation_enabled:
+            self.get_logger().info(
+                'Pre-motion confirmation disabled — dispatching mission immediately.')
+            self.confirmation_phase = PHASE_IDLE
+            self.required_counter   = Counter(guess.upper())
+            self.found_counter      = Counter()
+            self._dispatch_mission()
+            return
+
+        self._begin_confirmation_phase(PHASE_PRE_MOTION)
+
+
+    def _finalise_mode_b_turn(self):
+        """
+        Called after Mode B's post-motion confirmation succeeds (or after
+        SS2 reports FINISHED when post-motion confirmations are disabled).
+        Applies the cached feedback to advance the game.
+        """
+        if self.game_mode != 'B' or not self.last_feedback:
+            return
+
         if all(f == GOOD for f in self.last_feedback):
             self.get_logger().info(
-                f'PLAYER SOLVED in {self.attempt} attempt(s)! Word: {guess.upper()}')
+                f'PLAYER SOLVED in {self.attempt} attempt(s)! '
+                f'Word: {self.current_guess.upper()}')
             self.game_active = False
             self._publish_diagnostics(status='SOLVED')
             return
@@ -379,7 +411,80 @@ class GamificationTrialNode(Node):
 
 
     # ─────────────────────────────────────────────────────────────
-    #  Service Callbacks
+    #  New callbacks: confirmation toggle + motion-planning signal
+    # ─────────────────────────────────────────────────────────────
+
+    def pre_confirmation_toggle_callback(self, msg):
+        """GUI button #1 — toggles the pre-motion scan/timeout."""
+        new_value = self._parse_bool_token(msg.data)
+        if new_value is None:
+            self.get_logger().warn(
+                f'Ignoring unknown pre_confirmation_enabled value: {msg.data!r}')
+            return
+        if new_value == self.pre_confirmation_enabled:
+            return
+        self.pre_confirmation_enabled = new_value
+        self.get_logger().info(
+            f'Pre-motion confirmation {"ENABLED" if new_value else "DISABLED"} via GUI.')
+        # Mid-phase toggles don't cancel a running scan — they take effect
+        # on the next guess. Less surprising than killing a scan halfway.
+        self._publish_diagnostics(
+            status='PRE_CONFIRMATION_ENABLED' if new_value else 'PRE_CONFIRMATION_DISABLED')
+
+
+    def post_confirmation_toggle_callback(self, msg):
+        """GUI button #2 — toggles the post-motion scan/timeout."""
+        new_value = self._parse_bool_token(msg.data)
+        if new_value is None:
+            self.get_logger().warn(
+                f'Ignoring unknown post_confirmation_enabled value: {msg.data!r}')
+            return
+        if new_value == self.post_confirmation_enabled:
+            return
+        self.post_confirmation_enabled = new_value
+        self.get_logger().info(
+            f'Post-motion confirmation {"ENABLED" if new_value else "DISABLED"} via GUI.')
+        self._publish_diagnostics(
+            status='POST_CONFIRMATION_ENABLED' if new_value else 'POST_CONFIRMATION_DISABLED')
+
+
+    def motion_status_callback(self, msg):
+        """
+        SS2 (Connor) reports motion-planning status. We act on 'FINISHED'
+        (also 'DONE' / 'COMPLETE' for safety). Anything else is logged
+        but ignored — failure reporting from SS2 is its own concern.
+        """
+        if self.game_mode not in ('A', 'B') or not self.mode_locked or not self.game_active:
+            return
+
+        token = msg.data.strip().upper()
+        if token not in ('FINISHED', 'DONE', 'COMPLETE'):
+            self.get_logger().info(f'[Motion] status={token!r} (no action)')
+            return
+
+        # If post-motion confirmation is off, skip the scan entirely.
+        if not self.post_confirmation_enabled:
+            self.get_logger().info(
+                '[Motion] FINISHED received. Post-motion confirmation disabled — '
+                'skipping post-motion scan.')
+            self.confirmation_phase = PHASE_IDLE
+            # Mode A: wait for human G/B/I feedback. Mode B: apply cached score.
+            if self.game_mode == 'B':
+                self._finalise_mode_b_turn()
+            else:
+                self._publish_diagnostics(status='AWAITING_FEEDBACK')
+            return
+
+        if self.confirmation_phase == PHASE_POST_MOTION:
+            self.get_logger().warn('[Motion] FINISHED received while already in post-motion phase — ignoring.')
+            return
+
+        self.get_logger().info('[Motion] FINISHED received. Starting post-motion confirmation.')
+        self._begin_confirmation_phase(PHASE_POST_MOTION)
+
+
+    # ─────────────────────────────────────────────────────────────
+    #  Service callbacks
     # ─────────────────────────────────────────────────────────────
 
     def reset_callback(self, request, response):
@@ -392,15 +497,15 @@ class GamificationTrialNode(Node):
 
     def undo_callback(self, request, response):
         if self.attempt > 1:
-            self.attempt        -= 1
-            self.candidates      = self.words[:]
-            self.current_guess   = None
-            self.awaiting_guess  = True
-            self.guess_confirmed = False
-            self.found_counter   = Counter()
-            self.required_counter = Counter()
-            response.success     = True
-            response.message     = f'Undone to attempt {self.attempt}.'
+            self._cancel_phase_timer()
+            self.attempt           -= 1
+            self.candidates         = self.words[:]
+            self.current_guess      = None
+            self.confirmation_phase = PHASE_IDLE
+            self.required_counter   = Counter()
+            self.found_counter      = Counter()
+            response.success        = True
+            response.message        = f'Undone to attempt {self.attempt}.'
             self.get_logger().info(f'[Service] Undo → attempt {self.attempt}')
         else:
             response.success = False
@@ -409,18 +514,13 @@ class GamificationTrialNode(Node):
 
 
     # ─────────────────────────────────────────────────────────────
-    #  Core trial behaviour: pick first, hunt letters second
+    #  Attempt lifecycle: pick → pre-confirm → motion → post-confirm
     # ─────────────────────────────────────────────────────────────
 
-    def _pick_and_announce_guess(self):
-        """
-        Pick a guess from the candidate list independently of what's on
-        the table, announce it on /gamification/guess, then begin the
-        letter hunt against the current detection stream.
-        """
+    def _start_next_attempt(self):
+        """Pick a guess and kick off the pre-motion confirmation (or skip it)."""
         if self.game_mode != 'A' or not self.mode_locked or not self.game_active:
             return
-
         if not self.candidates:
             self.get_logger().error('No candidates left — cannot pick a guess.')
             self._publish_diagnostics(status='ERROR')
@@ -435,64 +535,151 @@ class GamificationTrialNode(Node):
             self._publish_diagnostics(status='ERROR')
             return
 
-        # Set up the letter-hunt state for this guess.
-        self.required_counter = Counter(self.current_guess.upper())
-        self.found_counter    = Counter()
-        self.guess_confirmed  = False
-        self.awaiting_guess   = False
-
         self.get_logger().info(
-            f'Attempt {self.attempt}: target word is {self.current_guess.upper()}. '
-            f'Looking for letters: '
-            f'{self._counter_to_letter_list(self.required_counter)}')
-
+            f'Attempt {self.attempt}: target word is {self.current_guess.upper()}.')
         self._publish_guess(self.current_guess)
 
-        # Run an initial hunt pass in case perception has already given us
-        # letters before we picked this word.
+        if not self.pre_confirmation_enabled:
+            # Pre-motion scan disabled: dispatch the mission immediately.
+            self.get_logger().info(
+                'Pre-motion confirmation disabled — dispatching mission without pre-motion scan.')
+            self.confirmation_phase = PHASE_IDLE
+            self.required_counter   = Counter(self.current_guess.upper())
+            self.found_counter      = Counter()
+            self._dispatch_mission()
+            return
+
+        self._begin_confirmation_phase(PHASE_PRE_MOTION)
+
+
+    def _begin_confirmation_phase(self, phase):
+        """
+        Start a fresh confirmation phase: clear FOUND, set the required
+        multiset, arm the 30s timer, and run an initial hunt pass in case
+        perception has already delivered some letters.
+        """
+        self._cancel_phase_timer()
+        self.confirmation_phase = phase
+        self.required_counter   = Counter(self.current_guess.upper())
+        self.found_counter      = Counter()
+
+        label = 'PRE-MOTION' if phase == PHASE_PRE_MOTION else 'POST-MOTION'
+        self.get_logger().info(
+            f'\n──── {label} CONFIRMATION ────'
+            f'\n  Target: {self.current_guess.upper()}'
+            f'\n  Required: {self._counter_to_letter_list(self.required_counter)}'
+            f'\n  Timeout: {CONFIRMATION_TIMEOUT:.0f}s   (FOUND letters are sticky)'
+        )
+        self._publish_diagnostics(
+            status='CONFIRMING_PRE_MOTION' if phase == PHASE_PRE_MOTION
+                   else 'CONFIRMING_POST_MOTION')
+
+        # Arm the timer. One-shot semantics via cancel-on-fire inside the callback.
+        self.phase_timer = self.create_timer(CONFIRMATION_TIMEOUT, self._on_phase_timeout)
+
+        # Run one immediate hunt pass against whatever's currently visible.
         self._update_letter_hunt()
 
 
     def _update_letter_hunt(self):
         """
-        Compare the latest visible letters against the required multiset
-        for the current guess. Update found_counter and, if every slot is
-        filled, confirm the guess and dispatch the mission.
+        STICKY accumulation: for each required letter, found = max(found, visible).
+        Once a letter is in FOUND, it cannot leave during this phase.
+        Clamped at required count (no over-collection).
         """
-        # Cap the found count for each letter at what the word actually needs,
-        # so we don't over-count duplicate sightings of a single block across
-        # frames. e.g. APPLE requires P:2 — seeing one P twice is still just 1 P.
-        visible_counter = Counter(self.available_letters)
-        new_found = Counter()
-        for letter, needed in self.required_counter.items():
-            new_found[letter] = min(visible_counter.get(letter, 0), needed)
+        if self.confirmation_phase not in (PHASE_PRE_MOTION, PHASE_POST_MOTION):
+            return
+        if not self.current_guess:
+            return
 
-        # Log only when something changed, to avoid log spam every frame.
-        if new_found != self.found_counter:
-            self.found_counter = new_found
+        visible_counter = Counter(self.available_letters)
+        changed = False
+        for letter, needed in self.required_counter.items():
+            seen_now      = visible_counter.get(letter, 0)
+            already_found = self.found_counter.get(letter, 0)
+            new_value     = min(max(already_found, seen_now), needed)
+            if new_value != already_found:
+                self.found_counter[letter] = new_value
+                changed = True
+
+        if changed:
             still_needed = self.required_counter - self.found_counter
             self.get_logger().info(
                 f'  FOUND: {self._counter_to_letter_list(self.found_counter)}   '
                 f'LOOKING FOR: {self._counter_to_letter_list(still_needed)}'
             )
-            self._publish_diagnostics(status='HUNTING_LETTERS')
+            self._publish_diagnostics(
+                status='HUNTING_PRE_MOTION' if self.confirmation_phase == PHASE_PRE_MOTION
+                       else 'HUNTING_POST_MOTION')
 
-        # Check completion: every required slot satisfied.
+        # Completion: every required slot filled.
         if self.found_counter == self.required_counter:
-            self._confirm_guess()
+            self._on_phase_success()
 
 
-    def _confirm_guess(self):
-        """Letters are all on the table — lock in the guess and dispatch."""
-        if self.guess_confirmed:
-            return
-        self.guess_confirmed = True
+    def _on_phase_success(self):
+        """All required letters collected before the timer expired."""
+        phase = self.confirmation_phase
+        self._cancel_phase_timer()
+        self.confirmation_phase = PHASE_IDLE
+
+        label = 'PRE-MOTION' if phase == PHASE_PRE_MOTION else 'POST-MOTION'
         self.get_logger().info(
-            f'★ WORD GUESS CONFIRMED: {self.current_guess.upper()} — '
-            f'all required letters visible.')
+            f'★ {label} CONFIRMED — guess "{self.current_guess.upper()}" '
+            f'all letters present.')
+        self._publish_confirmation_status('CONFIRMED', phase)
+
+        if phase == PHASE_PRE_MOTION:
+            # Hand off to SS2.
+            self._dispatch_mission()
+            self._publish_diagnostics(status='AWAITING_MOTION_DONE')
+        else:
+            # Post-motion success.
+            # Mode A: wait for the human to enter G/B/I feedback.
+            # Mode B: we already scored the guess internally — apply the result.
+            if self.game_mode == 'B':
+                self._finalise_mode_b_turn()
+            else:
+                self._publish_diagnostics(status='AWAITING_FEEDBACK')
+
+
+    def _on_phase_timeout(self):
+        """
+        30s elapsed without collecting all letters. Halt the game and
+        report which letters were missing. User can /gamification/reset
+        to try again.
+        """
+        # rclpy timers fire repeatedly — cancel immediately so this is one-shot.
+        self._cancel_phase_timer()
+        phase = self.confirmation_phase
+        self.confirmation_phase = PHASE_IDLE
+        self.game_active = False
+
+        still_needed = self.required_counter - self.found_counter
+        label = 'PRE-MOTION' if phase == PHASE_PRE_MOTION else 'POST-MOTION'
+        self.last_error = (
+            f'{label} confirmation failed. Missing: '
+            f'{self._counter_to_letter_list(still_needed)}'
+        )
+        self.get_logger().error(f'✗ {self.last_error}')
+        self._publish_confirmation_status('CONFIRMATION_FAILURE', phase, still_needed)
+        self._publish_diagnostics(status='CONFIRMATION_FAILURE')
+
+
+    def _dispatch_mission(self):
+        """Send mission state + latched word request to downstream subsystems."""
         self._publish_mission(self.current_guess)
         self._publish_word_request(self.current_guess)
-        self._publish_diagnostics(status='CONFIRMED')
+
+
+    def _cancel_phase_timer(self):
+        if self.phase_timer is not None:
+            self.phase_timer.cancel()
+            try:
+                self.destroy_timer(self.phase_timer)
+            except Exception:
+                pass
+            self.phase_timer = None
 
 
     # ─────────────────────────────────────────────────────────────
@@ -500,30 +687,18 @@ class GamificationTrialNode(Node):
     # ─────────────────────────────────────────────────────────────
 
     def _publish_guess(self, guess):
-        msg      = String()
-        msg.data = guess.upper()
+        msg = String(); msg.data = guess.upper()
         self.pub_guess.publish(msg)
         self.get_logger().info(f'Published guess: {guess.upper()}')
 
 
     def _publish_word_request(self, guess):
-        msg      = String()
-        msg.data = guess.upper()
+        msg = String(); msg.data = guess.upper()
         self.pub_word_request.publish(msg)
         self.get_logger().info(f'Published word request to HL control: {guess.upper()}')
 
 
     def _publish_mission(self, guess):
-        """
-        Publishes ordered letter placement sequence to SS2.
-
-        Because the same letter can appear more than once in a word, we
-        consume block_positions per-letter as we walk the word so the
-        nth occurrence of a letter still gets a position assigned. (All
-        copies of a duplicate letter share the same stored position, since
-        perception keys by letter — SS2 is responsible for selecting which
-        physical block to pick when there are duplicates.)
-        """
         placements = []
         for i, letter in enumerate(guess.upper()):
             pos = self.block_positions.get(letter, {})
@@ -536,49 +711,64 @@ class GamificationTrialNode(Node):
                 'theta_deg': pos.get('theta_deg', 0.0),
             })
 
-        payload  = json.dumps({
+        payload = json.dumps({
             'word'      : guess.upper(),
             'attempt'   : self.attempt,
             'placements': placements,
         })
-        msg      = String()
-        msg.data = payload
+        msg = String(); msg.data = payload
         self.pub_mission.publish(msg)
         self.get_logger().info(f'Published mission state: {payload}')
 
 
+    def _publish_confirmation_status(self, status, phase, missing=None):
+        """
+        status : 'CONFIRMED' or 'CONFIRMATION_FAILURE'
+        phase  : 'pre_motion' / 'post_motion'
+        missing: optional Counter of letters not found (for failure reports)
+        """
+        payload = {
+            'status' : status,
+            'phase'  : phase,
+            'word'   : self.current_guess.upper() if self.current_guess else None,
+            'attempt': self.attempt,
+        }
+        if missing is not None:
+            payload['missing'] = self._counter_to_letter_list(missing)
+        msg = String(); msg.data = json.dumps(payload)
+        self.pub_confirmation.publish(msg)
+        self.get_logger().info(f'Published confirmation status: {payload}')
+
+
     def _publish_diagnostics(self, status='ACTIVE'):
-        """
-        Publishes board state to SS3 GUI. Adds target_word / found_letters /
-        looking_for so the GUI can render the letter-hunt progress.
-        """
         top          = self.candidates[:5] if self.candidates else []
         still_needed = self.required_counter - self.found_counter
         payload = json.dumps({
-            'status'           : status,
-            'mode'             : self.game_mode,
-            'mode_locked'      : self.mode_locked,
-            'attempt'          : self.attempt,
-            'current_guess'    : self.current_guess.upper() if self.current_guess else None,
-            'target_word'      : self.current_guess.upper() if self.current_guess else None,
-            'found_letters'    : self._counter_to_letter_list(self.found_counter),
-            'looking_for'      : self._counter_to_letter_list(still_needed),
-            'guess_confirmed'  : self.guess_confirmed,
-            'candidates_left'  : len(self.candidates),
-            'available_letters': self.available_letters,
-            'top_candidates'   : [w.upper() for w in top],
-            'last_feedback'    : ''.join(self._feedback_to_chars(self.last_feedback)),
-            'scored_attempt'   : self.last_scored_attempt,
-            'secret_word_set'  : self.selected_secret is not None,
-            'solution_word'    : self.selected_secret.upper()
+            'status'                    : status,
+            'mode'                      : self.game_mode,
+            'mode_locked'               : self.mode_locked,
+            'attempt'                   : self.attempt,
+            'current_guess'             : self.current_guess.upper() if self.current_guess else None,
+            'target_word'               : self.current_guess.upper() if self.current_guess else None,
+            'pre_confirmation_enabled'  : self.pre_confirmation_enabled,
+            'post_confirmation_enabled' : self.post_confirmation_enabled,
+            'confirmation_phase'        : self.confirmation_phase,
+            'found_letters'             : self._counter_to_letter_list(self.found_counter),
+            'looking_for'               : self._counter_to_letter_list(still_needed),
+            'candidates_left'           : len(self.candidates),
+            'available_letters'         : self.available_letters,
+            'top_candidates'            : [w.upper() for w in top],
+            'last_feedback'             : ''.join(self._feedback_to_chars(self.last_feedback)),
+            'scored_attempt'            : self.last_scored_attempt,
+            'secret_word_set'           : self.selected_secret is not None,
+            'solution_word'             : self.selected_secret.upper()
                 if status in ('SOLVED', 'GAME_OVER') and self.selected_secret
                 else None,
-            'game_active'      : self.game_active,
-            'max_attempts'     : MAX_ATTEMPTS,
-            'error'            : self.last_error,
+            'game_active'               : self.game_active,
+            'max_attempts'              : MAX_ATTEMPTS,
+            'error'                     : self.last_error,
         })
-        msg      = String()
-        msg.data = payload
+        msg = String(); msg.data = payload
         self.pub_diagnostics.publish(msg)
         self.get_logger().info(f'Published diagnostics: {status}')
 
@@ -595,8 +785,7 @@ class GamificationTrialNode(Node):
         self.game_active         = True
         self.last_feedback       = None
         self.last_scored_attempt = None
-        self.awaiting_guess      = False
-        self.guess_confirmed     = False
+        self.confirmation_phase  = PHASE_IDLE
         self.required_counter    = Counter()
         self.found_counter       = Counter()
         self.last_error          = None
@@ -605,7 +794,7 @@ class GamificationTrialNode(Node):
 
 
     def _counter_to_letter_list(self, counter):
-        """Counter({'P': 2, 'E': 1}) → ['P', 'P', 'E']  (stable, sorted)."""
+        """Counter({'P': 2, 'E': 1}) → ['E', 'P', 'P']  (alphabetical, with repeats)."""
         out = []
         for letter in sorted(counter):
             out.extend([letter] * counter[letter])
@@ -620,6 +809,7 @@ class GamificationTrialNode(Node):
 
 
     def _reset_game(self, preserve_mode=False):
+        self._cancel_phase_timer()
         mode = self.game_mode
         self.candidates          = self.words[:]
         self.available_letters   = []
@@ -630,8 +820,7 @@ class GamificationTrialNode(Node):
         self.game_active         = False
         self.last_feedback       = None
         self.last_scored_attempt = None
-        self.awaiting_guess      = True
-        self.guess_confirmed     = False
+        self.confirmation_phase  = PHASE_IDLE
         self.required_counter    = Counter()
         self.found_counter       = Counter()
         self.last_error          = None
@@ -645,7 +834,7 @@ class GamificationTrialNode(Node):
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Entry Point
+#  Entry point
 # ─────────────────────────────────────────────────────────────────
 
 def main(args=None):
