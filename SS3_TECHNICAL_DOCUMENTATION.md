@@ -20,8 +20,7 @@ The Interaction Execution subsystem serves as the **mission control layer and hu
 | [interaction_execution/include/interaction_execution/main_window.hpp](../interaction_execution/include/interaction_execution/main_window.hpp) | MainWindow class interface |
 | [interaction_execution/src/camera_view.cpp](../interaction_execution/src/camera_view.cpp) | RealSense RGB/depth stream rendering, detected letter overlay visualization |
 | [interaction_execution/src/rviz_sim_view.cpp](../interaction_execution/src/rviz_sim_view.cpp) | Embedded RViz display for robot/board/letter positions |
-| [interaction_execution/src/rviz_moveit_view.cpp](../interaction_execution/src/rviz_moveit_view.cpp) | MoveIt motion planning visualization |
-| [interaction_execution/src/wordle_view.cpp](../interaction_execution/src/wordle_view.cpp) | Current guess, attempt counter, candidate feedback display |
+| [interaction_execution/src/hl_digital_twin_view.cpp](../interaction_execution/src/hl_digital_twin_view.cpp) | High-level task execution visualization (TaskView) |
 | [interaction_execution/launch/gui.launch.py](../interaction_execution/launch/gui.launch.py) | Launch script for coordinator, GUI, and conditional subsystem startup |
 
 ## 7.3 ROS 2 Interface
@@ -118,33 +117,29 @@ Root (Selector + Parallel Safety)
 
 ### Layout and Views
 
-The Qt GUI features a **drawer + content stack + side panel** layout with 5 switchable views:
+The Qt GUI features a **drawer + content stack** layout with 3 switchable main views plus a diagnostics panel:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ Safety Status Banner (Red if unsafe, green if safe)             │
 ├─────────────────────────────────────────────────────────────────┤
-│ ┌────┬────────────────────────────┬──────────────────────────┐  │
-│ │ ☰  │ Content Stack              │ Wordle Display           │  │
-│ │    │ (RViz / Camera / MoveIt)   │ ┌────────────────────┐   │  │
-│ │    │                            │ │ Guess: _____ (A4)  │   │  │
-│ │Sim │                            │ │ Attempt: 2/6       │   │  │
-│ │Cam │ [RViz Sim View (default)]  │ │ Candidates: 143    │   │  │
-│ │Mov │                            │ │                    │   │  │
-│ │Wrd │                            │ │ [G][B][I][B][G]    │   │  │
-│ │Dgn │                            │ │ (Feedback legend)  │   │  │
-│ │    │                            │ └────────────────────┘   │  │
-│ │    │                            │ ┌────────────────────┐   │  │
-│ │    │                            │ │ VOICE CONTROL      │   │  │
-│ │    │                            │ │ [Record] [Confirm] │   │  │
-│ │    │                            │ │ [Stop]   [Retry]   │   │  │
-│ │    │                            │ └────────────────────┘   │  │
-│ │    │                            │ ┌────────────────────┐   │  │
-│ │    │                            │ │ SAFETY CONTROLS    │   │  │
-│ │    │                            │ │ [START]   [STOP]   │   │  │
-│ │    │                            │ │ [SCAN]    [HOME]   │   │  │
-│ │    │                            │ └────────────────────┘   │  │
-│ └────┴────────────────────────────┴──────────────────────────┘  │
+│ ┌────┬──────────────────────────────────────────────────┐       │
+│ │ ☰  │ Content Stack                                    │       │
+│ │    │ (Sim / Task / Camera / Diagnostics)             │       │
+│ │Sim │                                                  │       │
+│ │Tsk │ [RViz Sim View (default)]                       │       │
+│ │Cam │ - Robot                                          │       │
+│ │Dgn │ - Gameboard                                      │       │
+│ │    │ - Detected letter 3D positions                   │       │
+│ │    │                                                  │       │
+│ │    │ (or switch to Task/Camera/Diagnostics)          │       │
+│ │    │                                                  │       │
+│ │    │ VOICE CONTROL (bottom overlay)                  │       │
+│ │    │ [Record] [Confirm] [Stop] [Retry]              │       │
+│ │    │                                                  │       │
+│ │    │ SAFETY CONTROLS (bottom overlay)                │       │
+│ │    │ [START]   [STOP]   [SCAN]   [HOME]             │       │
+│ └────┴──────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,9 +148,8 @@ The Qt GUI features a **drawer + content stack + side panel** layout with 5 swit
 | **View** | **Content** |
 | --- | --- |
 | **Sim** (RViz) | Robot, gameboard, and detected letter 3D positions; TF tree visualization |
+| **Task** (HlDigitalTwinView) | High-level task execution visualization; robot state and board state display |
 | **Camera** | RealSense RGB/depth stream with bounding boxes around detected letters |
-| **MoveIt** | Motion planning trajectories, collision objects, joint states |
-| **Wordle** | Current guess (linked to `/gamification/guess`), attempt counter, candidate feedback |
 | **Diagnostics** | Mission state JSON, perception JSON, event log with timestamps |
 
 ### Controls and Publications

@@ -50,9 +50,9 @@ ros2 topic echo /perception/human_detected
 
 1. Launch the GUI (as per Common Setup above)
 2. Observe the Qt window renders with:
-   - Left drawer (collapsed)
-   - Central RViz view
-   - Right panel: Wordle display + Voice controls + Safety controls
+   - Left drawer (navigation buttons: Sim, Task, Camera, Diagnostics)
+   - Central content area (default: RViz Sim View)
+   - Voice controls and Safety controls (overlays)
 3. Press the blue "START" button in the safety panel
 4. Observe `/wordle_bot/mission_state` in monitoring terminal
 5. Press the red "STOP" button
@@ -430,7 +430,7 @@ ros2 launch interaction_execution gui.launch.py \
 Monitor:
 ```bash
 ros2 topic echo /wordle_bot/mission_state --qos-durability transient_local
-ros2 topic echo /worble_bot/mission_progress --qos-durability transient_local
+ros2 topic echo /wordle_bot/mission_progress --qos-durability transient_local
 ```
 
 **Steps:**
@@ -481,8 +481,8 @@ ros2 launch interaction_execution gui.launch.py \
 
 Monitor:
 ```bash
-ros2 topic echo /worble_bot/mission_state --qos-durability transient_local
-ros2 topic echo /worble_bot/mission_progress --qos-durability transient_local
+ros2 topic echo /wordle_bot/mission_state --qos-durability transient_local
+ros2 topic echo /wordle_bot/mission_progress --qos-durability transient_local
 ```
 
 **Steps:**
@@ -566,12 +566,12 @@ ros2 topic pub --once /worole_bot/motion_complete std_msgs/msg/Bool "{data: true
 
 **Monitor latched topics (persist):**
 ```bash
-ros2 topic echo /worble_bot/mission_state --qos-durability transient_local
+ros2 topic echo /wordle_bot/mission_state --qos-durability transient_local
 ```
 
 **Monitor non-latched topics (live):**
 ```bash
-ros2 topic echo /worble_bot/stop_mission
+ros2 topic echo /wordle_bot/stop_mission
 ros2 topic echo /perception/human_detected
 ```
 

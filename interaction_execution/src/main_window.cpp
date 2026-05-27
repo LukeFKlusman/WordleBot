@@ -67,6 +67,7 @@ constexpr const char * kResumeMissionTopic = "/wordle_bot/resume_mission";
 constexpr const char * kStopMissionTopic = "/wordle_bot/stop_mission";
 constexpr const char * kScanAndSweepTopic = "/wordle_bot/scan_and_sweep";
 constexpr const char * kAbortMissionTopic = "/wordle_bot/abort_mission";
+constexpr const char * kReturnHomeTopic = "/wordle_bot/return_home";
 constexpr const char * kHumanDetectedTopic = "/perception/human_detected";
 constexpr const char * kPerceptionStatusTopic = "/perception/status";
 constexpr const char * kPerceptionDetectionsTopic = "/perception/detections";
@@ -1535,6 +1536,7 @@ void MainWindow::setupSafetyControls()
   stop_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kStopMissionTopic, 10);
   scan_and_sweep_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kScanAndSweepTopic, 10);
   abort_mission_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kAbortMissionTopic, 10);
+  return_home_pub_ = node_->create_publisher<std_msgs::msg::Bool>(kReturnHomeTopic, 10);
   ui_->pushButton->setText(tr("START"));
   ui_->pushButton_2->setText(tr("SCAN GAME BOARD"));
   perception_state_sub_ = node_->create_subscription<std_msgs::msg::String>(
@@ -1758,7 +1760,7 @@ void MainWindow::setupSafetyControls()
       return;
     }
 
-    publishMissionCommand("HOME");
+    publishMissionSignal(return_home_pub_, kReturnHomeTopic);
     coordinator_mission_state_ = "HOMING";
     safety_mode_ = SafetyControlMode::Homing;
     appendDiagnosticsEvent(tr("Operator command: HOME"));
