@@ -159,10 +159,22 @@ class GamificationTrialNode(Node):
 
         # Refresh the live view of what perception sees right now.
         # This happens whether or not we have a guess yet — useful for the GUI.
+        
         self.available_letters = []
         self.block_positions   = {}
         for block in blocks:
-            letter = block.get('letter', '').upper()
+            # Grab the raw letter field first
+            raw_letter = block.get('letter')
+            
+            # Direct fix: Only process if it's a valid string, otherwise skip
+            if raw_letter is None:
+                continue
+                
+            letter = raw_letter.upper()
+            if letter and letter.isalpha():
+                self.available_letters.append(letter)
+        
+        
             if letter and letter.isalpha():
                 self.available_letters.append(letter)
                 # Latest detection wins for positional data.
