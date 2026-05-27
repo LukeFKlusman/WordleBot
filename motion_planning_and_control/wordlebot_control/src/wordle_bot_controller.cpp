@@ -2831,7 +2831,7 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
 
   geometry_msgs::msg::Pose approach_pose;
   approach_pose.position.x    = 0.15;
-  approach_pose.position.y    = 0.15;
+  approach_pose.position.y    = 0.075;
   approach_pose.position.z    = 0.15;
   approach_pose.orientation.x   = 1.0;
   approach_pose.orientation.y   = 0.0;
@@ -2840,8 +2840,8 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
 
   geometry_msgs::msg::Pose safe_pose;
   safe_pose.position.x    = 0.15;
-  safe_pose.position.y    = 0.15;
-  safe_pose.position.z    = 0.03;
+  safe_pose.position.y    = 0.075;
+  safe_pose.position.z    = 0.04;
   safe_pose.orientation.x   = 1.0;
   safe_pose.orientation.y   = 0.0;
   safe_pose.orientation.z   = 0.0;
