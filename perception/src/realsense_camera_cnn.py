@@ -821,6 +821,8 @@ def run_ros2():
             # Out of category — published when unknown object detected in workspace
             self.pub_out_of_category = self.create_publisher(
                 String, '/perception/out_of_category', 10)
+            
+            self.pub_annotated = self.create_publisher(Image, '/perception/image_annotated', 10) #for GUI annotated view
 
             # Track previous block count for scene change detection
             self._prev_block_count = 0
@@ -895,6 +897,9 @@ def run_ros2():
 
                 display = self.perception.process(color_bgr, depth_raw, None)
 
+                ann_msg = self.bridge.cv2_to_imgmsg(display, 'bgr8')
+                self.pub_annotated.publish(ann_msg)
+
                 # ── Publish at reduced rate (every 6th frame = ~5 Hz) ──
                 self.frame_count += 1
                 if self.frame_count % 6 == 0:
@@ -911,6 +916,8 @@ def run_ros2():
                     det_msg      = String()
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
+
+                    
 
                     # ── Scene change detection ─────────────────────────
                     current_block_count = len(self.perception.last_detections)
