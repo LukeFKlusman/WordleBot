@@ -61,7 +61,7 @@ wordle_bot_control_node:
       mgi_planning_min_successes: 1
       mgi_place_open_recovery_yaw_delta: 1.5708
       gripper_open_operational_width: 0.075    # metres — operational open position for pick/place
-      gripper_closed_operational_width: 0.0495 # metres — operational closed position for pick/place
+      gripper_closed_operational_width: 0.0475 # metres — operational closed position for pick/place
 
     # Velocity scaling profiles and proximity-based selection thresholds.
     # All values are scaling factors in [0.0, 1.0] applied to each joint's
@@ -76,14 +76,14 @@ wordle_bot_control_node:
     # Between the two thresholds the scaling is linearly interpolated.
     velocity_scaling:
       scan:
-        velocity: 0.05
-        acceleration: 0.01
+        velocity: 0.0125
+        acceleration: 0.005
       precise:
-        velocity: 0.30
-        acceleration: 0.15
+        velocity: 0.075
+        acceleration: 0.075
       transit:
-        velocity: 0.75
-        acceleration: 0.35
+        velocity: 0.1875
+        acceleration: 0.175
       proximity:
         near_threshold: 0.10
         far_threshold: 0.50
