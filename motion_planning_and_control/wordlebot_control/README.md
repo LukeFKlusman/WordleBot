@@ -589,25 +589,25 @@ ros2 topic pub --once /perception/gameboard_state hl_control/msg/GameboardState 
   "{letters: [
     {letter: 'C', object_id: 'C_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.448, y: 0.072, z: 0.025},
-                   orientation: {w: 1.0}}}},
+            pose: {position: {x: -0.30, y: 0.15, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.247, w: 0.969}}}},
     {letter: 'R', object_id: 'R_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.377, y: 0.154, z: 0.025},
-                   orientation: {w: 1.0}}}},
+            pose: {position: {x: 0.30, y: 0.30, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.565, w: 0.825}}}},
     {letter: 'A', object_id: 'A_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: -0.302, y: 0.302, z: 0.025},
-                   orientation: {w: 1.0}}}},
+            pose: {position: {x: -0.075, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.389, w: 0.921}}}},
     {letter: 'N', object_id: 'N_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: 0.373, y: 0.220, z: 0.025},
-                   orientation: {w: 1.0}}}},
+            pose: {position: {x: -0.30, y: 0.375, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: 0.867, w: 0.498}}}},
     {letter: 'E', object_id: 'E_object_1',
      pose: {header: {frame_id: 'world'},
-            pose: {position: {x: 0.157, y: 0.304, z: 0.025},
-                   orientation: {w: 1.0}}}}
-  ]}"
+            pose: {position: {x: 0.30, y: 0.150, z: 0.040},
+                   orientation: {x: 0.0, y: 0.0, z: -0.682, w: 0.732}}}}
+  ]}
 ```
 
 Recommended isolated publisher:
@@ -799,3 +799,17 @@ Or pass a model path without `.zip`:
 ros2 launch hl_control hl_control.launch.py model_path:=/absolute/path/to/wordle_ppo_latest
 ```
 
+# Full Stack Wordle Bot Execution 
+
+```bash
+colcon build --packages-select wordlebot_control hl_control interaction_execution
+source ~/wordlebot_ws/install/setup.bash 
+
+ros2 launch wordlebot_control wordlebot_bringup.launch.py
+
+ros2 launch interaction_execution gui.launch.py
+
+ros2 launch wordlebot_control wordlecontrolfullstack.launch.py
+
+python3 ~/git/RS2/gamification/gamification_node.py 
+```

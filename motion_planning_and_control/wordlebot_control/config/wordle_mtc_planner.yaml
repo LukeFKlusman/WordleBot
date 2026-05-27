@@ -4,7 +4,7 @@ wordle_bot_control_node:
     # It keeps MTC staging, but generates multiple OMPL trajectories and selects
     # the lowest joint-motion candidate.
     wordle_mtc_planner:
-      candidate_plans: 5
+      candidate_plans: 10
       num_planning_attempts: 1
       goal_joint_tolerance: 0.0001
       max_velocity_scaling_factor: 0.25

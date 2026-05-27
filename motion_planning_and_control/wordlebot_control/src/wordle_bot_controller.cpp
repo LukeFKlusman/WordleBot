@@ -2146,9 +2146,9 @@ bool WordleBotController::moveToGoal(const geometry_msgs::msg::Pose & goal_pose)
   move_group_.setJointValueTarget(best_q);
 
   const double planning_timeout =
-    getDoubleParam(node_, "pick_place.mgi_planning_timeout", 10.0);
+    getDoubleParam(node_, "pick_place.mgi_planning_timeout", 30.0);
   const int min_successes =
-    std::max(1, getIntParam(node_, "pick_place.mgi_planning_min_successes", 1));
+    std::max(1, getIntParam(node_, "pick_place.mgi_planning_min_successes", 5));
   const auto plans = generateCandidatePlans(planning_timeout, min_successes);
   if (plans.empty()) {
     RCLCPP_ERROR(LOGGER, "moveToGoal: no planning attempts succeeded within %.2f s.",
@@ -2831,7 +2831,7 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
 
   geometry_msgs::msg::Pose approach_pose;
   approach_pose.position.x    = 0.15;
-  approach_pose.position.y    = 0.15;
+  approach_pose.position.y    = 0.075;
   approach_pose.position.z    = 0.15;
   approach_pose.orientation.x   = 1.0;
   approach_pose.orientation.y   = 0.0;
@@ -2840,8 +2840,8 @@ bool WordleBotController::recoverObject(const std::string & held_object_id)
 
   geometry_msgs::msg::Pose safe_pose;
   safe_pose.position.x    = 0.15;
-  safe_pose.position.y    = 0.15;
-  safe_pose.position.z    = 0.03;
+  safe_pose.position.y    = 0.075;
+  safe_pose.position.z    = 0.04;
   safe_pose.orientation.x   = 1.0;
   safe_pose.orientation.y   = 0.0;
   safe_pose.orientation.z   = 0.0;
