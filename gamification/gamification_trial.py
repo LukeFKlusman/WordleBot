@@ -111,7 +111,7 @@ class GamificationTrialNode(Node):
         self.create_subscription(String, '/gamification/feedback',     self.feedback_callback,       10)
         self.create_subscription(String, '/gamification/mode',         self.mode_callback,           10)
         self.create_subscription(String, '/gamification/secret_word',  self.secret_callback,         10)
-        self.create_subscription(String, '/gamification/player_guess', self.player_guess_callback,   10)
+        self.create_subscription(String, 'hl_control/word_request', self.player_guess_callback,   10)
 
         # ── Publishers ────────────────────────────────────────────
         self.pub_guess        = self.create_publisher(String, '/gamification/guess',         10)
