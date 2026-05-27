@@ -741,6 +741,10 @@ def run_ros2():
     from sensor_msgs.msg import Image
     from std_msgs.msg import Bool, String
     from geometry_msgs.msg import PoseStamped
+    import sys
+    import numpy as np
+    if not hasattr(np, "_ARRAY_API"): 
+        sys.modules['numpy']._ARRAY_API = None
     from cv_bridge import CvBridge
     import tf2_ros
 
