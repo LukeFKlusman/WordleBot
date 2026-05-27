@@ -186,9 +186,9 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
   if (!node_->has_parameter("pick_place.grasp_z_offset"))
     node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
   if (!node_->has_parameter("pick_place.mgi_planning_timeout"))
-    node_->declare_parameter<double>("pick_place.mgi_planning_timeout", 10.0);
+    node_->declare_parameter<double>("pick_place.mgi_planning_timeout", 30.0);
   if (!node_->has_parameter("pick_place.mgi_planning_min_successes"))
-    node_->declare_parameter<int>("pick_place.mgi_planning_min_successes", 1);
+    node_->declare_parameter<int>("pick_place.mgi_planning_min_successes", 5);
   if (!node_->has_parameter("pick_place.mgi_place_open_recovery_yaw_delta"))
     node_->declare_parameter<double>("pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 

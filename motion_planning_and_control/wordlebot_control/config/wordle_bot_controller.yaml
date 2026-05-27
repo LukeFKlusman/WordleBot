@@ -57,8 +57,8 @@ wordle_bot_control_node:
       mgi_pre_place_distance: 0.01
       mgi_retreat_distance: 0.05
       mgi_cartesian_min_fraction: 0.95
-      mgi_planning_timeout: 10.0
-      mgi_planning_min_successes: 1
+      mgi_planning_timeout: 30.0
+      mgi_planning_min_successes: 5
       mgi_place_open_recovery_yaw_delta: 1.5708
       gripper_open_operational_width: 0.075    # metres — operational open position for pick/place
       gripper_closed_operational_width: 0.0475 # metres — operational closed position for pick/place
