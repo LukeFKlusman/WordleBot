@@ -86,6 +86,9 @@ CARD_BRIGHTNESS     = 180    # brightness threshold for white card detection (0-
 CARD_MARGIN         = 0.10   # fraction to crop from each edge of card bounding box
 
 ENABLE_HUMAN_DETECTION = False
+import os
+if os.environ.get("SS1_HUMAN_DETECTION", "").lower() == "true":
+    ENABLE_HUMAN_DETECTION = True
 
 # ── Out-of-category and scene reprocessing ────────────────
 # OUT_OF_CATEGORY: flag blocks that pass depth/area filters
@@ -132,9 +135,9 @@ CAMERA_FRAME = "camera_color_optical_frame"
 #
 # On the UR3e with OnRobot RG2, gripper_tcp z-axis points downward (toward the table).
 # Current mount: camera is 5 cm back (toward wrist) and 5 cm up from gripper_tcp.
-CAM_MOUNT_X =  0.00   # metres — left/right from gripper_tcp centreline
-CAM_MOUNT_Y =  0.05   # metres — upward from gripper_tcp (perpendicular to gripper z)
-CAM_MOUNT_Z = -0.05   # metres — back toward wrist along gripper_tcp z-axis
+CAM_MOUNT_X =  0.0325   # metres — left/right from gripper_tcp centreline
+CAM_MOUNT_Y =  0.060   # metres — upward from gripper_tcp (perpendicular to gripper z)
+CAM_MOUNT_Z = -0.095  # metres — back toward wrist along gripper_tcp z-axis
 
 # Rotation: RPY from gripper_tcp frame into camera_color_optical_frame.
 # RealSense optical convention: x=right, y=down, z=forward (into scene).
@@ -595,7 +598,9 @@ class Perception:
                 low = f"?{depth_str} ({conf:.0f}%) r{theta:.0f}deg {'[dot]' if dot_found else '[rect]'}"
                 cv2.putText(frame, low, (x+4, y+h//2+8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
-
+            
+            
+            
 
         # ── HUD ───────────────────────────────────────────
         status_color = (0,255,100) if self.at_position else (0,100,255)
@@ -808,12 +813,6 @@ def run_ros2():
             self.pub_detections = self.create_publisher(
                 String, '/perception/detections', 10)
 
-            # CHECK WITH LEAD BEFORE IMPLEMENTING
-            # Annotated image — Image, every frame, for Elijah's GUI camera view (CV mode)
-            # Shows pose landmarks, bounding boxes, and HUD text
-            self.pub_annotated = self.create_publisher(
-                Image, '/perception/image_annotated', 10)
-
             # Scene change — published when block count changes or human detected
             # Elijah's behaviour tree subscribes to trigger re-scan
             self.pub_scene_changed = self.create_publisher(
@@ -822,6 +821,8 @@ def run_ros2():
             # Out of category — published when unknown object detected in workspace
             self.pub_out_of_category = self.create_publisher(
                 String, '/perception/out_of_category', 10)
+            
+            self.pub_annotated = self.create_publisher(Image, '/perception/image_annotated', 10) #for GUI annotated view
 
             # Track previous block count for scene change detection
             self._prev_block_count = 0
@@ -849,9 +850,6 @@ def run_ros2():
                 '\n  Publishing:  /perception/human_detected  (Bool, every frame)'
                 '\n               /perception/status          (String, every frame)'
                 '\n               /perception/detections      (String JSON, when scanning)'
-                '\n               /perception/image_annotated (Image, for GUI CV mode)'
-                '\n               /perception/scene_changed   (String JSON, on count change)'
-                '\n               /perception/out_of_category (String JSON, unknown objects)'
                 '\n               /perception/gameboard_state (GameboardState, latched, on scan complete)'
                 '\n  SPACE=manual toggle  Q=quit'
             )
@@ -899,6 +897,9 @@ def run_ros2():
 
                 display = self.perception.process(color_bgr, depth_raw, None)
 
+                ann_msg = self.bridge.cv2_to_imgmsg(display, 'bgr8')
+                self.pub_annotated.publish(ann_msg)
+
                 # ── Publish at reduced rate (every 6th frame = ~5 Hz) ──
                 self.frame_count += 1
                 if self.frame_count % 6 == 0:
@@ -915,6 +916,8 @@ def run_ros2():
                     det_msg      = String()
                     det_msg.data = self.perception.get_detections_json()
                     self.pub_detections.publish(det_msg)
+
+                    
 
                     # ── Scene change detection ─────────────────────────
                     current_block_count = len(self.perception.last_detections)
@@ -968,17 +971,6 @@ def run_ros2():
                             if lines:
                                 self.get_logger().info(
                                     '[Detections]\n' + '\n'.join(lines))
-
-                # CHECK WITH LEAD BEFORE IMPLEMENTING
-                # ── Publish annotated image (every frame) ──
-                # For Elijah's GUI camera view when in "Computer Vision" mode
-                try:
-                    ann_msg = self.bridge.cv2_to_imgmsg(display, encoding='bgr8')
-                    ann_msg.header = color_msg.header
-                    self.pub_annotated.publish(ann_msg)
-                except Exception as e:
-                    self.get_logger().warn(f'annotated publish failed: {e}',
-                                           throttle_duration_sec=5.0)
 
                 # ── Display ────────────────────────────────────────────
                 display = cv2.resize(display, (960, 540))

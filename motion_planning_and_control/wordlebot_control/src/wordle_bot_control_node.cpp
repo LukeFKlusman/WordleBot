@@ -10,79 +10,33 @@
 
 static const rclcpp::Logger LOGGER = rclcpp::get_logger("WordleBotControlNode");
 
-namespace
-{
-bool normalizePoseOrientation(
-  geometry_msgs::msg::Pose & pose,
-  const std::string & label)
-{
-  const double norm = std::sqrt(
-    pose.orientation.x * pose.orientation.x +
-    pose.orientation.y * pose.orientation.y +
-    pose.orientation.z * pose.orientation.z +
-    pose.orientation.w * pose.orientation.w);
-
-  if (norm < 1e-9) {
-    pose.orientation.x = 0.0;
-    pose.orientation.y = 0.0;
-    pose.orientation.z = 0.0;
-    pose.orientation.w = 1.0;
-    RCLCPP_WARN(LOGGER,
-      "%s orientation quaternion was invalid/near-zero; using identity orientation.",
-      label.c_str());
-    return false;
-  }
-
-  pose.orientation.x /= norm;
-  pose.orientation.y /= norm;
-  pose.orientation.z /= norm;
-  pose.orientation.w /= norm;
-  return true;
-}
-
-double yawFromPose(const geometry_msgs::msg::Pose & pose)
-{
-  tf2::Quaternion q(
-    pose.orientation.x,
-    pose.orientation.y,
-    pose.orientation.z,
-    pose.orientation.w);
-  q.normalize();
-  double roll = 0.0;
-  double pitch = 0.0;
-  double yaw = 0.0;
-  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-  return yaw;
-}
-}  // namespace
-
 WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
 : node_(std::make_shared<rclcpp::Node>("wordle_bot_control_node", options)),
   controller_(std::make_shared<WordleBotController>(node_))
 {
-  // ---------------------------------------------------------------------------
-  // ROS2 topic subscriptions and publications
-  // ---------------------------------------------------------------------------
-  // Publishers
-  // - /wordle_bot/motion_complete (std_msgs/Bool): Published after a successful mission execution.
-  // - /wordle_bot/goal_reached (std_msgs/Bool): Published after reaching each individual goal in a mission.
-  // - /wordle_bot/mission_complete (std_msgs/Bool): Published after completing all goals in a mission.
-  // - /wordle_bot/robot_state (std_msgs/String): Published with "IDLE" or "RUNNING".
-
-  // Subscriptions
-  // - /wordle_bot/set_mission (geometry_msgs/PoseArray): Queue N goal poses; execution starts on /start_mission.
-  // - /wordle_bot/start_mission (std_msgs/Bool): Plan and execute the queued mission (goal poses or pick-and-place).
-  // - /wordle_bot/stop_mission (std_msgs/Bool): Stop the current mission safely.
-  // - /wordle_bot/resume_mission (std_msgs/Bool): Resume a stopped mission (not yet implemented).
-  // - /wordle_bot/abort_mission (std_msgs/Bool): Abort the current mission (not yet implemented).
-  // - /wordle_bot/add_collision_object (moveit_msgs/CollisionObject): Add or remove a collision object.
-  // - /perception/letter_objects (wordlebot_control/PickPlaceTask): Trigger pick-and-place mode.
-  // - /wordle_bot/clear_letter_objects (std_msgs/Bool): Remove all board collision objects and reset queue.
-  // - /wordle_bot/clear_board_objects (std_msgs/Bool): Alias for clearing letters and distractors.
-  // - /wordle_bot/open_gripper (std_msgs/Bool): Open the gripper (IDLE only).
-  // - /wordle_bot/close_gripper (std_msgs/Bool): Close the gripper (IDLE only).
-  // - /wordle_bot/return_home (std_msgs/Bool): Return arm to home position (IDLE only).
-  // ---------------------------------------------------------------------------
+  // =========
+  // ROS INTERFACE SETUP
+  // __________
+  // Creates all publishers and subscriptions used by the mission interface.
+  // __________
+  // motion_complete_pub_ - Publishes after successful mission execution.
+  // goal_reached_pub_ - Publishes after each individual goal or pick task.
+  // mission_complete_pub_ - Publishes after completing all queued mission work.
+  // robot_state_pub_ - Publishes IDLE, RUNNING, or STOPPED.
+  // set_mission_sub_ - Queues goal poses.
+  // start_mission_sub_ - Arms queued mission execution.
+  // stop_mission_sub_ - Stops the current mission safely.
+  // resume_mission_sub_ - Resumes a stopped mission.
+  // abort_mission_sub_ - Aborts a stopped mission.
+  // add_collision_object_sub_ - Adds, removes, or moves a collision object.
+  // letter_object_sub_ - Queues a perception pick-and-place task.
+  // clear_letter_objects_sub_ - Clears tracked letter objects and tasks.
+  // clear_board_objects_sub_ - Alias for clearing board objects.
+  // open_gripper_sub_ - Opens the gripper while idle.
+  // close_gripper_sub_ - Closes the gripper while idle.
+  // return_home_sub_ - Returns the arm home while idle.
+  // scan_and_sweep_sub_ - Starts the scan-and-sweep sequence while idle.
+  // =========
   motion_complete_pub_ = node_->create_publisher<std_msgs::msg::Bool>(
     "/wordle_bot/motion_complete", 10);
 
@@ -231,6 +185,10 @@ WordleBotControlNode::WordleBotControlNode(const rclcpp::NodeOptions & options)
     node_->declare_parameter<double>("pick_place.retreat_max_distance", 0.15);
   if (!node_->has_parameter("pick_place.grasp_z_offset"))
     node_->declare_parameter<double>("pick_place.grasp_z_offset", 0.01);
+  if (!node_->has_parameter("pick_place.mgi_planning_timeout"))
+    node_->declare_parameter<double>("pick_place.mgi_planning_timeout", 10.0);
+  if (!node_->has_parameter("pick_place.mgi_planning_min_successes"))
+    node_->declare_parameter<int>("pick_place.mgi_planning_min_successes", 1);
   if (!node_->has_parameter("pick_place.mgi_place_open_recovery_yaw_delta"))
     node_->declare_parameter<double>("pick_place.mgi_place_open_recovery_yaw_delta", M_PI / 2.0);
 
@@ -274,17 +232,17 @@ WordleBotControlNode::~WordleBotControlNode()
   }
 }
 
-// ---------------------------------------------------------------------------
-// Mission Control Callbacks
-// Arms, starts, stops, resumes, and aborts missions in response to ROS2
-// topic messages on the /wordle_bot/ namespace.
-// ---------------------------------------------------------------------------
-// setMissionCallback    — queue N goal poses; arms the mission for /start_mission
-// startMissionCallback  — plan and execute the queued mission
-// stopMissionCallback   — safely halt current motion
-// resumeMissionCallback — resume a stopped mission (not yet implemented)
-// abortMissionCallback  — abort the current mission (not yet implemented)
-// ---------------------------------------------------------------------------
+// =========
+// MISSION COMMAND CALLBACKS
+// __________
+// Handles operator mission commands from /wordle_bot topics and wakes the mission worker.
+// __________
+// setMissionCallback - Queues goal poses and waits for a start command.
+// startMissionCallback - Arms queued goal or pick-and-place work for execution.
+// stopMissionCallback - Requests a safe stop of the active mission.
+// resumeMissionCallback - Requests resume from STOPPED state.
+// abortMissionCallback - Requests abort from STOPPED state.
+// =========
 
 void WordleBotControlNode::setMissionCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
 {
@@ -376,18 +334,15 @@ void WordleBotControlNode::abortMissionCallback(const std_msgs::msg::Bool::Share
   RCLCPP_INFO(LOGGER, "abortMissionCallback: abort signal sent.");
 }
 
-// ---------------------------------------------------------------------------
-// Object & Scene Management Callbacks
-// Manage collision objects in the MoveIt planning scene, including generic
-// environment objects and the letter objects used in the pick-and-place workflow.
-// ---------------------------------------------------------------------------
-// collisionObjectCallback    — forward an ADD / REMOVE / MOVE operation directly
-//                              to the controller's planning scene interface
-// letterObjectCallback       — receive a pick/place task, register the letter
-//                              collision object, and queue the task
-// clearLetterObjectsCallback — remove all tracked board collision objects from
-//                              the planning scene and reset the task queue
-// ---------------------------------------------------------------------------
+// =========
+// BOARD AND SCENE CALLBACKS
+// __________
+// Updates collision objects and pick-and-place queues from perception or scene-management topics.
+// __________
+// collisionObjectCallback - Applies and tracks external collision object updates.
+// letterObjectCallback - Normalizes, registers, and queues a letter pick-and-place task.
+// clearLetterObjectsCallback - Clears tracked board objects and resets pick-and-place state.
+// =========
 
 void WordleBotControlNode::collisionObjectCallback(const moveit_msgs::msg::CollisionObject::SharedPtr msg)
 {
@@ -512,15 +467,16 @@ void WordleBotControlNode::clearLetterObjectsCallback(const std_msgs::msg::Bool:
     ids_to_remove.size());
 }
 
-// ---------------------------------------------------------------------------
-// Arm Utility Callbacks
-// Standalone arm motions available while no mission is running (IDLE state).
-// ---------------------------------------------------------------------------
-// returnHomeCallback   — return the arm to its SRDF "home" named state
-// openGripperCallback  — fully open the gripper to the SRDF "open" named state
-// closeGripperCallback — fully close the gripper to the SRDF "closed" named state
-// scanAndSweepCallback — execute the four-pose camera scan sweep sequence
-// ---------------------------------------------------------------------------
+// =========
+// MANUAL MOTION CALLBACKS
+// __________
+// Runs standalone arm, gripper, and scan actions while no mission is active.
+// __________
+// returnHomeCallback - Returns the arm to configured working joints.
+// openGripperCallback - Opens the gripper fully.
+// closeGripperCallback - Closes the gripper fully.
+// scanAndSweepCallback - Starts scan-and-sweep in a detached worker thread.
+// =========
 
 void WordleBotControlNode::returnHomeCallback(const std_msgs::msg::Bool::SharedPtr msg)
 {
@@ -600,16 +556,13 @@ void WordleBotControlNode::scanAndSweepCallback(const std_msgs::msg::Bool::Share
   }).detach();
 }
 
-// ---------------------------------------------------------------------------
-// Mission Execution Loop
-// Background thread that wakes on mission_armed_, dispatches to either a
-// goal-pose mission or a pick-and-place batch, then publishes completion
-// signals. Uses a plan-then-execute strategy so all tasks are planned before
-// any motion begins, enabling planning scene chaining across tasks.
-// ---------------------------------------------------------------------------
-// missionLoop — blocks on condition variable; on wake dispatches to
-//               goal-pose execution or pick-and-place batch execution
-// ---------------------------------------------------------------------------
+// =========
+// MISSION WORKER
+// __________
+// Background thread that executes queued goal or pick-and-place missions and handles STOPPED state.
+// __________
+// missionLoop - Waits for armed missions, dispatches execution, publishes status, and handles stop/resume/abort.
+// =========
 
 void WordleBotControlNode::missionLoop()
 {
@@ -933,7 +886,17 @@ void WordleBotControlNode::missionLoop()
           RCLCPP_INFO(LOGGER, "Goal mission (MGI): executing goal %zu of %zu.",
             i + 1, current_mission.size());
 
-          if (!controller_->moveToGoal(current_mission[i]) || stop_requested_.load()) {
+          bool goal_ok = false;
+          if (isLegacyReturnHomePose(current_mission[i])) {
+            RCLCPP_INFO(LOGGER,
+              "Goal mission (MGI): goal %zu matches legacy return-home pose; moving to working_joints.",
+              i + 1);
+            goal_ok = controller_->returnToHome();
+          } else {
+            goal_ok = controller_->moveToGoal(current_mission[i]);
+          }
+
+          if (!goal_ok || stop_requested_.load()) {
             RCLCPP_ERROR(LOGGER, "Goal mission (MGI): FAILED at goal %zu.", i + 1);
             goal_resume_from = i;
             all_ok = false;
@@ -1113,16 +1076,15 @@ void WordleBotControlNode::missionLoop()
   RCLCPP_INFO(LOGGER, "Mission thread exiting.");
 }
 
-// ---------------------------------------------------------------------------
-// Public Interface
-// External entry points used by the ROS2 component wrapper and the
-// executable main() to query node internals and drive the node.
-// ---------------------------------------------------------------------------
-// getNodeBaseInterface — return the underlying rclcpp::Node base interface
-//                        required by the component manager
-// setupScene           — clear and rebuild the static collision scene
-// run                  — spin the node until ROS shutdown
-// ---------------------------------------------------------------------------
+// =========
+// NODE LIFECYCLE
+// __________
+// External entry points used by the component wrapper and executable main().
+// __________
+// getNodeBaseInterface - Returns the underlying rclcpp node base interface.
+// setupScene - Clears and rebuilds the static collision scene.
+// run - Keeps the node process alive until ROS shutdown.
+// =========
 
 rclcpp::node_interfaces::NodeBaseInterface::SharedPtr
 WordleBotControlNode::getNodeBaseInterface()
@@ -1147,4 +1109,97 @@ void WordleBotControlNode::run()
     mission_thread_.join();
   }
   RCLCPP_INFO(LOGGER, "run(): mission thread joined.");
+}
+
+// =========
+// POSE AND LEGACY COMMAND HELPERS
+// __________
+// Static helpers for pose normalization, yaw logging, and compatibility with older return-home commands.
+// __________
+// normalizePoseOrientation - Normalizes a pose quaternion, using identity for invalid input.
+// yawFromPose - Computes yaw from a pose quaternion.
+// nearlyEqual - Compares two doubles with a tolerance.
+// isLegacyReturnHomePose - Detects the old pose command that maps to returnToHome.
+// =========
+
+bool WordleBotControlNode::normalizePoseOrientation(
+  geometry_msgs::msg::Pose & pose,
+  const std::string & label)
+{
+  const double norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+
+  if (norm < 1e-9) {
+    pose.orientation.x = 0.0;
+    pose.orientation.y = 0.0;
+    pose.orientation.z = 0.0;
+    pose.orientation.w = 1.0;
+    RCLCPP_WARN(LOGGER,
+      "%s orientation quaternion was invalid/near-zero; using identity orientation.",
+      label.c_str());
+    return false;
+  }
+
+  pose.orientation.x /= norm;
+  pose.orientation.y /= norm;
+  pose.orientation.z /= norm;
+  pose.orientation.w /= norm;
+  return true;
+}
+
+double WordleBotControlNode::yawFromPose(const geometry_msgs::msg::Pose & pose)
+{
+  tf2::Quaternion q(
+    pose.orientation.x,
+    pose.orientation.y,
+    pose.orientation.z,
+    pose.orientation.w);
+  q.normalize();
+  double roll = 0.0;
+  double pitch = 0.0;
+  double yaw = 0.0;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+  return yaw;
+}
+
+bool WordleBotControlNode::nearlyEqual(double lhs, double rhs, double tolerance)
+{
+  return std::abs(lhs - rhs) <= tolerance;
+}
+
+bool WordleBotControlNode::isLegacyReturnHomePose(const geometry_msgs::msg::Pose & pose)
+{
+  constexpr double kPositionTolerance = 1e-4;
+  constexpr double kOrientationTolerance = 1e-3;
+
+  const bool position_matches =
+    nearlyEqual(pose.position.x, 0.300, kPositionTolerance) &&
+    nearlyEqual(pose.position.y, 0.000, kPositionTolerance) &&
+    nearlyEqual(pose.position.z, 0.300, kPositionTolerance);
+
+  if (!position_matches) {
+    return false;
+  }
+
+  const double q_norm = std::sqrt(
+    pose.orientation.x * pose.orientation.x +
+    pose.orientation.y * pose.orientation.y +
+    pose.orientation.z * pose.orientation.z +
+    pose.orientation.w * pose.orientation.w);
+  if (q_norm < 1e-9) {
+    return false;
+  }
+
+  const double qx = pose.orientation.x / q_norm;
+  const double qy = pose.orientation.y / q_norm;
+  const double qz = pose.orientation.z / q_norm;
+  const double qw = pose.orientation.w / q_norm;
+
+  return nearlyEqual(std::abs(qx), 1.0, kOrientationTolerance) &&
+         nearlyEqual(qy, 0.0, kOrientationTolerance) &&
+         nearlyEqual(qz, 0.0, kOrientationTolerance) &&
+         nearlyEqual(qw, 0.0, kOrientationTolerance);
 }
