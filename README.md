@@ -268,6 +268,16 @@ python3 perception/src/realsense_camera_cnn.py
 
 ## Training the CNN
 
+### Step 0 — Print and prepare letter blocks
+
+Print `perception/assets/block_labels.docx` and cut each label to **5 cm × 5 cm**.
+Glue one label to the face of each wooden or 3D printed block (blocks should also be 5 cm × 5 cm).
+Ensure the corner dot is visible in the top-left of each face — this is used for
+orientation detection. Use a dark background (foam mat, dark desk) when scanning
+so the white labels stand out clearly for the brightness threshold detector.
+
+---
+
 ### Step 1 — Collect training data
 
 ```bash
